@@ -1,0 +1,18 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(cargo *)",
+      "Bash(nix *)",
+      "Bash(git status*)",
+      "Bash(git log*)",
+      "Bash(git diff*)",
+      "Bash(git branch*)",
+      "Bash(rg *)",
+      "Bash(fd *)",
+      "Bash(find *)",
+      "Bash(ls *)",
+      "Bash(tree *)",
+      "Bash(cat *)"
+    ]
+  }
+}

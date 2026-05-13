@@ -1,0 +1,45 @@
+[workspace]
+members = [
+    "crates/cli",
+    "crates/core",
+    "crates/profile",
+    "crates/auth",
+    "crates/openvpn",
+    "crates/tunnel-darwin",
+    "crates/tunnel-linux",
+    "crates/tunnel-windows",
+]
+resolver = "3"
+
+[workspace.package]
+edition = "2024"
+rust-version = "1.85.0"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/jlevere/azvpn"
+
+[workspace.dependencies]
+tokio = { version = "1", features = ["full"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+thiserror = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+clap = { version = "4", features = ["derive"] }
+quick-xml = { version = "0.37", features = ["serialize"] }
+
+azvpn-core = { path = "crates/core" }
+azvpn-profile = { path = "crates/profile" }
+azvpn-auth = { path = "crates/auth" }
+azvpn-openvpn = { path = "crates/openvpn" }
+
+[workspace.lints.rust]
+unsafe_code = "warn"
+unused_qualifications = "warn"
+
+[workspace.lints.clippy]
+all = { level = "warn", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+cast_possible_truncation = "allow"
+module_name_repetitions = "allow"
+missing_errors_doc = "allow"
+must_use_candidate = "allow"
