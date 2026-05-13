@@ -1,0 +1,16 @@
+[package]
+name = "azvpn-openvpn"
+version = "0.1.0"
+description = "OpenVPN management interface client"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+thiserror = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+
+[lints]
+workspace = true
