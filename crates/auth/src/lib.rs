@@ -6,15 +6,29 @@ pub enum Error {
     TokenExpired,
     #[error("no cached token available")]
     NoCachedToken,
+    #[error("interactive login required")]
+    InteractiveLoginRequired,
     #[error("{0}")]
     Other(String),
 }
 
 #[derive(Debug, Clone)]
 pub struct AadConfig {
-    pub tenant_id: String,
-    pub audience_id: String,
-    pub issuer_id: Option<String>,
+    pub tenant: String,
+    pub audience: String,
+    pub issuer: String,
+    pub application_id: Option<String>,
+}
+
+impl From<&azvpn_profile::AadConfig> for AadConfig {
+    fn from(profile: &azvpn_profile::AadConfig) -> Self {
+        Self {
+            tenant: profile.tenant.clone(),
+            audience: profile.audience.clone(),
+            issuer: profile.issuer.clone(),
+            application_id: profile.applicationid.clone(),
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
