@@ -88,6 +88,10 @@ pub async fn run<U: DeviceCodeUi>(
 
     let mut push_opts = PushOptions::default();
     let mut dns_manager = dns::new_manager();
+    // openvpn can re-emit `Connected` after every hold-release cycle.
+    // Guard the DNS apply so reconnects don't keep rewriting the same
+    // SCDynamicStore key and session.json record on every emission.
+    let mut last_dns_inputs: Option<(Vec<String>, Vec<std::net::IpAddr>)> = None;
 
     loop {
         tokio::select! {
@@ -110,7 +114,13 @@ pub async fn run<U: DeviceCodeUi>(
                         }
                         if *state == VpnState::Connected {
                             info!(server = %server.fqdn, "connected");
-                            apply_dns(dns_manager.as_mut(), &mut session, &profile, &push_opts);
+                            apply_dns(
+                                dns_manager.as_mut(),
+                                &mut session,
+                                &profile,
+                                &push_opts,
+                                &mut last_dns_inputs,
+                            );
                         }
                         if *state == VpnState::Exiting {
                             info!("openvpn exiting");
@@ -152,6 +162,11 @@ pub async fn run<U: DeviceCodeUi>(
 
     let code = process.wait().await?;
     info!(?code, "openvpn process exited");
+
+    // Wake up any other tasks holding a clone of the token (the signal
+    // listener, primarily) so they exit instead of parking on a signal
+    // that may never arrive.
+    cancel.cancel();
 
     Ok(())
 }
@@ -207,6 +222,7 @@ fn apply_dns(
     session: &mut RunningSession,
     profile: &VpnProfile,
     push_opts: &PushOptions,
+    last: &mut Option<(Vec<String>, Vec<std::net::IpAddr>)>,
 ) {
     let (suffixes, dns_servers) = collect_dns_inputs(profile, push_opts);
     if suffixes.is_empty() {
@@ -218,12 +234,19 @@ fn apply_dns(
         return;
     }
 
+    let owned_suffixes: Vec<String> = suffixes.iter().map(|s| (*s).to_owned()).collect();
+    if last.as_ref().is_some_and(|(s, d)| s == &owned_suffixes && d == &dns_servers) {
+        tracing::debug!("DNS inputs unchanged, skipping reapply");
+        return;
+    }
+
     info!(?suffixes, ?dns_servers, "applying DNS resolvers");
     match manager.apply(&suffixes, &dns_servers) {
         Ok(()) => {
             if let Err(e) = session.record_dns(&suffixes, &dns_servers) {
                 tracing::warn!(error = %e, "failed to record DNS in session file");
             }
+            *last = Some((owned_suffixes, dns_servers));
         }
         Err(e) => tracing::error!(error = %e, "failed to apply DNS resolvers"),
     }

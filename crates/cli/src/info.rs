@@ -49,18 +49,7 @@ fn print(r: &InfoReport) {
 
     println!();
     println!("=== DNS (recorded by connect) ===");
-    match &r.status {
-        Some(s) if !s.session.dns_suffixes.is_empty() || !s.session.dns_servers.is_empty() => {
-            for server in &s.session.dns_servers {
-                println!("server:   {server}");
-            }
-            for suffix in &s.session.dns_suffixes {
-                println!("suffix:   {suffix}");
-            }
-        }
-        Some(_) => println!("(no DNS installed)"),
-        None => println!("(no session)"),
-    }
+    print_dns(r.status.as_ref());
 
     println!();
     println!("=== routes via tunnel ===");
@@ -80,4 +69,21 @@ fn print_route(r: &TunnelRoute) {
         .gateway
         .map_or_else(|| "—".to_owned(), |g| g.to_string());
     println!("{dest:<24} {:<24} {:>8}", gw, r.interface);
+}
+
+fn print_dns(status: Option<&azvpn_core::commands::status::StatusReport>) {
+    let Some(s) = status else {
+        println!("(no session)");
+        return;
+    };
+    if s.session.dns_suffixes.is_empty() && s.session.dns_servers.is_empty() {
+        println!("(no DNS installed)");
+        return;
+    }
+    for server in &s.session.dns_servers {
+        println!("server:   {server}");
+    }
+    for suffix in &s.session.dns_suffixes {
+        println!("suffix:   {suffix}");
+    }
 }

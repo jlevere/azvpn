@@ -37,20 +37,12 @@ pub enum Error {
     DnsResolver(#[from] hickory_resolver::error::ResolveError),
 
     // ---------- CLI-local failure modes ----------
-    /// No refresh token was persisted — old cache file or never connected.
-    #[error(
-        "no refresh token in cache — run `azvpn connect` once to refresh \
-         authentication"
-    )]
-    NoRefreshToken,
-
-    /// Cache file present but the access token is expired and no refresh
-    /// is available. Whoami uses this; the rest fall through to `NoRefreshToken`.
+    /// `whoami` got a cache miss — file absent or access token expired
+    /// with no refresh available.
     #[error("no cached token at {path}")]
     NoCachedToken { path: String },
 
-    /// JWT layout / claim extraction failed. Used by whoami and the
-    /// refresh-token-grant context lookup.
+    /// JWT layout / claim extraction failed (used by `whoami`).
     #[error("malformed JWT: missing {0}")]
     MalformedJwt(&'static str),
 
@@ -61,20 +53,6 @@ pub enum Error {
     /// `dns lookup` got no A/AAAA records for the host.
     #[error("no answer for {host}")]
     NoDnsAnswer { host: String },
-
-    /// HTTP call to Graph / ARM returned non-2xx with body context.
-    #[error("{service} {path} → {status}: {body}")]
-    HttpStatus {
-        service: &'static str,
-        path: String,
-        status: reqwest::StatusCode,
-        body: String,
-    },
-
-    /// Bag-of-strings — used sparingly for one-off validation failures.
-    /// Prefer adding a structured variant when a use case recurs.
-    #[error("{0}")]
-    Other(String),
 }
 
 /// Crate-wide `Result` type. Subcommand modules return `crate::Result<()>`.
