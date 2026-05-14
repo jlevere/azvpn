@@ -19,7 +19,7 @@ mod process;
 pub use config::{ConfigBuilder, bundled_root_ca_sha1};
 pub use management::{
     AddrFamily, Event, Ifconfig, ManagementClient, PushOptions, PushedRoute, RedirectGateway,
-    VpnState, ipv4_mask_to_prefix, ipv4_prefix_to_mask,
+    Realm, VpnState, ipv4_mask_to_prefix, ipv4_prefix_to_mask,
 };
 pub use process::OpenVpnProcess;
 

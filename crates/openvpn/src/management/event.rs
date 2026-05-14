@@ -7,6 +7,36 @@ use std::net::IpAddr;
 use super::push::PushOptions;
 use super::state::VpnState;
 
+/// openvpn's `>PASSWORD:` realm tag. The primary auth realm is `Auth`;
+/// proxy / HTTP-Auth realms exist in theory but Azure never uses them.
+/// Typed so call sites pattern-match instead of string-compare.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Realm {
+    /// Primary tunnel-credential prompt — what reneg fires.
+    Auth,
+    /// Anything else openvpn might prompt for. Preserved verbatim so
+    /// logs include the realm string for diagnostics.
+    Other(String),
+}
+
+impl Realm {
+    fn parse(s: &str) -> Self {
+        match s {
+            "Auth" => Self::Auth,
+            other => Self::Other(other.to_owned()),
+        }
+    }
+}
+
+impl std::fmt::Display for Realm {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Auth => f.write_str("Auth"),
+            Self::Other(s) => f.write_str(s),
+        }
+    }
+}
+
 #[derive(Debug)]
 pub enum Event {
     State {
@@ -16,11 +46,11 @@ pub enum Event {
     Hold,
     /// `>PASSWORD:Need '<realm>' username/password` — openvpn is asking
     /// the management socket to provide credentials for `realm`. For
-    /// Azure the realm is always `Auth`; the prompt fires on TLS
-    /// renegotiation when the initial `auth-user-pass` file is no longer
-    /// in scope. The caller responds with
+    /// Azure the realm is always [`Realm::Auth`]; the prompt fires on
+    /// TLS renegotiation when the initial `auth-user-pass` file is no
+    /// longer in scope. The caller responds with
     /// [`crate::ManagementClient::send_auth`].
-    PasswordPrompt { realm: String },
+    PasswordPrompt { realm: Realm },
     /// `>PASSWORD:Auth-Token:<token>` — openvpn delivering a fresh
     /// auth-token issued by the gateway, out-of-band from `PUSH_REPLY`.
     /// Functionally equivalent to [`PushOptions::auth_token`] but this
@@ -29,7 +59,7 @@ pub enum Event {
     AuthTokenIssued { token: String },
     /// `>PASSWORD:Verification Failed: '<realm>'` — server rejected the
     /// credentials we sent for `realm`. Terminal for the connection.
-    PasswordVerificationFailed { realm: String },
+    PasswordVerificationFailed { realm: Realm },
     /// `>FATAL:<message>` — openvpn has hit an unrecoverable error and
     /// is about to exit. Terminal for the connection. Carries the
     /// message verbatim so callers can surface a specific cause
@@ -113,7 +143,7 @@ fn parse_password_line(rest: &str) -> Event {
     if let Some(realm) = rest
         .strip_prefix("Need '")
         .and_then(|s| s.split_once('\''))
-        .map(|(realm, _)| realm.to_owned())
+        .map(|(realm, _)| Realm::parse(realm))
     {
         return Event::PasswordPrompt { realm };
     }
@@ -125,7 +155,7 @@ fn parse_password_line(rest: &str) -> Event {
     if let Some(realm) = rest
         .strip_prefix("Verification Failed: '")
         .and_then(|s| s.split_once('\''))
-        .map(|(realm, _)| realm.to_owned())
+        .map(|(realm, _)| Realm::parse(realm))
     {
         return Event::PasswordVerificationFailed { realm };
     }
@@ -166,7 +196,7 @@ mod tests {
     fn parse_password_prompt_extracts_realm() {
         let event = parse_line(">PASSWORD:Need 'Auth' username/password").unwrap();
         match event {
-            Event::PasswordPrompt { realm } => assert_eq!(realm, "Auth"),
+            Event::PasswordPrompt { realm } => assert_eq!(realm, Realm::Auth),
             other => panic!("expected PasswordPrompt, got {other:?}"),
         }
     }
@@ -176,7 +206,7 @@ mod tests {
         let line = ">PASSWORD:Need 'Auth' username/password SC:1,Please enter SecurID PIN+code";
         let event = parse_line(line).unwrap();
         match event {
-            Event::PasswordPrompt { realm } => assert_eq!(realm, "Auth"),
+            Event::PasswordPrompt { realm } => assert_eq!(realm, Realm::Auth),
             other => panic!("expected PasswordPrompt, got {other:?}"),
         }
     }
@@ -197,7 +227,7 @@ mod tests {
     fn parse_password_verification_failed() {
         let event = parse_line(">PASSWORD:Verification Failed: 'Auth'").unwrap();
         match event {
-            Event::PasswordVerificationFailed { realm } => assert_eq!(realm, "Auth"),
+            Event::PasswordVerificationFailed { realm } => assert_eq!(realm, Realm::Auth),
             other => panic!("expected PasswordVerificationFailed, got {other:?}"),
         }
     }
