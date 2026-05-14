@@ -1,3 +1,9 @@
+mod device_code;
+mod token_cache;
+
+pub use device_code::DeviceCodeFlow;
+pub use token_cache::TokenCache;
+
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
     #[error("token acquisition failed: {0}")]
@@ -8,22 +14,35 @@ pub enum Error {
     NoCachedToken,
     #[error("interactive login required")]
     InteractiveLoginRequired,
+    #[error("http error: {0}")]
+    Http(#[from] reqwest::Error),
     #[error("{0}")]
     Other(String),
 }
 
 #[derive(Debug, Clone)]
 pub struct AadConfig {
-    pub tenant: String,
+    pub tenant_id: String,
     pub audience: String,
     pub issuer: String,
     pub application_id: Option<String>,
 }
 
+impl AadConfig {
+    pub fn client_id(&self) -> &str {
+        // If the profile specifies an applicationid, use it.
+        // Otherwise fall back to the audience — in the legacy Azure VPN
+        // configuration the audience app doubles as the OAuth client.
+        self.application_id
+            .as_deref()
+            .unwrap_or(&self.audience)
+    }
+}
+
 impl From<&azvpn_profile::AadConfig> for AadConfig {
     fn from(profile: &azvpn_profile::AadConfig) -> Self {
         Self {
-            tenant: profile.tenant.clone(),
+            tenant_id: profile.tenant_id().to_owned(),
             audience: profile.audience.clone(),
             issuer: profile.issuer.clone(),
             application_id: profile.applicationid.clone(),

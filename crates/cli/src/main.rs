@@ -1,7 +1,10 @@
+use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4};
 use std::path::PathBuf;
 
 use clap::{Parser, Subcommand};
 use tracing_subscriber::EnvFilter;
+
+mod connect;
 
 #[derive(Parser)]
 #[command(name = "azvpn", about = "Cross-platform Azure VPN client")]
@@ -21,6 +24,14 @@ enum Command {
         /// Path to Azure VPN profile XML
         #[arg(short, long)]
         profile: PathBuf,
+
+        /// Path to openvpn binary
+        #[arg(long, default_value = "openvpn")]
+        openvpn: PathBuf,
+
+        /// Management interface port
+        #[arg(long, default_value_t = 7505)]
+        mgmt_port: u16,
     },
     /// Disconnect the active VPN session
     Disconnect,
@@ -35,7 +46,8 @@ enum Command {
     List,
 }
 
-fn main() {
+#[tokio::main]
+async fn main() {
     let cli = Cli::parse();
 
     let filter = if cli.verbose {
@@ -46,21 +58,29 @@ fn main() {
 
     tracing_subscriber::fmt().with_env_filter(filter).init();
 
-    match cli.command {
-        Command::Connect { profile } => {
-            tracing::info!(?profile, "connecting");
-            eprintln!("not yet implemented");
-        }
-        Command::Disconnect => {
-            tracing::info!("disconnecting");
-            eprintln!("not yet implemented");
+    let result = match cli.command {
+        Command::Connect {
+            profile,
+            openvpn,
+            mgmt_port,
+        } => {
+            let mgmt_addr =
+                SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::LOCALHOST, mgmt_port));
+            connect::run(&profile, &openvpn, mgmt_addr).await
         }
         Command::Import { path } => {
             tracing::info!(?path, "importing profile");
             eprintln!("not yet implemented");
+            Ok(())
         }
-        Command::Status | Command::List => {
+        Command::Disconnect | Command::Status | Command::List => {
             eprintln!("not yet implemented");
+            Ok(())
         }
+    };
+
+    if let Err(e) = result {
+        eprintln!("error: {e}");
+        std::process::exit(1);
     }
 }
