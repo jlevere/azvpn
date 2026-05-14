@@ -26,6 +26,9 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 clap = { version = "4", features = ["derive"] }
 quick-xml = { version = "0.37", features = ["serialize"] }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
+open = "5"
+tempfile = "3"
 
 azvpn-core = { path = "crates/core" }
 azvpn-profile = { path = "crates/profile" }

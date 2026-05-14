@@ -12,9 +12,14 @@ name = "azvpn"
 path = "src/main.rs"
 
 [dependencies]
+azvpn-auth = { workspace = true }
 azvpn-core = { workspace = true }
+azvpn-openvpn = { workspace = true }
 azvpn-profile = { workspace = true }
 clap = { workspace = true }
+open = { workspace = true }
+tempfile = { workspace = true }
+thiserror = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }

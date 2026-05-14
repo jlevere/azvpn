@@ -20,6 +20,12 @@
         rustToolchain = pkgs.rust-bin.fromRustupToolchainFile ./rust-toolchain.toml;
         craneLib = (crane.mkLib pkgs).overrideToolchain rustToolchain;
 
+        openvpn-azvpn = pkgs.openvpn.overrideAttrs (old: {
+          patches = (old.patches or []) ++ [
+            ./patches/openvpn-increase-user-pass-len.patch
+          ];
+        });
+
         src = craneLib.cleanCargoSource ./.;
 
         commonArgs = {
@@ -70,7 +76,7 @@
             cargo-deny
             cargo-edit
             cargo-watch
-            openvpn
+            openvpn-azvpn
           ];
         };
       });

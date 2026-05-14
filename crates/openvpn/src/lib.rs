@@ -1,3 +1,11 @@
+mod config;
+mod management;
+mod process;
+
+pub use config::ConfigBuilder;
+pub use management::{Event, ManagementClient, VpnState};
+pub use process::OpenVpnProcess;
+
 use std::net::SocketAddr;
 use std::path::PathBuf;
 
@@ -5,12 +13,12 @@ use std::path::PathBuf;
 pub enum Error {
     #[error("openvpn process failed to start: {0}")]
     ProcessStart(#[source] std::io::Error),
-    #[error("management interface connection failed: {0}")]
-    ManagementConnect(#[source] std::io::Error),
-    #[error("management command failed: {0}")]
-    ManagementCommand(String),
+    #[error("management interface error: {0}")]
+    Management(String),
     #[error("openvpn exited unexpectedly: code {0:?}")]
     UnexpectedExit(Option<i32>),
+    #[error("io error: {0}")]
+    Io(#[from] std::io::Error),
     #[error("{0}")]
     Other(String),
 }
@@ -18,13 +26,5 @@ pub enum Error {
 #[derive(Debug, Clone)]
 pub struct OpenVpnConfig {
     pub openvpn_binary: PathBuf,
-    pub config_file: PathBuf,
     pub management_addr: SocketAddr,
-    pub auth_user_pass: Option<AuthUserPass>,
-}
-
-#[derive(Debug, Clone)]
-pub struct AuthUserPass {
-    pub username: String,
-    pub password: String,
 }
