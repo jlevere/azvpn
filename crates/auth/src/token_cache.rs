@@ -28,31 +28,9 @@ impl TokenCache {
         }
     }
 
-    /// Platform-conventional path for a root-owned daemon's persistent
-    /// state. `azvpn connect` must run as root (TUN, route, DNS), so the
-    /// cache lives root-owned at mode 0600 — local non-root users can't
-    /// read it, surviving the multi-user attack surface that `/tmp` had.
     #[must_use]
     pub fn default_path() -> PathBuf {
-        #[cfg(target_os = "macos")]
-        {
-            PathBuf::from("/var/db/azvpn/token-cache.json")
-        }
-        #[cfg(target_os = "linux")]
-        {
-            PathBuf::from("/var/lib/azvpn/token-cache.json")
-        }
-        #[cfg(target_os = "windows")]
-        {
-            PathBuf::from(r"C:\ProgramData\azvpn\token-cache.json")
-        }
-        #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
-        {
-            // Unsupported platforms — keep it inside `/var/tmp` (which
-            // unlike `/tmp` is at least preserved across reboots) and
-            // mode 0600 still applies.
-            PathBuf::from("/var/tmp/azvpn-token-cache.json")
-        }
+        crate::paths::token_cache()
     }
 
     pub fn load(&self) -> Option<Token> {
@@ -107,12 +85,15 @@ impl TokenCache {
     }
 }
 
-/// Write `data` to `path` atomically with mode 0600 (Unix) — the file
-/// holds an AAD access + refresh token, so it must not be world-readable.
-/// The temp-then-rename guards a half-written file if we crash mid-save.
+/// Write `data` to `path` atomically with mode 0600 (Unix) and ownership
+/// matching `$SUDO_USER` when running under sudo. The file holds an AAD
+/// access + refresh token — must not be world-readable, must be owned by
+/// the user whose token it is. The temp-then-rename guards a half-written
+/// file if we crash mid-save.
 fn write_private(path: &Path, data: &[u8]) -> std::io::Result<()> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
+        crate::paths::chown_to_sudo_user(parent)?;
     }
     let tmp = path.with_extension("tmp");
 
@@ -134,6 +115,7 @@ fn write_private(path: &Path, data: &[u8]) -> std::io::Result<()> {
         std::fs::write(&tmp, data)?;
     }
 
+    crate::paths::chown_to_sudo_user(&tmp)?;
     std::fs::rename(&tmp, path)
 }
 
