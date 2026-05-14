@@ -155,14 +155,7 @@ pub async fn run(
                         if *state == VpnState::Connected {
                             eprintln!("connected to {}", server.fqdn);
                             #[cfg(target_os = "macos")]
-                            if dns_guard.is_none() {
-                                // Installed once on first Connected. A reconnect would re-enter
-                                // this state with possibly-fresh push_opts; refresh-on-reconnect
-                                // is deferred until DnsGuard grows an in-place update method
-                                // (dropping the old guard before the new one would wipe the
-                                // shared singleton key).
-                                dns_guard = install_dns(&profile, &push_opts);
-                            }
+                            apply_dns(&mut dns_guard, &profile, &push_opts);
                         }
                         if *state == VpnState::Exiting {
                             info!("openvpn exiting");
@@ -204,19 +197,47 @@ pub async fn run(
 }
 
 #[cfg(target_os = "macos")]
-fn install_dns(
+fn apply_dns(
+    guard: &mut Option<azvpn_tunnel_darwin::DnsGuard>,
     profile: &VpnProfile,
     push_opts: &PushOptions,
-) -> Option<azvpn_tunnel_darwin::DnsGuard> {
+) {
+    let (suffixes, dns_servers) = collect_dns_inputs(profile, push_opts);
+    if suffixes.is_empty() {
+        info!("no DNS suffixes in profile or push-reply, skipping resolver setup");
+        return;
+    }
+    if dns_servers.is_empty() {
+        tracing::warn!("DNS suffixes configured but no DNS servers available");
+        return;
+    }
+
+    info!(?suffixes, ?dns_servers, "applying DNS resolvers");
+    let result = match guard.as_mut() {
+        Some(g) => g.update(&suffixes, &dns_servers),
+        None => match azvpn_tunnel_darwin::DnsGuard::install(&suffixes, &dns_servers) {
+            Ok(g) => {
+                *guard = Some(g);
+                Ok(())
+            }
+            Err(e) => Err(e),
+        },
+    };
+    if let Err(e) = result {
+        tracing::error!(error = %e, "failed to apply DNS resolvers");
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn collect_dns_inputs<'p>(
+    profile: &'p VpnProfile,
+    push_opts: &'p PushOptions,
+) -> (Vec<&'p str>, Vec<std::net::IpAddr>) {
     let mut suffixes = profile.dns_suffixes();
     if let Some(pushed) = push_opts.domain.as_deref() {
         if !suffixes.iter().any(|s| s.trim_start_matches('.') == pushed) {
             suffixes.push(pushed);
         }
-    }
-    if suffixes.is_empty() {
-        info!("no DNS suffixes in profile or push-reply, skipping resolver setup");
-        return None;
     }
 
     let dns_servers: Vec<std::net::IpAddr> = if push_opts.dns_servers.is_empty() {
@@ -229,17 +250,5 @@ fn install_dns(
         push_opts.dns_servers.clone()
     };
 
-    if dns_servers.is_empty() {
-        tracing::warn!("DNS suffixes configured but no DNS servers available");
-        return None;
-    }
-
-    info!(?suffixes, ?dns_servers, "installing DNS resolvers");
-    match azvpn_tunnel_darwin::DnsGuard::install(&suffixes, &dns_servers) {
-        Ok(guard) => Some(guard),
-        Err(e) => {
-            tracing::error!(error = %e, "failed to install DNS resolvers");
-            None
-        }
-    }
+    (suffixes, dns_servers)
 }
