@@ -11,7 +11,7 @@
 use std::time::{Duration, SystemTime};
 
 use serde::Deserialize;
-use tracing::{debug, info};
+use tracing::{debug, info, instrument};
 
 use crate::{Error, Token};
 
@@ -50,6 +50,7 @@ impl RefreshGrant {
     /// Exchange the refresh token for an access token scoped to `resource`.
     /// `resource` should be a `/.default`-style scope (or a space-separated
     /// list of explicit scopes for the same audience).
+    #[instrument(skip(self, refresh_token), fields(tenant = %self.tenant_id))]
     pub async fn exchange(&self, refresh_token: &str, scope: &str) -> Result<Token, Error> {
         let url = format!(
             "https://login.microsoftonline.com/{}/oauth2/v2.0/token",

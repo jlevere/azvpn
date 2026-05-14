@@ -14,7 +14,7 @@ use azvpn_auth::{AadConfig, DeviceCodeFlow, DeviceCodePrompt, TokenCache};
 use azvpn_openvpn::{ConfigBuilder, Event, OpenVpnConfig, OpenVpnProcess, PushOptions, VpnState};
 use azvpn_profile::{AuthType, VpnProfile};
 use tokio_util::sync::CancellationToken;
-use tracing::info;
+use tracing::{info, instrument};
 
 use crate::dns::{self, DnsManager};
 use crate::session::{RunningSession, SessionGuard};
@@ -39,6 +39,7 @@ pub trait DeviceCodeUi: Send {
 }
 
 #[allow(clippy::too_many_lines)]
+#[instrument(skip_all, name = "connect", fields(profile = %opts.profile_path.display()))]
 pub async fn run<U: DeviceCodeUi>(
     opts: ConnectOptions,
     mut ui: U,
@@ -155,6 +156,7 @@ pub async fn run<U: DeviceCodeUi>(
     Ok(())
 }
 
+#[instrument(skip_all, name = "auth")]
 async fn obtain_auth_file<U: DeviceCodeUi>(
     profile: &VpnProfile,
     ui: &mut U,

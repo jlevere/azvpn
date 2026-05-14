@@ -2,7 +2,6 @@ use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4};
 use std::path::PathBuf;
 
 use clap::{Parser, Subcommand};
-use tracing_subscriber::EnvFilter;
 
 mod connect;
 mod disconnect;
@@ -10,6 +9,7 @@ mod dns;
 mod error;
 mod groups;
 mod info;
+mod logging;
 mod manager;
 mod me;
 mod org;
@@ -94,14 +94,7 @@ enum DnsCommand {
 #[tokio::main]
 async fn main() {
     let cli = Cli::parse();
-
-    let filter = if cli.verbose {
-        EnvFilter::new("debug")
-    } else {
-        EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"))
-    };
-
-    tracing_subscriber::fmt().with_env_filter(filter).init();
+    logging::init(cli.verbose);
 
     let exit_code = match cli.command {
         Command::Connect {

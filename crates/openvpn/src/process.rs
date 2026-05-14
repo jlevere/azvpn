@@ -2,7 +2,7 @@ use std::net::SocketAddr;
 use std::path::Path;
 
 use tokio::process::{Child, Command};
-use tracing::{debug, info};
+use tracing::{debug, info, instrument};
 
 use crate::{Error, ManagementClient, OpenVpnConfig};
 
@@ -12,6 +12,7 @@ pub struct OpenVpnProcess {
 }
 
 impl OpenVpnProcess {
+    #[instrument(skip_all)]
     pub fn start(
         ovpn_config: &OpenVpnConfig,
         config_path: &Path,
@@ -38,6 +39,7 @@ impl OpenVpnProcess {
         })
     }
 
+    #[instrument(skip_all, fields(addr = %self.management_addr))]
     pub async fn connect_management(&self) -> Result<ManagementClient, Error> {
         let mut attempts = 0;
         loop {
