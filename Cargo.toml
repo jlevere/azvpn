@@ -41,6 +41,7 @@ tarpc = { version = "0.37", features = ["full"] }
 futures = "0.3"
 ipnet = { version = "2", features = ["serde"] }
 uzers = { version = "0.12", default-features = false }
+dirs = "5"
 
 azvpn-core = { path = "crates/core" }
 azvpn-ipc = { path = "crates/ipc" }

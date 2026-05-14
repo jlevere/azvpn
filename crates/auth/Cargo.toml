@@ -10,15 +10,13 @@ repository.workspace = true
 [dependencies]
 azvpn-profile = { workspace = true }
 base64 = { workspace = true }
+dirs = { workspace = true }
 reqwest = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }
-
-[target.'cfg(unix)'.dependencies]
-uzers = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }

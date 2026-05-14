@@ -40,7 +40,6 @@ azvpn-profile = { workspace = true }
 base64 = { workspace = true }
 clap = { workspace = true }
 hickory-resolver = { workspace = true }
-libc = { workspace = true }
 reqwest = { workspace = true }
 open = { workspace = true }
 serde = { workspace = true }
