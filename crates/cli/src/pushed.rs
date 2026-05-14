@@ -1,23 +1,17 @@
 //! `azvpn pushed` — surface everything the gateway sent us in `PUSH_REPLY`.
 //!
-//! Reads from `session.json` (populated by `connect` on `Event::PushReply`);
-//! no live mgmt-socket query needed. This is purely "what the gateway told
-//! us to do" — the most canonical possible answer to "what does this VPN
-//! configure on my machine."
+//! Pure formatting on top of `azvpn_core::commands::pushed::current`. The
+//! `PushOptions` data captured by `connect` is the most canonical answer
+//! to "what does this VPN configure on my machine" — nothing else is
+//! queried at print time.
 
-use azvpn_core::session::RunningSession;
-use azvpn_openvpn::{AddrFamily, PushOptions, PushedRoute};
+use azvpn_core::commands::pushed::{self, AddrFamily, PushOptions, PushedRoute};
 
-use crate::{Error, Result};
+use crate::Result;
 
 pub fn run() -> Result<()> {
-    let Some(session) = RunningSession::load()? else {
-        return Err(Error::NotConnected);
-    };
-    let Some(pushed) = session.pushed else {
-        return Err(Error::NoPushedOptions);
-    };
-    print(&pushed);
+    let opts = pushed::current()?;
+    print(&opts);
     Ok(())
 }
 

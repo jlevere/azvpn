@@ -1,17 +1,31 @@
-use std::io::Write;
+//! `azvpn connect` — thin wrapper. All orchestration lives in
+//! `azvpn_core::commands::connect`; the CLI's job is parsing arguments
+//! and surfacing the device-code prompt to the user.
+
 use std::net::SocketAddr;
 use std::path::Path;
 
-use azvpn_auth::{AadConfig, DeviceCodeFlow, TokenCache};
-use azvpn_core::dns::{self, DnsManager};
-use azvpn_core::session::{RunningSession, SessionGuard};
-use azvpn_openvpn::{ConfigBuilder, Event, OpenVpnConfig, OpenVpnProcess, PushOptions, VpnState};
-use azvpn_profile::{AuthType, VpnProfile};
-use tokio::signal;
-use tokio::signal::unix::{SignalKind, signal as unix_signal};
-use tracing::info;
+use azvpn_auth::DeviceCodePrompt;
+use azvpn_core::commands::connect::{self, ConnectOptions, DeviceCodeUi};
 
-use crate::{Error, Result};
+use crate::Result;
+
+/// Print the device-code prompt to stderr and try to open the verification
+/// URL in the user's browser. Runs as the `SUDO_USER` when invoked under
+/// sudo so the URL opens in the user's session, not root's.
+struct StderrDeviceCodeUi;
+
+impl DeviceCodeUi for StderrDeviceCodeUi {
+    fn prompt(&mut self, p: &DeviceCodePrompt) {
+        eprintln!();
+        eprintln!("  Open:  {}", p.verification_uri);
+        eprintln!("  Code:  {}", p.user_code);
+        eprintln!();
+        eprintln!("{}", p.message);
+        eprintln!();
+        open_browser(&p.verification_uri);
+    }
+}
 
 fn open_browser(url: &str) {
     if let Ok(user) = std::env::var("SUDO_USER") {
@@ -23,230 +37,18 @@ fn open_browser(url: &str) {
     }
 }
 
-#[allow(clippy::too_many_lines)]
 pub async fn run(
     profile_path: &Path,
     openvpn_binary: &Path,
     mgmt_addr: SocketAddr,
     verbose: bool,
 ) -> Result<()> {
-    let profile = VpnProfile::from_file(profile_path)?;
-    let server = profile
-        .primary_server()
-        .ok_or_else(|| Error::Other("no server in profile".into()))?;
-    info!(server = %server.fqdn, "loaded profile");
-
-    let auth_file = match profile.clientauth.auth_type {
-        AuthType::Aad => {
-            let aad_profile = profile
-                .clientauth
-                .aad
-                .as_ref()
-                .ok_or_else(|| Error::Other("AAD auth requires <aad> config block".into()))?;
-
-            let aad_config = AadConfig::from(aad_profile);
-            let cache = TokenCache::new(&TokenCache::default_path());
-
-            // Require a refresh token in the cache as well — without one we
-            // can't drive any of the post-connect canonical APIs (`azvpn me`,
-            // future ARM calls). A cached token from an older version that
-            // never persisted the refresh side is treated as a cache miss
-            // so the next device-code flow rebuilds it correctly.
-            let token = if let Some(cached) =
-                cache.load().filter(|t| t.refresh_token.is_some())
-            {
-                cached
-            } else {
-                let flow = DeviceCodeFlow::new(aad_config);
-                let prompt = flow.start().await?;
-
-                eprintln!();
-                eprintln!("  Open:  {}", prompt.verification_uri);
-                eprintln!("  Code:  {}", prompt.user_code);
-                eprintln!();
-                eprintln!("{}", prompt.message);
-                eprintln!();
-                open_browser(&prompt.verification_uri);
-
-                let token = flow.poll_for_token(&prompt).await?;
-                cache.save(&token);
-                token
-            };
-
-            info!("AAD token ready");
-
-            let mut f = tempfile::Builder::new()
-                .prefix("azvpn-auth-")
-                .tempfile()?;
-            writeln!(f, "AzureAD")?;
-            writeln!(f, "{}", token.access_token)?;
-            Some(f)
-        }
-        AuthType::Certificate => {
-            info!("certificate auth — no token needed");
-            None
-        }
-    };
-
-    let mut builder = ConfigBuilder::new(&profile, mgmt_addr);
-    if let Some(ref af) = auth_file {
-        builder = builder.auth_user_pass_file(af.path());
-    }
-    if verbose {
-        builder = builder.verb(5);
-    }
-    let ovpn_config_content = builder.build();
-
-    let mut config_file = tempfile::Builder::new()
-        .suffix(".ovpn")
-        .tempfile()?;
-    config_file.write_all(ovpn_config_content.as_bytes())?;
-    info!(path = %config_file.path().display(), "wrote openvpn config");
-
-    let ovpn_config = OpenVpnConfig {
+    let opts = ConnectOptions {
+        profile_path: profile_path.to_owned(),
         openvpn_binary: openvpn_binary.to_owned(),
-        management_addr: mgmt_addr,
-    };
-
-    let mut process = OpenVpnProcess::start(&ovpn_config, config_file.path())?;
-    let mut mgmt = process.connect_management().await?;
-    info!("connected to management interface");
-
-    let mut session = RunningSession::new(
         mgmt_addr,
-        profile_path.to_owned(),
-        server.fqdn.clone(),
-    )?;
-    let _session_guard = SessionGuard::new(&session)?;
-
-    mgmt.send("state on").await?;
-    mgmt.send("log on").await?;
-    mgmt.hold_release().await?;
-
-    let mut push_opts = PushOptions::default();
-    let mut sigterm = unix_signal(SignalKind::terminate())?;
-    let mut dns_manager = dns::new_manager();
-
-    loop {
-        tokio::select! {
-            biased;
-
-            _ = signal::ctrl_c() => {
-                eprintln!("\nshutting down (SIGINT)...");
-                let _ = mgmt.send("signal SIGTERM").await;
-                break;
-            }
-
-            _ = sigterm.recv() => {
-                eprintln!("\nshutting down (SIGTERM)...");
-                let _ = mgmt.send("signal SIGTERM").await;
-                break;
-            }
-
-            event = mgmt.read_event() => {
-                let event = event?;
-                match event {
-                    Event::State { ref state, local_ip } => {
-                        if let Some(ip) = local_ip {
-                            eprintln!("state: {state:?} (ip: {ip})");
-                        } else {
-                            eprintln!("state: {state:?}");
-                        }
-                        if *state == VpnState::Connected {
-                            eprintln!("connected to {}", server.fqdn);
-                            apply_dns(dns_manager.as_mut(), &mut session, &profile, &push_opts);
-                        }
-                        if *state == VpnState::Exiting {
-                            info!("openvpn exiting");
-                            break;
-                        }
-                    }
-                    Event::Hold => {
-                        mgmt.hold_release().await?;
-                    }
-                    Event::PasswordNeeded(ref msg) => {
-                        tracing::warn!("unexpected password request: {msg}");
-                    }
-                    Event::PushReply(opts) => {
-                        let opts = *opts;
-                        info!(
-                            dns_servers = ?opts.dns_servers,
-                            domain = ?opts.domain,
-                            routes = opts.routes.len(),
-                            "received push options"
-                        );
-                        push_opts = opts.clone();
-                        if let Err(e) = session.record_pushed(opts) {
-                            tracing::warn!(error = %e, "failed to record pushed options");
-                        }
-                    }
-                    Event::Info(msg) | Event::Log(msg) => {
-                        info!("{msg}");
-                    }
-                    Event::ByteCount { rx, tx } => {
-                        tracing::debug!(rx, tx, "byte count");
-                    }
-                }
-            }
-        }
-    }
-
-    dns_manager.clear();
-    drop(dns_manager);
-
-    let code = process.wait().await?;
-    info!(?code, "openvpn process exited");
-
-    Ok(())
-}
-
-fn apply_dns(
-    manager: &mut dyn DnsManager,
-    session: &mut RunningSession,
-    profile: &VpnProfile,
-    push_opts: &PushOptions,
-) {
-    let (suffixes, dns_servers) = collect_dns_inputs(profile, push_opts);
-    if suffixes.is_empty() {
-        info!("no DNS suffixes in profile or push-reply, skipping resolver setup");
-        return;
-    }
-    if dns_servers.is_empty() {
-        tracing::warn!("DNS suffixes configured but no DNS servers available");
-        return;
-    }
-
-    info!(?suffixes, ?dns_servers, "applying DNS resolvers");
-    match manager.apply(&suffixes, &dns_servers) {
-        Ok(()) => {
-            if let Err(e) = session.record_dns(&suffixes, &dns_servers) {
-                tracing::warn!(error = %e, "failed to record DNS in session file");
-            }
-        }
-        Err(e) => tracing::error!(error = %e, "failed to apply DNS resolvers"),
-    }
-}
-
-fn collect_dns_inputs<'p>(
-    profile: &'p VpnProfile,
-    push_opts: &'p PushOptions,
-) -> (Vec<&'p str>, Vec<std::net::IpAddr>) {
-    let mut suffixes = profile.dns_suffixes();
-    if let Some(pushed) = push_opts.domain.as_deref() {
-        if !suffixes.iter().any(|s| s.trim_start_matches('.') == pushed) {
-            suffixes.push(pushed);
-        }
-    }
-
-    let dns_servers: Vec<std::net::IpAddr> = if push_opts.dns_servers.is_empty() {
-        profile
-            .dns_servers()
-            .iter()
-            .filter_map(|s| s.parse().ok())
-            .collect()
-    } else {
-        push_opts.dns_servers.clone()
+        verbose,
     };
-
-    (suffixes, dns_servers)
+    connect::run(opts, StderrDeviceCodeUi).await?;
+    Ok(())
 }
