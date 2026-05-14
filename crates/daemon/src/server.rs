@@ -22,9 +22,9 @@ use crate::routes;
 /// Process-wide daemon state. Single active connection at a time —
 /// matches openvpn's mgmt-interface single-client constraint and the
 /// physical reality of one tunnel device per host.
-#[derive(Default)]
 pub struct DaemonState {
     active: Mutex<Option<ActiveConnection>>,
+    openvpn_binary: PathBuf,
 }
 
 struct ActiveConnection {
@@ -37,12 +37,21 @@ struct ActiveConnection {
     started_at: u64,
 }
 
-#[derive(Clone, Default)]
+#[derive(Clone)]
 pub struct AzvpndServer {
     state: Arc<DaemonState>,
 }
 
 impl AzvpndServer {
+    pub fn new(openvpn_binary: PathBuf) -> Self {
+        Self {
+            state: Arc::new(DaemonState {
+                active: Mutex::new(None),
+                openvpn_binary,
+            }),
+        }
+    }
+
     /// Tear down the active connection (if any) and wait for the
     /// connect task to finish. Called from the daemon's signal-driven
     /// shutdown path so SIGTERM produces a clean teardown — routes,
@@ -92,15 +101,9 @@ impl AzvpnApi for AzvpndServer {
 
         // Static mgmt port — the daemon owns the only openvpn child.
         let mgmt_addr = SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 7505));
-        // `AZVPND_OPENVPN` lets the launchd plist point straight at a
-        // specific binary (e.g. the patched nix-store openvpn that
-        // accepts long AAD bearer tokens) without depending on $PATH
-        // lookup — launchd's PATH is minimal and varies by platform.
-        let openvpn_binary = std::env::var_os("AZVPND_OPENVPN")
-            .map_or_else(|| PathBuf::from("openvpn"), PathBuf::from);
         let opts = ConnectOptions {
             profile_path: req.profile_path.clone(),
-            openvpn_binary,
+            openvpn_binary: self.state.openvpn_binary.clone(),
             mgmt_addr,
             verbose: req.verbose,
         };
