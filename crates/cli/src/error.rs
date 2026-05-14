@@ -23,6 +23,10 @@ pub enum Error {
     /// `me`, `groups`, `manager`, `org`, `whoami`).
     #[error("auth: {0}")]
     Auth(#[from] azvpn_auth::Error),
+    /// Profile XML parsing — surfaced from `VpnProfile::from_file`
+    /// at the CLI's auth-resolution boundary.
+    #[error("profile: {0}")]
+    Profile(#[from] azvpn_profile::Error),
 
     // ---------- shared infrastructure ----------
     #[error("io: {0}")]
