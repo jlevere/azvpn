@@ -20,6 +20,7 @@ base64 = { workspace = true }
 clap = { workspace = true }
 graph-rs-sdk = { workspace = true }
 hickory-resolver = { workspace = true }
+reqwest = { workspace = true }
 libc = { workspace = true }
 net-route = { workspace = true }
 open = { workspace = true }

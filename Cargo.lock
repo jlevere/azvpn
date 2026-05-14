@@ -204,6 +204,7 @@ dependencies = [
  "libc",
  "net-route",
  "open",
+ "reqwest",
  "serde",
  "serde_json",
  "tempfile",

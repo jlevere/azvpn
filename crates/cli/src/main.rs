@@ -4,11 +4,15 @@ use std::path::PathBuf;
 use clap::{Parser, Subcommand};
 use tracing_subscriber::EnvFilter;
 
+mod aad;
 mod connect;
 mod disconnect;
 mod dns;
+mod groups;
 mod info;
+mod manager;
 mod me;
+mod org;
 mod pushed;
 mod status;
 mod whoami;
@@ -58,6 +62,12 @@ enum Command {
     /// Call Microsoft Graph /v1.0/me using a refreshed token — the same
     /// query the official Microsoft Azure VPN Client makes post-auth
     Me,
+    /// Call Graph /v1.0/me/memberOf — direct group + directory-role memberships
+    Groups,
+    /// Call Graph /v1.0/me/manager — your manager from the org chart
+    Manager,
+    /// Call Graph /v1.0/organization — tenant info, verified domains, contacts
+    Org,
     /// Show everything the gateway pushed (routes, DHCP options, ifconfig,
     /// cipher) — captured from the openvpn `PUSH_REPLY` at connect time
     Pushed,
@@ -106,6 +116,9 @@ async fn main() {
         Command::Whoami => report(whoami::run()),
         Command::Info => report(info::run().await),
         Command::Me => report(me::run().await),
+        Command::Groups => report(groups::run().await),
+        Command::Manager => report(manager::run().await),
+        Command::Org => report(org::run().await),
         Command::Pushed => report(pushed::run()),
         Command::Dns(DnsCommand::Lookup { host, via }) => {
             report(dns::lookup(&host, via.as_deref()).await)

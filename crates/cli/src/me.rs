@@ -1,44 +1,20 @@
-//! `azvpn me` — exchange the cached refresh token for a Microsoft Graph
-//! access token, then `GET /v1.0/me`. Mirrors what the official Azure VPN
-//! Client does post-auth (verified in the Ghidra decomp of
+//! `azvpn me` — GET /v1.0/me via the refreshed Graph token. Same canonical
+//! call the official Microsoft Azure VPN Client makes post-auth (verified
+//! against the Ghidra decomp of
 //! `MacTunnelExtension::AadController::getContentWithToken`).
 
-use azvpn_auth::{GRAPH_RESOURCE, RefreshGrant, TokenCache};
-use base64::Engine as _;
-use base64::engine::general_purpose::URL_SAFE_NO_PAD;
-use graph_rs_sdk::GraphClient;
 use serde::Deserialize;
+
+use crate::aad;
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
-    #[error(
-        "no refresh token in cache — run `azvpn connect` once to refresh \
-         authentication (older cache files didn't persist refresh tokens)"
-    )]
-    NoRefreshToken,
-    #[error("token cache unreadable: {0}")]
-    Cache(String),
-    #[error("could not extract {field} claim from cached JWT")]
-    MissingClaim { field: &'static str },
-    #[error("auth: {0}")]
-    Auth(#[from] azvpn_auth::Error),
+    #[error("{0}")]
+    Aad(#[from] aad::Error),
     #[error("graph: {0}")]
     Graph(String),
-    #[error("base64: {0}")]
-    Base64(#[from] base64::DecodeError),
     #[error("json: {0}")]
     Json(#[from] serde_json::Error),
-}
-
-#[derive(Deserialize)]
-struct CachedAccessToken {
-    access_token: String,
-}
-
-#[derive(Deserialize)]
-struct JwtContext {
-    tid: Option<String>,
-    appid: Option<String>,
 }
 
 #[derive(Deserialize, Debug)]
@@ -57,15 +33,7 @@ struct GraphUser {
 }
 
 pub async fn run() -> Result<(), Error> {
-    let cache = TokenCache::new(&TokenCache::default_path());
-
-    let refresh = cache.load_refresh_token().ok_or(Error::NoRefreshToken)?;
-    let (tenant_id, client_id) = read_aad_context(&cache)?;
-
-    let grant = RefreshGrant::new(tenant_id, client_id);
-    let graph_token = grant.exchange(&refresh, GRAPH_RESOURCE).await?;
-
-    let client = GraphClient::new(&graph_token.access_token);
+    let client = aad::graph_client().await?;
     let response = client
         .me()
         .get_user()
@@ -81,29 +49,8 @@ pub async fn run() -> Result<(), Error> {
         return Err(Error::Graph(format!("GET /v1.0/me → {status}: {body}")));
     }
     let user: GraphUser = serde_json::from_str(&body)?;
-
     print_user(&user);
     Ok(())
-}
-
-fn read_aad_context(cache: &TokenCache) -> Result<(String, String), Error> {
-    let raw = std::fs::read_to_string(TokenCache::default_path())
-        .map_err(|e| Error::Cache(e.to_string()))?;
-    let _ = cache; // future: a load_raw helper, but for now read directly.
-    let cached: CachedAccessToken = serde_json::from_str(&raw)?;
-    let claims = decode_jwt_context(&cached.access_token)?;
-    let tenant = claims.tid.ok_or(Error::MissingClaim { field: "tid" })?;
-    let client = claims.appid.ok_or(Error::MissingClaim { field: "appid" })?;
-    Ok((tenant, client))
-}
-
-fn decode_jwt_context(jwt: &str) -> Result<JwtContext, Error> {
-    let payload = jwt
-        .split('.')
-        .nth(1)
-        .ok_or(Error::MissingClaim { field: "payload" })?;
-    let decoded = URL_SAFE_NO_PAD.decode(payload)?;
-    Ok(serde_json::from_slice(&decoded)?)
 }
 
 fn print_user(u: &GraphUser) {
