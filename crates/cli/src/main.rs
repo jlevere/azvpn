@@ -69,6 +69,22 @@ enum DnsCommand {
         #[arg(long)]
         via: Option<String>,
     },
+    /// Sweep candidates (<word>.<suffix>) against the VPN DNS to enumerate
+    /// what private endpoints exist behind the gateway
+    Sweep {
+        /// Suffixes to sweep (default: session's recorded DNS suffixes)
+        #[arg(long = "suffix")]
+        suffixes: Vec<String>,
+        /// Path to a newline-separated wordlist (default: built-in list)
+        #[arg(long)]
+        wordlist: Option<PathBuf>,
+        /// DNS server to query directly (default: system resolver)
+        #[arg(long)]
+        via: Option<String>,
+        /// Max concurrent lookups
+        #[arg(long, default_value_t = 20)]
+        concurrency: usize,
+    },
 }
 
 #[tokio::main]
@@ -100,6 +116,20 @@ async fn main() {
         Command::Dns(DnsCommand::Lookup { host, via }) => {
             report(dns::lookup(&host, via.as_deref()).await)
         }
+        Command::Dns(DnsCommand::Sweep {
+            suffixes,
+            wordlist,
+            via,
+            concurrency,
+        }) => report(
+            dns::sweep(dns::SweepOpts {
+                suffixes,
+                wordlist: wordlist.as_deref(),
+                via: via.as_deref(),
+                concurrency,
+            })
+            .await,
+        ),
         Command::Import { path } => {
             tracing::info!(?path, "importing profile");
             eprintln!("not yet implemented");
