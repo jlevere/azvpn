@@ -91,6 +91,43 @@ the diff helper.
 
 ---
 
+### 3a.  Routes lost on tun-bounce — apply ran before openvpn closed the tun
+
+**Status:** ✅ shipped.
+
+Caught live during a P1 #8 reachability-triggered SIGUSR1 reconnect.
+After the new PUSH_REPLY, our `Event::PushReply` handler applied 20
+routes; openvpn then printed `Pulled options changed on restart, will
+need to close and reopen TUN/TAP device` and closed the tun. The
+kernel orphans every route bound to the dead interface. Subsequent
+`>STATE:CONNECTED` fired on the new tun — but the connect-loop's
+CONNECTED branch was gated on `!have_connected`, so the apply never
+re-ran. Tunnel sat with only the on-link `/25` route; everything
+through the VPN (DNS server included) was unreachable. Symptom user
+sees: connection looks fine but nothing resolves through the gateway.
+
+Two underlying issues, both fixed:
+
+1. **CONNECTED was only handled the first time.** Now we apply on
+   every `VpnState::Connected` transition — openvpn re-emits it after
+   each internal tun reopen, and the apply is idempotent set-replace.
+2. **`RouteManager` diffed against its own cache, not the kernel.**
+   Same `desired` + same cached `installed` → diff says "no changes"
+   even though the kernel was empty. Added
+   [`RouteManager::invalidate`] called on every CONNECTED so the next
+   apply re-issues every `route add` (kernel's EEXIST handler makes
+   the no-bounce case cheap).
+
+**Where:** `crates/core/src/commands/connect/mod.rs:331`,
+`crates/core/src/route.rs:200`.
+
+**Done when:** A SIGUSR1 reconnect (or any "Pulled options changed on
+restart" sequence) leaves the pushed routes installed on the new tun.
+Verified live: `netstat -rn -f inet | grep utun8` shows all 20 routes
+after a reconnect cycle.
+
+---
+
 ### 4.  `redirect-gateway` not parsed — can't tell full-tunnel from split
 
 **Status:** not implemented; falls through to `extras`.
