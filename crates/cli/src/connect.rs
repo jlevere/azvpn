@@ -184,12 +184,17 @@ pub async fn run(
                         tracing::warn!("unexpected password request: {msg}");
                     }
                     Event::PushReply(opts) => {
+                        let opts = *opts;
                         info!(
                             dns_servers = ?opts.dns_servers,
                             domain = ?opts.domain,
+                            routes = opts.routes.len(),
                             "received push options"
                         );
-                        push_opts = opts;
+                        push_opts = opts.clone();
+                        if let Err(e) = session.record_pushed(opts) {
+                            tracing::warn!(error = %e, "failed to record pushed options");
+                        }
                     }
                     Event::Info(msg) | Event::Log(msg) => {
                         info!("{msg}");
