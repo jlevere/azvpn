@@ -1,7 +1,6 @@
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use azvpn_core::session::RunningSession;
-use azvpn_openvpn::ManagementClient;
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
@@ -9,7 +8,7 @@ pub enum Error {
     Session(#[from] azvpn_core::session::Error),
 }
 
-pub async fn run() -> Result<(), Error> {
+pub fn run() -> Result<(), Error> {
     let Some(session) = RunningSession::load()? else {
         println!("not connected");
         return Ok(());
@@ -20,19 +19,26 @@ pub async fn run() -> Result<(), Error> {
         .map_or(session.started_at, |d| d.as_secs());
     let uptime = now.saturating_sub(session.started_at);
 
-    let reachable = ManagementClient::connect(session.mgmt_addr).await.is_ok();
+    let alive = process_alive(session.pid);
 
     println!("pid:     {}", session.pid);
     println!("server:  {}", session.server_fqdn);
     println!("profile: {}", session.profile_path.display());
     println!("mgmt:    {}", session.mgmt_addr);
     println!("uptime:  {}", format_uptime(uptime));
-    if reachable {
-        println!("state:   running (management socket reachable)");
+    if alive {
+        println!("state:   running");
     } else {
         println!("state:   stale — process gone; run `azvpn disconnect` to clear");
     }
     Ok(())
+}
+
+fn process_alive(pid: u32) -> bool {
+    std::process::Command::new("kill")
+        .args(["-0", &pid.to_string()])
+        .status()
+        .is_ok_and(|s| s.success())
 }
 
 fn format_uptime(secs: u64) -> String {
