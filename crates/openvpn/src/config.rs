@@ -1,8 +1,8 @@
 use std::fmt::Write;
-use std::net::SocketAddr;
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::path::Path;
 
-use azvpn_profile::{TransportProtocol, VpnProfile};
+use azvpn_profile::{Route, TransportProtocol, VpnProfile};
 
 // DigiCert Global Root G2 — the CA used by Azure VPN P2S gateways.
 // SHA1 fingerprint: df3c24f9bfd666761b268073fe06d1cc8d4f82a4
@@ -113,9 +113,77 @@ impl<'a> ConfigBuilder<'a> {
             writeln!(config, "</tls-auth>").unwrap();
         }
 
+        self.write_profile_routes(&mut config);
+
         config
     }
 
+    fn write_profile_routes(&self, config: &mut String) {
+        let Some(client_config) = self.profile.clientconfig.as_ref() else {
+            return;
+        };
+
+        let includes = client_config
+            .includeroutes
+            .as_ref()
+            .map_or(&[][..], |r| r.routes.as_slice());
+        let excludes = client_config
+            .excluderoutes
+            .as_ref()
+            .map_or(&[][..], |r| r.routes.as_slice());
+
+        if includes.is_empty() && excludes.is_empty() {
+            return;
+        }
+
+        writeln!(config).unwrap();
+        for route in includes {
+            write_route(config, route, RouteKind::Include);
+        }
+        for route in excludes {
+            write_route(config, route, RouteKind::Exclude);
+        }
+    }
+
+}
+
+enum RouteKind {
+    Include,
+    Exclude,
+}
+
+fn write_route(config: &mut String, route: &Route, kind: RouteKind) {
+    match (route.destination, kind) {
+        (IpAddr::V4(addr), RouteKind::Include) => {
+            writeln!(config, "route {addr} {}", ipv4_mask(route.mask)).unwrap();
+        }
+        (IpAddr::V4(addr), RouteKind::Exclude) => {
+            writeln!(
+                config,
+                "route {addr} {} net_gateway",
+                ipv4_mask(route.mask)
+            )
+            .unwrap();
+        }
+        (IpAddr::V6(addr), RouteKind::Include) => {
+            writeln!(config, "route-ipv6 {addr}/{}", route.mask).unwrap();
+        }
+        (IpAddr::V6(addr), RouteKind::Exclude) => {
+            writeln!(config, "route-ipv6 {addr}/{} net_gateway", route.mask).unwrap();
+        }
+    }
+}
+
+fn ipv4_mask(prefix: u8) -> Ipv4Addr {
+    if prefix == 0 {
+        return Ipv4Addr::UNSPECIFIED;
+    }
+    let prefix = prefix.min(32);
+    let bits: u32 = 0xFFFF_FFFF_u32 << (32 - prefix);
+    Ipv4Addr::from(bits)
+}
+
+impl ConfigBuilder<'_> {
     fn tls_key(&self) -> Option<String> {
         let hex = self
             .profile
@@ -145,8 +213,55 @@ mod tests {
     use std::net::{Ipv4Addr, SocketAddrV4};
 
     #[test]
+    fn ipv4_mask_conversion() {
+        assert_eq!(ipv4_mask(0), Ipv4Addr::UNSPECIFIED);
+        assert_eq!(ipv4_mask(8), Ipv4Addr::new(255, 0, 0, 0));
+        assert_eq!(ipv4_mask(16), Ipv4Addr::new(255, 255, 0, 0));
+        assert_eq!(ipv4_mask(24), Ipv4Addr::new(255, 255, 255, 0));
+        assert_eq!(ipv4_mask(32), Ipv4Addr::BROADCAST);
+        assert_eq!(ipv4_mask(33), Ipv4Addr::BROADCAST);
+    }
+
+    #[test]
+    fn include_and_exclude_routes_emitted() {
+        let xml = r"<AzVpnProfile>
+            <serverlist><ServerEntry><fqdn>gw.example.com</fqdn></ServerEntry></serverlist>
+            <clientauth><type>certificate</type></clientauth>
+            <clientconfig>
+                <includeroutes>
+                    <route><destination>10.100.0.0</destination><mask>24</mask></route>
+                    <route><destination>10.200.0.0</destination><mask>16</mask></route>
+                </includeroutes>
+                <excluderoutes>
+                    <route><destination>168.63.129.16</destination><mask>32</mask></route>
+                </excluderoutes>
+            </clientconfig>
+        </AzVpnProfile>";
+
+        let profile = VpnProfile::from_xml(xml).unwrap();
+        let addr = SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 7505));
+        let config = ConfigBuilder::new(&profile, addr).build();
+
+        assert!(config.contains("route 10.100.0.0 255.255.255.0\n"));
+        assert!(config.contains("route 10.200.0.0 255.255.0.0\n"));
+        assert!(config.contains("route 168.63.129.16 255.255.255.255 net_gateway\n"));
+    }
+
+    #[test]
+    fn no_routes_section_when_clientconfig_empty() {
+        let xml = r"<AzVpnProfile>
+            <serverlist><ServerEntry><fqdn>gw.example.com</fqdn></ServerEntry></serverlist>
+            <clientauth><type>certificate</type></clientauth>
+        </AzVpnProfile>";
+        let profile = VpnProfile::from_xml(xml).unwrap();
+        let addr = SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 7505));
+        let config = ConfigBuilder::new(&profile, addr).build();
+        assert!(!config.contains("\nroute "));
+    }
+
+    #[test]
     fn build_config_from_profile() {
-        let xml = r#"<AzVpnProfile>
+        let xml = r"<AzVpnProfile>
             <serverlist><ServerEntry><fqdn>gw.example.vpn.azure.com</fqdn></ServerEntry></serverlist>
             <clientauth><type>aad</type><aad>
                 <issuer>https://sts.windows.net/00000000/</issuer>
@@ -156,7 +271,7 @@ mod tests {
             <servervalidation>
                 <serversecret>00000000000000000000000000000000111111111111111111111111111111112222222222222222222222222222222233333333333333333333333333333333444444444444444444444444444444445555555555555555555555555555555566666666666666666666666666666666777777777777777777777777777777778888888888888888888888888888888899999999999999999999999999999999aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaabbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbccccccccccccccccccccccccccccccccddddddddddddddddddddddddddddddddeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeffffffffffffffffffffffffffffffff</serversecret>
             </servervalidation>
-        </AzVpnProfile>"#;
+        </AzVpnProfile>";
 
         let profile = VpnProfile::from_xml(xml).unwrap();
         let addr = SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 7505));
