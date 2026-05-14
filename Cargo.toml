@@ -51,6 +51,11 @@ libc = "0.2"
 tarpc = { version = "0.37", features = ["full"] }
 futures = "0.3"
 ipnet = { version = "2", features = ["serde"] }
+# Async-first exponential backoff. Used by reqwest-retry, opendal,
+# etc. — iterator-yielding-Duration API is a clean fit for our
+# match-on-AttemptOutcome retry loop. `std-category` keeps it
+# lightweight (just `Duration`, no extra runtime dep).
+backon = { version = "1", default-features = false, features = ["std-blocking-sleep"] }
 uzers = { version = "0.12", default-features = false }
 dirs = "5"
 
