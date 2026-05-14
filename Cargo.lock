@@ -291,6 +291,7 @@ dependencies = [
  "azvpn-tunnel-darwin",
  "azvpn-tunnel-linux",
  "azvpn-tunnel-windows",
+ "ipnet",
  "libc",
  "net-route",
  "serde",
