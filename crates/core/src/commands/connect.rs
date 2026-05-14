@@ -19,7 +19,7 @@ use tracing::{info, instrument};
 
 use crate::dns::{self, DnsManager};
 use crate::route::{RouteManager, RouteSpec};
-use crate::session::{RunningSession, SessionGuard};
+use crate::session::RunningSession;
 use crate::{Error, Result};
 
 /// Inputs the CLI / daemon / GUI marshals into a single bag. Stable across
@@ -37,15 +37,19 @@ pub struct ConnectOptions {
 /// the synthetic ones the connect loop emits before / after openvpn
 /// itself owns the lifecycle. Observers (e.g. the daemon's `status`
 /// handler) use [`tokio::sync::watch`] to read the current value
-/// without locking; [`watch::Receiver::changed`] / `wait_for` give a
-/// natural "wait until Connected" primitive.
+/// without locking; [`watch::Receiver::wait_for`] gives a natural
+/// "wait until Connected" primitive.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum ConnectionStatus {
     Idle,
     Connecting,
-    Authenticating,
-    OpenVpn(VpnState),
-    Exited { code: Option<i32> },
+    OpenVpn {
+        state: VpnState,
+        local_ip: Option<std::net::IpAddr>,
+    },
+    Exited {
+        code: Option<i32>,
+    },
     Failed(String),
 }
 
@@ -55,6 +59,7 @@ pub async fn run(
     opts: ConnectOptions,
     access_token: Option<String>,
     status_tx: watch::Sender<ConnectionStatus>,
+    pushed_tx: watch::Sender<Option<PushOptions>>,
     cancel: CancellationToken,
 ) -> Result<()> {
     let _ = status_tx.send(ConnectionStatus::Connecting);
@@ -93,7 +98,6 @@ pub async fn run(
         opts.profile_path.clone(),
         server.fqdn.clone(),
     )?;
-    let _session_guard = SessionGuard::new(&session)?;
 
     mgmt.send("state on").await?;
     mgmt.send("log on").await?;
@@ -127,7 +131,10 @@ pub async fn run(
                         } else {
                             info!(?state, "vpn state");
                         }
-                        let _ = status_tx.send(ConnectionStatus::OpenVpn(state.clone()));
+                        let _ = status_tx.send(ConnectionStatus::OpenVpn {
+                            state: state.clone(),
+                            local_ip,
+                        });
                         if *state == VpnState::Connected {
                             info!(server = %server.fqdn, "connected");
                             if !dns_installed
@@ -163,9 +170,8 @@ pub async fn run(
                             "received push options"
                         );
                         push_opts = opts.clone();
-                        if let Err(e) = session.record_pushed(opts) {
-                            tracing::warn!(error = %e, "failed to record pushed options");
-                        }
+                        session.record_pushed(opts.clone());
+                        let _ = pushed_tx.send(Some(opts));
                     }
                     Event::Info(msg) | Event::Log(msg) => {
                         info!("{msg}");
@@ -262,11 +268,7 @@ fn apply_dns(
 
     info!(?suffixes, ?dns_servers, "applying DNS resolvers");
     match manager.apply(&suffixes, &dns_servers) {
-        Ok(()) => {
-            if let Err(e) = session.record_dns(&suffixes, &dns_servers) {
-                tracing::warn!(error = %e, "failed to record DNS in session file");
-            }
-        }
+        Ok(()) => session.record_dns(&suffixes, &dns_servers),
         Err(e) => tracing::error!(error = %e, "failed to apply DNS resolvers"),
     }
     true
