@@ -26,6 +26,9 @@ pub enum Error {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+// `is_process_alive` is `unsafe` but the deserialize path doesn't touch
+// it — clippy's lint is over-broad here.
+#[allow(clippy::unsafe_derive_deserialize)]
 pub struct RunningSession {
     pub pid: u32,
     pub mgmt_addr: SocketAddr,
@@ -110,15 +113,18 @@ impl RunningSession {
         }
     }
 
-    /// Returns true if the recorded pid still names a live process. Uses
-    /// `kill(pid, 0)` semantics via `kill -0` — POSIX-portable on macOS/Linux.
+    /// Returns true if the recorded pid still names a live process.
+    /// `kill(pid, 0)` is POSIX's "does this pid exist (and am I allowed to
+    /// signal it)" probe — single syscall, no `Command` fork/exec.
     /// Windows will need a `proc-handle`-style probe when that target lands.
     #[must_use]
+    #[allow(unsafe_code, clippy::cast_possible_wrap)]
     pub fn is_process_alive(&self) -> bool {
-        std::process::Command::new("kill")
-            .args(["-0", &self.pid.to_string()])
-            .status()
-            .is_ok_and(|s| s.success())
+        // SAFETY: `libc::kill` with sig=0 is a pure existence probe; no
+        // signal is delivered, side-effect-free beyond setting errno on
+        // failure. POSIX pids fit in i32 on every platform we target.
+        let rc = unsafe { libc::kill(self.pid as libc::pid_t, 0) };
+        rc == 0
     }
 }
 
