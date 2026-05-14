@@ -226,6 +226,9 @@ fn build_auth_file(
             info!("certificate auth — no token needed");
             Ok(None)
         }
+        (AuthType::UsernamePass | AuthType::Radius, _) => Err(Error::Other(
+            "usernamepass / radius auth is not yet supported by the daemon".into(),
+        )),
     }
 }
 
