@@ -1,7 +1,7 @@
-//! Read the session file and signal the running connect process. The
-//! management interface only accepts one client at a time (the connect
-//! process owns it), so we route through `kill(2)` instead of the mgmt
-//! socket.
+//! Read the session file and signal the running connect process via
+//! `kill(2)`. The management interface only accepts one client at a time
+//! (the live connect process owns it), so the mgmt socket isn't an
+//! option from a second process.
 
 use crate::session::RunningSession;
 use crate::{Error, Result};
@@ -26,12 +26,19 @@ pub fn run() -> Result<DisconnectOutcome> {
         return Ok(DisconnectOutcome::StaleCleared { pid: session.pid });
     }
 
-    let status = std::process::Command::new("kill")
-        .args(["-TERM", &session.pid.to_string()])
-        .status()
-        .map_err(|e| Error::Kill(e.to_string()))?;
-    if !status.success() {
-        return Err(Error::Kill(format!("kill returned {status}")));
-    }
+    send_sigterm(session.pid)?;
     Ok(DisconnectOutcome::SignalSent { pid: session.pid })
+}
+
+#[allow(unsafe_code, clippy::cast_possible_wrap)]
+fn send_sigterm(pid: u32) -> Result<()> {
+    // SAFETY: `libc::kill` with a real signal is a kernel-mediated
+    // operation; the only side effect is queueing the signal (or
+    // returning -1 + errno on failure). POSIX pids fit in i32 on every
+    // platform we target.
+    let rc = unsafe { libc::kill(pid as libc::pid_t, libc::SIGTERM) };
+    if rc != 0 {
+        return Err(Error::Kill(std::io::Error::last_os_error().to_string()));
+    }
+    Ok(())
 }

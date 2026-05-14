@@ -10,9 +10,8 @@ use std::net::IpAddr;
 use crate::Result;
 use crate::commands::status::{self, StatusReport};
 
-/// A route the kernel has installed pointing into one of our tunnel
-/// interfaces (utun on macOS, tunN on Linux, the Wintun adapter on
-/// Windows). Sorted by family then address by [`collect`].
+/// A route the kernel has installed via our tunnel interface. Sorted by
+/// family then address by [`collect`].
 #[derive(Debug, Clone)]
 pub struct TunnelRoute {
     pub destination: IpAddr,
@@ -24,30 +23,40 @@ pub struct TunnelRoute {
 #[derive(Debug, Clone)]
 pub struct InfoReport {
     pub status: Option<StatusReport>,
+    /// Name of the tunnel interface that owns our routes (e.g. `utun8`),
+    /// when we could identify it from the session. `None` if we're not
+    /// connected or couldn't discover the iface.
+    pub tunnel_interface: Option<String>,
     pub tunnel_routes: Vec<TunnelRoute>,
 }
 
 pub async fn collect() -> Result<InfoReport> {
     let status = status::current()?;
-    let tunnel_routes = list_tunnel_routes().await?;
+    let local_tunnel_ip = status
+        .as_ref()
+        .and_then(|s| s.session.pushed.as_ref())
+        .and_then(|p| p.ifconfig.as_ref())
+        .and_then(|(local, _)| local.parse::<IpAddr>().ok());
+
+    let all_routes = read_all_routes().await?;
+    let tunnel_interface = local_tunnel_ip.and_then(|ip| identify_tunnel_iface(&all_routes, ip));
+    let tunnel_routes = filter_to_iface(all_routes, tunnel_interface.as_deref());
+
     Ok(InfoReport {
         status,
+        tunnel_interface,
         tunnel_routes,
     })
 }
 
-async fn list_tunnel_routes() -> Result<Vec<TunnelRoute>> {
+async fn read_all_routes() -> Result<Vec<TunnelRoute>> {
     let handle = net_route::Handle::new()?;
     let routes = handle.list().await?;
-
-    let mut out: Vec<TunnelRoute> = routes
+    Ok(routes
         .into_iter()
         .filter_map(|r| {
             let ifindex = r.ifindex?;
             let interface = interface_name(ifindex)?;
-            if !is_tunnel_interface(&interface) {
-                return None;
-            }
             Some(TunnelRoute {
                 destination: r.destination,
                 prefix: r.prefix,
@@ -55,21 +64,38 @@ async fn list_tunnel_routes() -> Result<Vec<TunnelRoute>> {
                 interface,
             })
         })
-        .collect();
+        .collect())
+}
 
+/// When openvpn brings the utun device up it asks the kernel to install
+/// an on-link `/32` route to the local tunnel address. That route is the
+/// natural fingerprint of "this is the interface we own" — no need to
+/// stash the iface name on disk or call `getifaddrs` separately.
+fn identify_tunnel_iface(routes: &[TunnelRoute], local_ip: IpAddr) -> Option<String> {
+    routes
+        .iter()
+        .find(|r| r.destination == local_ip && r.prefix == 32)
+        .map(|r| r.interface.clone())
+}
+
+fn filter_to_iface(routes: Vec<TunnelRoute>, iface: Option<&str>) -> Vec<TunnelRoute> {
+    let mut out: Vec<TunnelRoute> = match iface {
+        Some(name) => routes.into_iter().filter(|r| r.interface == name).collect(),
+        // No live session — fall back to "anything that looks like a
+        // POSIX tun device" so the command is still useful pre-connect.
+        None => routes
+            .into_iter()
+            .filter(|r| is_posix_tunnel_name(&r.interface))
+            .collect(),
+    };
     out.sort_by_key(|r| match r.destination {
         IpAddr::V4(v) => (0u8, u128::from(u32::from(v))),
         IpAddr::V6(v) => (1u8, u128::from(v)),
     });
-
-    Ok(out)
+    out
 }
 
-/// Per-platform name check for the OS tunnel device family.
-fn is_tunnel_interface(name: &str) -> bool {
-    // macOS uses `utun`, Linux uses `tun`/`tap`, Windows Wintun uses the
-    // adapter's friendly name. The Windows case will need its own probe
-    // once that platform lands; for now match the POSIX shapes.
+fn is_posix_tunnel_name(name: &str) -> bool {
     name.starts_with("utun") || name.starts_with("tun") || name.starts_with("tap")
 }
 
