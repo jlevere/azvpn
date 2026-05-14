@@ -66,7 +66,7 @@ async fn main() {
         } => {
             let mgmt_addr =
                 SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::LOCALHOST, mgmt_port));
-            connect::run(&profile, &openvpn, mgmt_addr).await
+            connect::run(&profile, &openvpn, mgmt_addr, cli.verbose).await
         }
         Command::Import { path } => {
             tracing::info!(?path, "importing profile");

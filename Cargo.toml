@@ -29,11 +29,13 @@ quick-xml = { version = "0.37", features = ["serialize"] }
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
 open = "5"
 tempfile = "3"
+system-configuration = "0.7"
 
 azvpn-core = { path = "crates/core" }
 azvpn-profile = { path = "crates/profile" }
 azvpn-auth = { path = "crates/auth" }
 azvpn-openvpn = { path = "crates/openvpn" }
+azvpn-tunnel-darwin = { path = "crates/tunnel-darwin" }
 
 [workspace.lints.rust]
 unsafe_code = "warn"
