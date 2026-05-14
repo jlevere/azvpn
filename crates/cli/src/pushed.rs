@@ -1,16 +1,18 @@
-//! `azvpn pushed` — surface everything the gateway sent us in `PUSH_REPLY`.
-//!
-//! Pure formatting on top of `azvpn_core::commands::pushed::current`. The
-//! `PushOptions` data captured by `connect` is the most canonical answer
-//! to "what does this VPN configure on my machine" — nothing else is
-//! queried at print time.
+//! `azvpn pushed` — calls the daemon's `pushed` RPC and renders the
+//! captured `PUSH_REPLY`. Pure formatting on the CLI side; the daemon
+//! owns the data.
 
-use azvpn_core::commands::pushed::{self, AddrFamily, PushOptions, PushedRoute};
+use azvpn_ipc::{AddrFamily, PushOptions, PushedRoute};
 
-use crate::Result;
+use crate::daemon_client::connect_to_daemon;
+use crate::{Error, Result};
 
-pub fn run() -> Result<()> {
-    let opts = pushed::current()?;
+pub async fn run() -> Result<()> {
+    let client = connect_to_daemon().await?;
+    let opts = client
+        .pushed(tarpc::context::current())
+        .await??
+        .ok_or(Error::Daemon(azvpn_ipc::IpcError::NotConnected))?;
     print(&opts);
     Ok(())
 }

@@ -90,15 +90,15 @@ async fn main() {
 
     let exit_code = match cli.command {
         Command::Connect { profile } => report(connect::run(&profile, cli.verbose).await),
-        Command::Disconnect => report(disconnect::run()),
-        Command::Status => report(status::run()),
+        Command::Disconnect => report(disconnect::run().await),
+        Command::Status => report(status::run().await),
         Command::Whoami => report(whoami::run()),
         Command::Info => report(info::run().await),
         Command::Me => report(me::run().await),
         Command::Groups => report(groups::run().await),
         Command::Manager => report(manager::run().await),
         Command::Org => report(org::run().await),
-        Command::Pushed => report(pushed::run()),
+        Command::Pushed => report(pushed::run().await),
         Command::Dns(DnsCommand::Lookup { host, via }) => {
             report(dns::lookup(&host, via.as_deref()).await)
         }

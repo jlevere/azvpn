@@ -5,6 +5,7 @@
 //! Started by launchd on macOS / systemd on Linux. Templates live
 //! under `packaging/`.
 
+mod routes;
 mod server;
 mod socket;
 

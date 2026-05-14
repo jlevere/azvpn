@@ -1,14 +1,16 @@
-//! `azvpn info` — comprehensive status dump. Aggregates the core info
-//! report (session, DNS, tunnel routes) with the locally-decoded identity
-//! summary from the cached AAD token.
+//! `azvpn info` — comprehensive status dump. Aggregates the daemon's
+//! `InfoReport` (session + DNS + tunnel routes) with the CLI-side
+//! identity summary from the cached AAD token.
 
-use azvpn_core::commands::info::{self, InfoReport, TunnelRoute};
+use azvpn_ipc::{InfoReport, StatusReport, TunnelRoute};
 
-use crate::Result;
+use crate::daemon_client::connect_to_daemon;
 use crate::status::format_uptime;
+use crate::Result;
 
 pub async fn run() -> Result<()> {
-    let report = info::collect().await?;
+    let client = connect_to_daemon().await?;
+    let report = client.info(tarpc::context::current()).await??;
     print(&report);
     Ok(())
 }
@@ -16,22 +18,7 @@ pub async fn run() -> Result<()> {
 fn print(r: &InfoReport) {
     println!("=== session ===");
     match &r.status {
-        Some(s) => {
-            let session = &s.session;
-            println!("pid:      {}", session.pid);
-            println!("server:   {}", session.server_fqdn);
-            println!("profile:  {}", session.profile_path.display());
-            println!("mgmt:     {}", session.mgmt_addr);
-            println!("uptime:   {}", format_uptime(s.uptime_secs));
-            println!(
-                "state:    {}",
-                if s.process_alive {
-                    "running"
-                } else {
-                    "stale (process gone)"
-                }
-            );
-        }
+        Some(s) => print_status(s),
         None => println!("(not connected)"),
     }
 
@@ -66,6 +53,16 @@ fn print(r: &InfoReport) {
     }
 }
 
+fn print_status(s: &StatusReport) {
+    println!("server:   {}", s.server_fqdn);
+    println!("profile:  {}", s.profile_path.display());
+    println!("mgmt:     {}", s.mgmt_addr);
+    println!("uptime:   {}", format_uptime(s.uptime_secs));
+    if let Some(ip) = s.local_ip {
+        println!("ip:       {ip}");
+    }
+}
+
 fn print_route(r: &TunnelRoute) {
     let dest = format!("{}/{}", r.destination, r.prefix);
     let gw = r
@@ -74,19 +71,19 @@ fn print_route(r: &TunnelRoute) {
     println!("{dest:<24} {:<24} {:>8}", gw, r.interface);
 }
 
-fn print_dns(status: Option<&azvpn_core::commands::status::StatusReport>) {
+fn print_dns(status: Option<&StatusReport>) {
     let Some(s) = status else {
         println!("(no session)");
         return;
     };
-    if s.session.dns_suffixes.is_empty() && s.session.dns_servers.is_empty() {
+    if s.dns_suffixes.is_empty() && s.dns_servers.is_empty() {
         println!("(no DNS installed)");
         return;
     }
-    for server in &s.session.dns_servers {
+    for server in &s.dns_servers {
         println!("server:   {server}");
     }
-    for suffix in &s.session.dns_suffixes {
+    for suffix in &s.dns_suffixes {
         println!("suffix:   {suffix}");
     }
 }

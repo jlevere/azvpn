@@ -1,19 +1,16 @@
-//! `azvpn disconnect` — thin wrapper. Logic lives in
-//! `azvpn_core::commands::disconnect`.
+//! `azvpn disconnect` — sends a Disconnect RPC to the daemon.
 
-use azvpn_core::commands::disconnect::{self, DisconnectOutcome};
+use azvpn_ipc::DisconnectOutcome;
 
+use crate::daemon_client::connect_to_daemon;
 use crate::Result;
 
-pub fn run() -> Result<()> {
-    match disconnect::run()? {
+pub async fn run() -> Result<()> {
+    let client = connect_to_daemon().await?;
+    let outcome = client.disconnect(tarpc::context::current()).await??;
+    match outcome {
         DisconnectOutcome::NotConnected => eprintln!("not connected"),
-        DisconnectOutcome::StaleCleared { pid } => eprintln!(
-            "session file present but pid {pid} is dead; clearing stale session"
-        ),
-        DisconnectOutcome::SignalSent { pid } => {
-            eprintln!("disconnect signal sent to pid {pid}");
-        }
+        DisconnectOutcome::SignalSent => eprintln!("disconnect requested"),
     }
     Ok(())
 }

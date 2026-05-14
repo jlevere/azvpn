@@ -17,7 +17,7 @@
 use std::net::{IpAddr, SocketAddr};
 use std::path::PathBuf;
 
-pub use azvpn_openvpn::{Ifconfig, PushOptions, PushedRoute};
+pub use azvpn_openvpn::{AddrFamily, Ifconfig, PushOptions, PushedRoute};
 use serde::{Deserialize, Serialize};
 
 #[tarpc::service]
