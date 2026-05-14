@@ -1,3 +1,5 @@
+use std::net::IpAddr;
+
 use serde::Deserialize;
 
 #[derive(Debug, thiserror::Error)]
@@ -64,11 +66,12 @@ pub struct AadConfig {
 }
 
 impl AadConfig {
-    pub fn tenant_id(&self) -> Option<&str> {
+    pub fn tenant_id(&self) -> &str {
         self.tenant
             .trim_end_matches('/')
             .rsplit('/')
             .next()
+            .unwrap_or_default()
     }
 }
 
@@ -78,9 +81,17 @@ pub struct ProtocolConfig {
     pub ssl_protocol_config: Option<SslProtocolConfig>,
 }
 
+#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum TransportProtocol {
+    #[default]
+    Tcp,
+    Udp,
+}
+
 #[derive(Debug, Clone, Deserialize)]
 pub struct SslProtocolConfig {
-    pub transportprotocol: Option<String>,
+    pub transportprotocol: Option<TransportProtocol>,
 }
 
 #[derive(Debug, Clone, Deserialize, Default)]
@@ -111,7 +122,7 @@ pub struct RouteList {
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct Route {
-    pub destination: String,
+    pub destination: IpAddr,
     pub mask: u8,
 }
 
@@ -184,12 +195,12 @@ impl VpnProfile {
         self.serverlist.entries.first()
     }
 
-    pub fn transport_protocol(&self) -> &str {
+    pub fn transport_protocol(&self) -> TransportProtocol {
         self.protocolconfig
             .as_ref()
             .and_then(|p| p.ssl_protocol_config.as_ref())
-            .and_then(|s| s.transportprotocol.as_deref())
-            .unwrap_or("tcp")
+            .and_then(|s| s.transportprotocol)
+            .unwrap_or_default()
     }
 }
 
@@ -220,12 +231,9 @@ mod tests {
         assert_eq!(aad.disable_sso, Some(true));
         assert_eq!(aad.enablegrouptoken, Some(true));
 
-        assert_eq!(
-            aad.tenant_id(),
-            Some("00000000-0000-0000-0000-000000000000")
-        );
+        assert_eq!(aad.tenant_id(), "00000000-0000-0000-0000-000000000000");
 
-        assert_eq!(profile.transport_protocol(), "tcp");
+        assert_eq!(profile.transport_protocol(), TransportProtocol::Tcp);
 
         let validation = profile.servervalidation.as_ref().unwrap();
         assert_eq!(validation.serversecret.as_deref(), Some("deadbeef"));
@@ -280,7 +288,10 @@ mod tests {
             .as_ref()
             .unwrap();
         assert_eq!(includes.routes.len(), 2);
-        assert_eq!(includes.routes[0].destination, "10.100.0.0");
+        assert_eq!(
+            includes.routes[0].destination,
+            "10.100.0.0".parse::<IpAddr>().unwrap()
+        );
         assert_eq!(includes.routes[0].mask, 24);
 
         let excludes = profile
@@ -291,6 +302,10 @@ mod tests {
             .as_ref()
             .unwrap();
         assert_eq!(excludes.routes.len(), 1);
+        assert_eq!(
+            excludes.routes[0].destination,
+            "168.63.129.16".parse::<IpAddr>().unwrap()
+        );
         assert_eq!(excludes.routes[0].mask, 32);
     }
 
