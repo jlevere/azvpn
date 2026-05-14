@@ -2,9 +2,10 @@
 //! the current identity belongs to: display name, country, verified domains,
 //! and the technical / security / privacy contact addresses.
 
+use azvpn_auth::cloud;
 use serde::Deserialize;
 
-use crate::{Result, aad};
+use crate::Result;
 
 #[derive(Deserialize)]
 struct ListResponse {
@@ -47,7 +48,7 @@ struct PrivacyProfile {
 }
 
 pub async fn run() -> Result<()> {
-    let list: ListResponse = aad::graph_get("/organization").await?;
+    let list: ListResponse = cloud::graph_get("/organization").await?;
     println!("graph: GET /v1.0/organization");
     for org in &list.value {
         println!();

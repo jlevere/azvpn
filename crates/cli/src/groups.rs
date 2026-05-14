@@ -10,9 +10,10 @@
 //! group properties. We surface IDs and the @odata.type so the
 //! information is still useful.
 
+use azvpn_auth::cloud;
 use serde::Deserialize;
 
-use crate::{Result, aad};
+use crate::Result;
 
 #[derive(Deserialize)]
 struct ListResponse {
@@ -33,7 +34,7 @@ struct DirectoryObject {
 }
 
 pub async fn run() -> Result<()> {
-    let list: ListResponse = aad::graph_get("/me/memberOf?$top=999").await?;
+    let list: ListResponse = cloud::graph_get("/me/memberOf?$top=999").await?;
 
     println!("graph: GET /v1.0/me/memberOf");
     println!("count: {}", list.value.len());

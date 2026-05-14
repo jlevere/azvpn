@@ -1,9 +1,10 @@
 //! `azvpn manager` — GET /v1.0/me/manager. Returns who you report to,
 //! per the org chart configured in Microsoft Entra ID.
 
+use azvpn_auth::cloud;
 use serde::Deserialize;
 
-use crate::{Error, Result, aad};
+use crate::{Error, Result};
 
 #[derive(Deserialize, Debug)]
 #[serde(rename_all = "camelCase")]
@@ -17,18 +18,20 @@ struct GraphUser {
 }
 
 pub async fn run() -> Result<()> {
-    match aad::graph_get::<GraphUser>("/me/manager").await {
+    match cloud::graph_get::<GraphUser>("/me/manager").await {
         Ok(mgr) => {
             println!("graph: GET /v1.0/me/manager");
             println!();
             print_manager(&mgr);
             Ok(())
         }
-        Err(Error::HttpStatus { status, .. }) if status == reqwest::StatusCode::NOT_FOUND => {
+        Err(azvpn_auth::Error::HttpStatus { status, .. })
+            if status == reqwest::StatusCode::NOT_FOUND =>
+        {
             println!("(no manager configured in Entra ID for this user)");
             Ok(())
         }
-        Err(e) => Err(e),
+        Err(e) => Err(Error::Auth(e)),
     }
 }
 
