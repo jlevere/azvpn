@@ -14,13 +14,16 @@ use tracing::{info, warn};
 
 use crate::Token;
 
-/// Service name used in both keyring entries and any logging. Matches
-/// the `SCDynamicStore` name on macOS for consistency.
 const SERVICE: &str = "com.jlevere.azvpn";
 /// Single-entry approach — we store the whole `CachedToken` JSON blob
 /// under one key rather than splitting fields. Simpler, atomic, and
 /// well within macOS Keychain / Windows wincred per-item size limits.
 const ACCOUNT: &str = "token-cache";
+
+/// Sanity cap on the legacy file's size. Real tokens are a few KB; a
+/// file larger than this is either corrupted or hostile, and we'd
+/// rather drop the migration than feed garbage to the keyring.
+const LEGACY_FILE_MAX_BYTES: u64 = 64 * 1024;
 
 #[derive(Serialize, Deserialize)]
 struct CachedToken {
@@ -30,8 +33,8 @@ struct CachedToken {
     refresh_token: Option<String>,
 }
 
-impl CachedToken {
-    fn from_token(token: &Token) -> Self {
+impl From<&Token> for CachedToken {
+    fn from(token: &Token) -> Self {
         Self {
             access_token: token.access_token.clone(),
             expires_at_epoch: token
@@ -42,35 +45,33 @@ impl CachedToken {
             refresh_token: token.refresh_token.clone(),
         }
     }
+}
 
-    fn into_token(self) -> Token {
-        Token {
-            access_token: self.access_token,
-            expires_at: UNIX_EPOCH + Duration::from_secs(self.expires_at_epoch),
-            refresh_token: self.refresh_token,
+impl From<CachedToken> for Token {
+    fn from(cached: CachedToken) -> Self {
+        Self {
+            access_token: cached.access_token,
+            expires_at: UNIX_EPOCH + Duration::from_secs(cached.expires_at_epoch),
+            refresh_token: cached.refresh_token,
         }
     }
 }
 
-/// Storage backend abstraction. Implementations are responsible for
-/// atomic-write semantics and durability.
+type BackendError = Box<dyn std::error::Error + Send + Sync>;
+
 trait KeyStoreBackend: Send + Sync {
     fn load(&self) -> Option<String>;
-    fn save(&self, data: &str) -> Result<(), String>;
-    /// Short human label for logs (`"keyring"`, `"file:/path"`).
-    fn label(&self) -> String;
+    fn save(&self, data: &str) -> Result<(), BackendError>;
 }
 
-/// OS-native credential store (`keyring` crate).
 struct KeyringBackend;
 
 impl KeyringBackend {
-    /// Try to open an entry; on platforms without a keyring backend this
-    /// fails fast and the caller can fall back to the file impl.
+    /// `keyring::Entry::new` only constructs an in-memory handle, so
+    /// a getter call is the only way to confirm the backend is alive;
+    /// `NoEntry` is the happy path here (backend reachable, no value).
     fn probe() -> Result<Self, keyring::Error> {
         let entry = keyring::Entry::new(SERVICE, ACCOUNT)?;
-        // `get_password` returns NoEntry on a working backend with no
-        // value, which is what we want — backend is alive, just empty.
         match entry.get_password() {
             Ok(_) | Err(keyring::Error::NoEntry) => Ok(Self),
             Err(e) => Err(e),
@@ -84,20 +85,13 @@ impl KeyStoreBackend for KeyringBackend {
         entry.get_password().ok()
     }
 
-    fn save(&self, data: &str) -> Result<(), String> {
-        let entry = keyring::Entry::new(SERVICE, ACCOUNT).map_err(|e| e.to_string())?;
-        entry.set_password(data).map_err(|e| e.to_string())
-    }
-
-    fn label(&self) -> String {
-        "keyring".into()
+    fn save(&self, data: &str) -> Result<(), BackendError> {
+        let entry = keyring::Entry::new(SERVICE, ACCOUNT)?;
+        entry.set_password(data)?;
+        Ok(())
     }
 }
 
-/// Plain 0600 JSON file. Used when no keyring backend is available
-/// (headless servers, CI, minimal Linux). Path is in the user's
-/// XDG state dir on Linux, Application Support on macOS,
-/// `%LOCALAPPDATA%` on Windows.
 struct FileBackend {
     path: PathBuf,
 }
@@ -113,17 +107,15 @@ impl KeyStoreBackend for FileBackend {
         std::fs::read_to_string(&self.path).ok()
     }
 
-    fn save(&self, data: &str) -> Result<(), String> {
-        write_private(&self.path, data.as_bytes()).map_err(|e| e.to_string())
-    }
-
-    fn label(&self) -> String {
-        format!("file:{}", self.path.display())
+    fn save(&self, data: &str) -> Result<(), BackendError> {
+        write_private(&self.path, data.as_bytes())?;
+        Ok(())
     }
 }
 
 pub struct TokenCache {
     backend: Box<dyn KeyStoreBackend>,
+    label: String,
 }
 
 impl TokenCache {
@@ -135,38 +127,59 @@ impl TokenCache {
         match KeyringBackend::probe() {
             Ok(b) => {
                 info!(backend = "keyring", "token cache initialised");
-                let cache = Self { backend: Box::new(b) };
+                let cache = Self {
+                    backend: Box::new(b),
+                    label: "keyring".into(),
+                };
                 cache.migrate_legacy_file();
                 cache
             }
             Err(e) => {
                 let file = FileBackend::at_default_path();
+                let label = format!("file:{}", file.path.display());
                 info!(
                     backend = "file",
                     path = %file.path.display(),
                     reason = %e,
                     "token cache: no keyring backend; using 0600 file"
                 );
-                Self { backend: Box::new(file) }
+                Self {
+                    backend: Box::new(file),
+                    label,
+                }
             }
         }
     }
 
-    /// Construct with the file backend at an explicit path. Used by
-    /// tests to avoid touching the real keyring or the legacy path.
-    #[must_use]
-    pub fn with_file_at(path: &Path) -> Self {
+    /// File-backed cache at an explicit path. Crate-internal so tests
+    /// can avoid the real keyring without exposing the file-shape on
+    /// the public API.
+    #[cfg(test)]
+    pub(crate) fn with_file_at(path: &Path) -> Self {
+        let label = format!("file:{}", path.display());
         Self {
             backend: Box::new(FileBackend { path: path.to_owned() }),
+            label,
         }
     }
 
-    /// One-shot migration from the pre-keyring 0600 JSON file. Called
-    /// on `auto()` when the keyring backend is selected. If the legacy
-    /// file exists, read it, write to keyring, delete the file. Errors
-    /// are non-fatal — the user can re-authenticate.
+    /// One-shot migration from the pre-keyring 0600 JSON file. If the
+    /// legacy file exists, validate its size, copy to keyring, delete.
+    /// Errors are non-fatal — the user can re-authenticate.
     fn migrate_legacy_file(&self) {
         let legacy = default_file_path();
+        let Ok(meta) = std::fs::metadata(&legacy) else {
+            return;
+        };
+        if meta.len() > LEGACY_FILE_MAX_BYTES {
+            warn!(
+                path = %legacy.display(),
+                size = meta.len(),
+                limit = LEGACY_FILE_MAX_BYTES,
+                "legacy token file too large; refusing to migrate"
+            );
+            return;
+        }
         let Ok(data) = std::fs::read_to_string(&legacy) else {
             return;
         };
@@ -181,24 +194,21 @@ impl TokenCache {
     }
 
     pub fn load(&self) -> Option<Token> {
-        let data = self.backend.load()?;
-        let cached: CachedToken = serde_json::from_str(&data).ok()?;
+        let cached = self.load_cached()?;
         let expires_at = UNIX_EPOCH + Duration::from_secs(cached.expires_at_epoch);
         if expires_at <= SystemTime::now() + Duration::from_mins(1) {
             info!("cached token expired");
             return None;
         }
         info!(has_refresh = cached.refresh_token.is_some(), "using cached token");
-        Some(cached.into_token())
+        Some(cached.into())
     }
 
     /// Read just the refresh token without expiry-checking the access
     /// token. Refresh tokens have a much longer lifetime than access
     /// tokens — they outlive the access token by design.
     pub fn load_refresh_token(&self) -> Option<String> {
-        let data = self.backend.load()?;
-        let cached: CachedToken = serde_json::from_str(&data).ok()?;
-        cached.refresh_token
+        self.load_cached()?.refresh_token
     }
 
     /// Read the raw access token without expiry filtering. Callers that
@@ -206,20 +216,23 @@ impl TokenCache {
     /// expired — the claims are stable across refreshes and a fresh
     /// access token isn't needed for static introspection.
     pub fn load_access_token(&self) -> Option<String> {
+        Some(self.load_cached()?.access_token)
+    }
+
+    fn load_cached(&self) -> Option<CachedToken> {
         let data = self.backend.load()?;
-        let cached: CachedToken = serde_json::from_str(&data).ok()?;
-        Some(cached.access_token)
+        serde_json::from_str(&data).ok()
     }
 
     pub fn save(&self, token: &Token) {
-        let Ok(data) = serde_json::to_string(&CachedToken::from_token(token)) else {
+        let Ok(data) = serde_json::to_string(&CachedToken::from(token)) else {
             return;
         };
         if let Err(e) = self.backend.save(&data) {
-            warn!(backend = %self.backend.label(), error = %e, "failed to persist token");
+            warn!(backend = %self.label, error = %e, "failed to persist token");
             return;
         }
-        info!(backend = %self.backend.label(), "cached token");
+        info!(backend = %self.label, "cached token");
     }
 }
 

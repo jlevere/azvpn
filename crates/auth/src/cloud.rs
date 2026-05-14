@@ -29,9 +29,14 @@ struct JwtContext {
 }
 
 pub fn read_context() -> Result<AadContext> {
-    let cache = TokenCache::auto();
-    let access = cache.load_access_token().ok_or(Error::NoCachedToken)?;
-    let payload = access
+    let access = TokenCache::auto()
+        .load_access_token()
+        .ok_or(Error::NoCachedToken)?;
+    extract_context(&access)
+}
+
+fn extract_context(access_token: &str) -> Result<AadContext> {
+    let payload = access_token
         .split('.')
         .nth(1)
         .ok_or(Error::MalformedJwt("payload"))?;
@@ -47,8 +52,9 @@ pub fn read_context() -> Result<AadContext> {
 /// `resource`. The CLI cache layout is assumed (see [`TokenCache`]).
 async fn exchange_for(scope: &str) -> Result<String> {
     let cache = TokenCache::auto();
+    let access = cache.load_access_token().ok_or(Error::NoCachedToken)?;
     let refresh = cache.load_refresh_token().ok_or(Error::NoRefreshToken)?;
-    let ctx = read_context()?;
+    let ctx = extract_context(&access)?;
     let grant = RefreshGrant::new(ctx.tenant_id, ctx.client_id)?;
     Ok(grant.exchange(&refresh, scope).await?.access_token)
 }
