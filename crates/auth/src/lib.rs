@@ -3,7 +3,7 @@ mod device_code;
 mod refresh;
 mod token_cache;
 
-pub use device_code::DeviceCodeFlow;
+pub use device_code::{DeviceCodeFlow, DeviceCodePrompt};
 pub use refresh::{ARM_RESOURCE, GRAPH_RESOURCE, RefreshGrant};
 pub use token_cache::TokenCache;
 

@@ -13,17 +13,16 @@ use std::io;
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
-    // ---------- library crate errors (wrapped via #[from]) ----------
-    #[error("profile: {0}")]
-    Profile(#[from] azvpn_profile::Error),
+    // ---------- library / core errors (wrapped via #[from]) ----------
+    /// Everything orchestration-related — profile parsing, openvpn,
+    /// session state, DNS apply, the connect lifecycle. Wraps the unified
+    /// core error so the CLI doesn't have to enumerate every leaf.
+    #[error("{0}")]
+    Core(#[from] azvpn_core::Error),
+    /// AAD / Graph / ARM calls (used directly by the cloud subcommands
+    /// `me`, `groups`, `manager`, `org`, `whoami`).
     #[error("auth: {0}")]
     Auth(#[from] azvpn_auth::Error),
-    #[error("openvpn: {0}")]
-    OpenVpn(#[from] azvpn_openvpn::Error),
-    #[error("session: {0}")]
-    Session(#[from] azvpn_core::session::Error),
-    #[error("dns: {0}")]
-    Dns(#[from] azvpn_core::dns::Error),
 
     // ---------- shared infrastructure ----------
     #[error("io: {0}")]
@@ -37,12 +36,7 @@ pub enum Error {
     #[error("dns resolver: {0}")]
     DnsResolver(#[from] hickory_resolver::error::ResolveError),
 
-    // ---------- shared domain failure modes ----------
-    /// Session file exists in `/var/run/azvpn/` shape but the process is
-    /// gone, or we're not connected at all. Used by status/disconnect/info.
-    #[error("not connected")]
-    NotConnected,
-
+    // ---------- CLI-local failure modes ----------
     /// No refresh token was persisted — old cache file or never connected.
     #[error(
         "no refresh token in cache — run `azvpn connect` once to refresh \
@@ -54,11 +48,6 @@ pub enum Error {
     /// is available. Whoami uses this; the rest fall through to `NoRefreshToken`.
     #[error("no cached token at {path}")]
     NoCachedToken { path: String },
-
-    /// `pushed` runs while connected but the `PUSH_REPLY` hasn't arrived
-    /// yet — the session file exists but `pushed` is `None`.
-    #[error("no pushed options recorded — gateway hasn't sent PUSH_REPLY yet")]
-    NoPushedOptions,
 
     /// JWT layout / claim extraction failed. Used by whoami and the
     /// refresh-token-grant context lookup.
@@ -73,10 +62,6 @@ pub enum Error {
     #[error("no answer for {host}")]
     NoDnsAnswer { host: String },
 
-    /// `disconnect`'s `kill(2)` shell-out returned non-zero.
-    #[error("kill failed: {0}")]
-    Kill(String),
-
     /// HTTP call to Graph / ARM returned non-2xx with body context.
     #[error("{service} {path} → {status}: {body}")]
     HttpStatus {
@@ -86,9 +71,8 @@ pub enum Error {
         body: String,
     },
 
-    /// Bag-of-strings — used sparingly for one-off validation failures
-    /// (e.g. "no server in profile"). Prefer adding a structured variant
-    /// when a use case recurs.
+    /// Bag-of-strings — used sparingly for one-off validation failures.
+    /// Prefer adding a structured variant when a use case recurs.
     #[error("{0}")]
     Other(String),
 }

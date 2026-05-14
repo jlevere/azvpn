@@ -109,6 +109,17 @@ impl RunningSession {
             Err(e) => Err(e.into()),
         }
     }
+
+    /// Returns true if the recorded pid still names a live process. Uses
+    /// `kill(pid, 0)` semantics via `kill -0` — POSIX-portable on macOS/Linux.
+    /// Windows will need a `proc-handle`-style probe when that target lands.
+    #[must_use]
+    pub fn is_process_alive(&self) -> bool {
+        std::process::Command::new("kill")
+            .args(["-0", &self.pid.to_string()])
+            .status()
+            .is_ok_and(|s| s.success())
+    }
 }
 
 /// RAII: write the session on construction, remove on Drop. Used by `connect`
