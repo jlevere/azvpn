@@ -17,5 +17,14 @@ thiserror = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }
 
+[target.'cfg(target_os = "macos")'.dependencies]
+azvpn-tunnel-darwin = { workspace = true }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+azvpn-tunnel-linux = { workspace = true }
+
+[target.'cfg(target_os = "windows")'.dependencies]
+azvpn-tunnel-windows = { workspace = true }
+
 [lints]
 workspace = true

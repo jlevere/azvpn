@@ -114,7 +114,6 @@ dependencies = [
  "azvpn-core",
  "azvpn-openvpn",
  "azvpn-profile",
- "azvpn-tunnel-darwin",
  "base64",
  "clap",
  "hickory-resolver",
@@ -136,6 +135,7 @@ name = "azvpn-auth"
 version = "0.1.0"
 dependencies = [
  "azvpn-profile",
+ "base64",
  "reqwest",
  "serde",
  "serde_json",
@@ -151,6 +151,9 @@ dependencies = [
  "azvpn-auth",
  "azvpn-openvpn",
  "azvpn-profile",
+ "azvpn-tunnel-darwin",
+ "azvpn-tunnel-linux",
+ "azvpn-tunnel-windows",
  "serde",
  "serde_json",
  "thiserror 2.0.18",

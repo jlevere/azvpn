@@ -22,6 +22,8 @@ pub enum Error {
     OpenVpn(#[from] azvpn_openvpn::Error),
     #[error("session: {0}")]
     Session(#[from] azvpn_core::session::Error),
+    #[error("dns: {0}")]
+    Dns(#[from] azvpn_core::dns::Error),
 
     // ---------- shared infrastructure ----------
     #[error("io: {0}")]

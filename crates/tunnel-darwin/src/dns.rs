@@ -29,9 +29,25 @@ pub struct DnsGuard {
     store: Option<SCDynamicStore>,
 }
 
+impl Default for DnsGuard {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl DnsGuard {
+    /// Construct an inert guard. Call [`apply`](Self::apply) (or the
+    /// `DnsManager` trait method) to install settings.
+    #[must_use]
+    pub const fn new() -> Self {
+        Self { store: None }
+    }
+
+    /// Construct *and* install — kept as a convenience for tests; the
+    /// canonical flow is `new()` + `apply()` through the `DnsManager`
+    /// trait.
     pub fn install(suffixes: &[&str], dns_servers: &[IpAddr]) -> Result<Self, Error> {
-        let mut guard = Self { store: None };
+        let mut guard = Self::new();
         guard.update(suffixes, dns_servers)?;
         Ok(guard)
     }
