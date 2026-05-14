@@ -31,6 +31,9 @@ pub struct VpnProfile {
     pub name: Option<String>,
     #[serde(rename = "secondaryProfileName")]
     pub secondary_profile_name: Option<String>,
+    /// HA-pair marker. Set when this profile is half of a primary/secondary
+    /// pair; `secondary_profile_name` then references the other half.
+    pub highavailability: Option<bool>,
     pub serverlist: ServerList,
     pub clientauth: ClientAuth,
     pub protocolconfig: Option<ProtocolConfig>,
@@ -55,13 +58,43 @@ pub struct ClientAuth {
     #[serde(rename = "type")]
     pub auth_type: AuthType,
     pub aad: Option<AadConfig>,
+    pub cert: Option<ClientCert>,
+    pub usernamepass: Option<UsernamePass>,
 }
 
+/// The four authentication methods Azure P2S gateways advertise. Azure's
+/// wire enumeration is `aad | cert | usernamepass | radius` (per the
+/// reconstructed XSD); `certificate` is accepted as an alias because our
+/// historical test fixtures use that spelling.
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum AuthType {
     Aad,
+    #[serde(rename = "cert", alias = "certificate")]
     Certificate,
+    /// Local username + password defined on the gateway. Not OIDC.
+    UsernamePass,
+    /// Username + password proxied to an external RADIUS server.
+    Radius,
+}
+
+/// Client-certificate auth config. All three fields are optional in the
+/// wire format — a populated profile has at least `hash` (thumbprint of a
+/// cert in the OS store) or `certificatedata` (inline PEM/PFX).
+#[derive(Debug, Clone, Deserialize, Default)]
+pub struct ClientCert {
+    pub hash: Option<String>,
+    pub issuer: Option<String>,
+    pub certificatedata: Option<String>,
+}
+
+/// Username + password credentials. Gateways generally don't ship these
+/// in the profile (the user enters them at connect time), so both fields
+/// are optional. Populated profiles do exist for headless / CI use.
+#[derive(Debug, Clone, Deserialize, Default)]
+pub struct UsernamePass {
+    pub username: Option<String>,
+    pub password: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -73,6 +106,13 @@ pub struct AadConfig {
     #[serde(rename = "disableSso")]
     pub disable_sso: Option<bool>,
     pub enablegrouptoken: Option<bool>,
+    /// Device-based SSO toggle introduced in Windows client v4.0.5.0
+    /// (March 2026). Older clients won't emit this; treated as `None`.
+    pub enabledevicesso: Option<bool>,
+    /// Custom AAD app GUID that overrides the built-in Azure VPN app.
+    /// Both `applicationid` and `appid` are observed in client parser
+    /// tables; accept either spelling.
+    #[serde(alias = "appid")]
     pub applicationid: Option<String>,
 }
 
@@ -139,8 +179,20 @@ pub struct Route {
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct ServerValidation {
+    /// `cert` → validate by pinning hash + EKU; `secret` → validate the
+    /// `serversecret` blob the gateway emits. Optional in the wire
+    /// format; the populated branch picks the method.
+    #[serde(rename = "type")]
+    pub kind: Option<ServerValidationKind>,
     pub serversecret: Option<String>,
     pub cert: Option<ServerCert>,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum ServerValidationKind {
+    Cert,
+    Secret,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -153,7 +205,8 @@ pub struct ServerCert {
 
 impl VpnProfile {
     pub fn from_xml(xml: &str) -> Result<Self, Error> {
-        let profile: Self = quick_xml::de::from_str(xml)?;
+        let cleaned = strip_nil_elements(xml);
+        let profile: Self = quick_xml::de::from_str(&cleaned)?;
         profile.validate()?;
         Ok(profile)
     }
@@ -168,18 +221,34 @@ impl VpnProfile {
             return Err(Error::Validation("no servers in profile".into()));
         }
 
-        if self.clientauth.auth_type == AuthType::Aad {
-            let aad = self
-                .clientauth
-                .aad
-                .as_ref()
-                .ok_or_else(|| Error::Validation("AAD auth requires <aad> block".into()))?;
-
-            if aad.audience.is_empty() {
-                return Err(Error::Validation("AAD auth requires audience".into()));
+        match self.clientauth.auth_type {
+            AuthType::Aad => {
+                let aad = self.clientauth.aad.as_ref().ok_or_else(|| {
+                    Error::Validation("AAD auth requires <aad> block".into())
+                })?;
+                if aad.audience.is_empty() {
+                    return Err(Error::Validation("AAD auth requires audience".into()));
+                }
+                if aad.tenant.is_empty() {
+                    return Err(Error::Validation("AAD auth requires tenant".into()));
+                }
             }
-            if aad.tenant.is_empty() {
-                return Err(Error::Validation("AAD auth requires tenant".into()));
+            AuthType::Certificate => {
+                // <cert> may be absent in the wire form (gateway expects the
+                // user to select a system-store cert at connect time) so we
+                // don't require the block; the cert lookup itself fails
+                // later if nothing matches.
+            }
+            AuthType::UsernamePass | AuthType::Radius => {
+                // Both require the credential block — we don't run an
+                // interactive prompt yet, so a profile that names
+                // username/password auth without providing them is
+                // unusable in our CLI.
+                if self.clientauth.usernamepass.is_none() {
+                    return Err(Error::Validation(
+                        "usernamepass/radius auth requires <usernamepass> block".into(),
+                    ));
+                }
             }
         }
 
@@ -213,6 +282,42 @@ impl VpnProfile {
             .and_then(|s| s.transportprotocol)
             .unwrap_or_default()
     }
+}
+
+/// Strip self-closing `<elem ... i:nil="true" />` elements.
+///
+/// .NET's `DataContractSerializer` emits these as null-sentinels alongside
+/// populated siblings (e.g. the Linux client's export template carries both
+/// a populated `<cert>...</cert>` and a separate `<cert i:nil="true" />` at
+/// the same level). quick-xml's serde rejects the duplicate field, but
+/// semantically the nil sibling is identical to the field being absent —
+/// which `Option<T>` already represents. Stripping is safe and idempotent.
+///
+/// Hand-rolled scan instead of a regex dep: the pattern is fully bounded
+/// (`<` … `/>` with `i:nil="true"` inside the tag). XML attribute values
+/// can't contain unescaped `>`, so finding the next `>` always lands on
+/// the tag terminator. CDATA blocks pass through untouched because they
+/// aren't self-closing.
+fn strip_nil_elements(xml: &str) -> String {
+    let mut out = String::with_capacity(xml.len());
+    let mut rest = xml;
+    while let Some(lt) = rest.find('<') {
+        out.push_str(&rest[..lt]);
+        rest = &rest[lt..];
+        let Some(gt) = rest.find('>') else {
+            out.push_str(rest);
+            return out;
+        };
+        let tag = &rest[..=gt];
+        let is_nil_placeholder = tag.ends_with("/>")
+            && (tag.contains(r#"i:nil="true""#) || tag.contains("i:nil='true'"));
+        if !is_nil_placeholder {
+            out.push_str(tag);
+        }
+        rest = &rest[gt + 1..];
+    }
+    out.push_str(rest);
+    out
 }
 
 #[cfg(test)]
@@ -340,5 +445,224 @@ mod tests {
 
         let err = VpnProfile::from_xml(xml).unwrap_err();
         assert!(err.to_string().contains("AAD"));
+    }
+
+    /// Wire form from Azure: `<type>cert</type>` (per XSD). Older test
+    /// fixtures spell it `certificate`; both must parse.
+    #[test]
+    fn parse_certificate_wire_and_alias() {
+        let with_wire = r"<AzVpnProfile>
+            <serverlist><ServerEntry><fqdn>gw.example.com</fqdn></ServerEntry></serverlist>
+            <clientauth>
+                <type>cert</type>
+                <cert>
+                    <hash>df3c24f9bfd666761b268073fe06d1cc8d4f82a4</hash>
+                    <issuer>CN=AzVpn Root CA</issuer>
+                </cert>
+            </clientauth>
+        </AzVpnProfile>";
+        let p = VpnProfile::from_xml(with_wire).unwrap();
+        assert_eq!(p.clientauth.auth_type, AuthType::Certificate);
+        let cert = p.clientauth.cert.as_ref().unwrap();
+        assert_eq!(
+            cert.hash.as_deref(),
+            Some("df3c24f9bfd666761b268073fe06d1cc8d4f82a4")
+        );
+        assert_eq!(cert.issuer.as_deref(), Some("CN=AzVpn Root CA"));
+
+        let with_alias = r"<AzVpnProfile>
+            <serverlist><ServerEntry><fqdn>gw.example.com</fqdn></ServerEntry></serverlist>
+            <clientauth><type>certificate</type></clientauth>
+        </AzVpnProfile>";
+        let p = VpnProfile::from_xml(with_alias).unwrap();
+        assert_eq!(p.clientauth.auth_type, AuthType::Certificate);
+    }
+
+    #[test]
+    fn parse_usernamepass_with_credentials() {
+        let xml = r"<AzVpnProfile>
+            <serverlist><ServerEntry><fqdn>gw.example.com</fqdn></ServerEntry></serverlist>
+            <clientauth>
+                <type>usernamepass</type>
+                <usernamepass>
+                    <username>svc-headless</username>
+                    <password>hunter2</password>
+                </usernamepass>
+            </clientauth>
+        </AzVpnProfile>";
+        let p = VpnProfile::from_xml(xml).unwrap();
+        assert_eq!(p.clientauth.auth_type, AuthType::UsernamePass);
+        let creds = p.clientauth.usernamepass.as_ref().unwrap();
+        assert_eq!(creds.username.as_deref(), Some("svc-headless"));
+        assert_eq!(creds.password.as_deref(), Some("hunter2"));
+    }
+
+    #[test]
+    fn parse_radius_with_credentials() {
+        let xml = r"<AzVpnProfile>
+            <serverlist><ServerEntry><fqdn>gw.example.com</fqdn></ServerEntry></serverlist>
+            <clientauth>
+                <type>radius</type>
+                <usernamepass>
+                    <username>alice</username>
+                </usernamepass>
+            </clientauth>
+        </AzVpnProfile>";
+        let p = VpnProfile::from_xml(xml).unwrap();
+        assert_eq!(p.clientauth.auth_type, AuthType::Radius);
+    }
+
+    #[test]
+    fn reject_usernamepass_without_block() {
+        let xml = r"<AzVpnProfile>
+            <serverlist><ServerEntry><fqdn>gw.example.com</fqdn></ServerEntry></serverlist>
+            <clientauth><type>usernamepass</type></clientauth>
+        </AzVpnProfile>";
+        let err = VpnProfile::from_xml(xml).unwrap_err();
+        assert!(err.to_string().contains("usernamepass"));
+    }
+
+    #[test]
+    fn parse_highavailability_flag() {
+        let xml = r"<AzVpnProfile>
+            <highavailability>true</highavailability>
+            <secondaryProfileName>vwan-secondary</secondaryProfileName>
+            <serverlist><ServerEntry><fqdn>gw.example.com</fqdn></ServerEntry></serverlist>
+            <clientauth><type>cert</type></clientauth>
+        </AzVpnProfile>";
+        let p = VpnProfile::from_xml(xml).unwrap();
+        assert_eq!(p.highavailability, Some(true));
+        assert_eq!(p.secondary_profile_name.as_deref(), Some("vwan-secondary"));
+    }
+
+    #[test]
+    fn parse_servervalidation_kind() {
+        let cert_kind = r"<AzVpnProfile>
+            <serverlist><ServerEntry><fqdn>gw.example.com</fqdn></ServerEntry></serverlist>
+            <clientauth><type>cert</type></clientauth>
+            <servervalidation>
+                <type>cert</type>
+                <cert><hash>abc123</hash></cert>
+            </servervalidation>
+        </AzVpnProfile>";
+        let p = VpnProfile::from_xml(cert_kind).unwrap();
+        let validation = p.servervalidation.as_ref().unwrap();
+        assert_eq!(validation.kind, Some(ServerValidationKind::Cert));
+
+        let secret_kind = r"<AzVpnProfile>
+            <serverlist><ServerEntry><fqdn>gw.example.com</fqdn></ServerEntry></serverlist>
+            <clientauth><type>cert</type></clientauth>
+            <servervalidation>
+                <type>secret</type>
+                <serversecret>deadbeef</serversecret>
+            </servervalidation>
+        </AzVpnProfile>";
+        let p = VpnProfile::from_xml(secret_kind).unwrap();
+        assert_eq!(
+            p.servervalidation.as_ref().unwrap().kind,
+            Some(ServerValidationKind::Secret)
+        );
+    }
+
+    /// `.NET` `DataContract` emits `<elem i:nil="true" />` for optional
+    /// fields the gateway left null. Conceptually identical to the
+    /// field being absent — `Option<T>` collapses both into `None`.
+    #[test]
+    fn parse_inline_nil_placeholders() {
+        let xml = r#"<AzVpnProfile xmlns:i="http://www.w3.org/2001/XMLSchema-instance">
+            <serverlist>
+                <ServerEntry>
+                    <displayname i:nil="true" />
+                    <fqdn>gw.example.com</fqdn>
+                </ServerEntry>
+            </serverlist>
+            <clientauth>
+                <type>cert</type>
+                <cert>
+                    <hash>abc123</hash>
+                    <issuer i:nil="true" />
+                    <certificatedata i:nil="true" />
+                </cert>
+            </clientauth>
+            <servervalidation>
+                <type>cert</type>
+                <cert>
+                    <hash>def456</hash>
+                    <ekulist i:nil="true" />
+                    <issuer i:nil="true" />
+                    <certificatedata i:nil="true" />
+                </cert>
+            </servervalidation>
+        </AzVpnProfile>"#;
+        let p = VpnProfile::from_xml(xml).unwrap();
+        assert_eq!(p.serverlist.entries[0].displayname, None);
+        let cert = p.clientauth.cert.as_ref().unwrap();
+        assert_eq!(cert.hash.as_deref(), Some("abc123"));
+        assert_eq!(cert.issuer, None);
+        assert_eq!(cert.certificatedata, None);
+    }
+
+    /// `strip_nil_elements` is idempotent and a no-op on inputs without nils.
+    #[test]
+    fn strip_nil_is_noop_when_absent() {
+        let plain = "<a><b>x</b></a>";
+        assert_eq!(strip_nil_elements(plain), plain);
+        let nil = r#"<a><b i:nil="true" /></a>"#;
+        let once = strip_nil_elements(nil);
+        let twice = strip_nil_elements(&once);
+        assert_eq!(once, twice);
+        assert!(!once.contains("i:nil"));
+    }
+
+    /// Azure ARM delivers profiles inside `<CustomConfiguration>` with full
+    /// datacontract namespace declarations. The macOS client strips these
+    /// before re-serializing to disk, but tooling that ingests an ARM
+    /// `generateVpnProfile` response directly should still parse cleanly.
+    #[test]
+    fn parse_with_datacontract_namespace() {
+        let xml = r#"<AzVpnProfile xmlns="http://schemas.datacontract.org/2004/07/" xmlns:i="http://www.w3.org/2001/XMLSchema-instance">
+            <version>1</version>
+            <serverlist>
+                <ServerEntry><fqdn>gw.example.com</fqdn></ServerEntry>
+            </serverlist>
+            <clientauth><type>cert</type></clientauth>
+        </AzVpnProfile>"#;
+        let p = VpnProfile::from_xml(xml).unwrap();
+        assert_eq!(p.version, Some(1));
+        assert_eq!(p.clientauth.auth_type, AuthType::Certificate);
+    }
+
+    /// `applicationid` is the canonical spelling but client parser tables
+    /// also accept `appid`. The XSD lists both — we must too.
+    #[test]
+    fn aad_accepts_appid_alias() {
+        let base = |tag: &str| {
+            format!(
+                r"<AzVpnProfile>
+                    <serverlist><ServerEntry><fqdn>gw.example.com</fqdn></ServerEntry></serverlist>
+                    <clientauth>
+                        <type>aad</type>
+                        <aad>
+                            <issuer>https://sts.windows.net/abc/</issuer>
+                            <tenant>https://login.microsoftonline.com/abc/</tenant>
+                            <audience>aud-guid</audience>
+                            <{tag}>custom-app-guid</{tag}>
+                        </aad>
+                    </clientauth>
+                </AzVpnProfile>"
+            )
+        };
+
+        let with_canonical = VpnProfile::from_xml(&base("applicationid")).unwrap();
+        assert_eq!(
+            with_canonical.clientauth.aad.unwrap().applicationid.as_deref(),
+            Some("custom-app-guid")
+        );
+
+        let with_alias = VpnProfile::from_xml(&base("appid")).unwrap();
+        assert_eq!(
+            with_alias.clientauth.aad.unwrap().applicationid.as_deref(),
+            Some("custom-app-guid")
+        );
     }
 }

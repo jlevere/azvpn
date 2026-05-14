@@ -56,6 +56,11 @@ pub async fn run(profile_path: &Path, verbose: bool) -> Result<()> {
 async fn ensure_access_token(profile: &VpnProfile) -> Result<Option<String>> {
     match profile.clientauth.auth_type {
         AuthType::Certificate => Ok(None),
+        AuthType::UsernamePass | AuthType::Radius => Err(azvpn_core::Error::Other(
+            "usernamepass / radius auth is parsed but not yet wired into connect — \
+             only AAD and certificate auth are supported today".into(),
+        )
+        .into()),
         AuthType::Aad => {
             let aad_profile = profile.clientauth.aad.as_ref().ok_or_else(|| {
                 azvpn_core::Error::Other("AAD auth requires <aad> config block".into())
