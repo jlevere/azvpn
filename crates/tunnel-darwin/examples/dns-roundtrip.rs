@@ -1,4 +1,4 @@
-//! M4 acceptance test for the macOS SCDynamicStore DNS path.
+//! M4 acceptance test for the macOS `SCDynamicStore` DNS path.
 //!
 //! Run with: `cargo build --example dns-roundtrip -p azvpn-tunnel-darwin
 //! && sudo target/debug/examples/dns-roundtrip`
@@ -33,7 +33,7 @@ fn scutil_dns() -> String {
 }
 
 /// Query the dynamic store directly via `scutil show <key>` — proves whether
-/// the key is present in SCDynamicStore independently of mDNSResponder.
+/// the key is present in `SCDynamicStore` independently of mDNSResponder.
 fn scutil_show(key: &str) -> String {
     let mut child = Command::new("scutil")
         .stdin(Stdio::piped())
