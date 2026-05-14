@@ -257,6 +257,13 @@ impl PushOptions {
             opts.cipher = Some(rest.to_owned());
             return true;
         }
+        // `topology <subnet|p2p|net30>` controls how the `ifconfig` second
+        // value is interpreted (netmask for subnet, peer for p2p). We
+        // only consume `Ifconfig.local`; the openvpn child applies the
+        // remote/mask itself. Recognise so it doesn't show up as an extra.
+        if token.starts_with("topology ") {
+            return true;
+        }
         false
     }
 }
@@ -509,7 +516,7 @@ mod tests {
         );
         assert_eq!(opts.tun_mtu, Some(1400));
         assert_eq!(opts.cipher.as_deref(), Some("AES-256-GCM"));
-        assert_eq!(opts.extras, ["topology subnet"]);
+        assert!(opts.extras.is_empty(), "extras: {:?}", opts.extras);
     }
 
     #[test]

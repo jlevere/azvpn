@@ -1,20 +1,30 @@
-# systemd unit for the `azvpn` daemon.
+# systemd unit for the `azvpnd` system daemon.
 #
-# Placeholder — the daemon binary (/usr/lib/azvpn/azvpn-daemon) does not
-# yet exist. This file ships with the .deb/.rpm so that the Linux daemon
-# milestone only has to add the binary, not the packaging glue. Until
-# then, on Linux this unit is installed but never enabled.
-#
-# Install path:
-#   /etc/systemd/system/azvpn.service
-# Enable + start (post-daemon):
+# Install:
+#   sudo install -m 0755 target/release/azvpnd /usr/lib/azvpn/azvpnd
+#   sudo install -m 0644 packaging/systemd/azvpn.service \
+#       /etc/systemd/system/azvpn.service
 #   sudo systemctl daemon-reload
 #   sudo systemctl enable --now azvpn.service
 #
-# The daemon needs root for TUN + resolved DBus, so no `User=` override.
-# `Restart=on-failure` keeps the tunnel alive across transient gateway
-# blips; explicit disconnects via `azvpn disconnect` (exit 0) are not
-# restarted.
+# Inspect:
+#   systemctl status azvpn.service
+#   journalctl -u azvpn.service -f
+#   ls -la /var/run/azvpn/azvpnd.sock     # expect srw-rw---- root adm
+#
+# Reload after a binary rebuild:
+#   sudo systemctl restart azvpn.service
+#
+# Remove:
+#   sudo systemctl disable --now azvpn.service
+#   sudo rm /etc/systemd/system/azvpn.service /usr/lib/azvpn/azvpnd
+#
+# The daemon runs as root — it owns the openvpn child, DNS settings via
+# systemd-resolved D-Bus, and route table edits. The CLI (`azvpn`)
+# runs as the invoking user and talks to it over
+# /var/run/azvpn/azvpnd.sock (mode 0660, group `adm` by default on
+# Debian/Ubuntu — override with AZVPND_GROUP for distros that don't
+# have `adm`).
 
 [Unit]
 Description=Azure VPN client daemon
@@ -24,17 +34,31 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-ExecStart=/usr/lib/azvpn/azvpn-daemon
+ExecStart=/usr/lib/azvpn/azvpnd
 Restart=on-failure
 RestartSec=5
+# Give the daemon a window to tear down openvpn + remove routes / DNS
+# state before systemd escalates to SIGKILL.
+TimeoutStopSec=10s
 
-# Hardening defaults — tighten further once the daemon's actual syscall
-# surface is known. Network namespace isolation is intentionally NOT set:
-# we *are* the host's tunnel.
+# `AZVPND_OPENVPN` pins the openvpn binary path; unset → looked up on
+# $PATH. On a packaged install the distro's `openvpn` package is the
+# right thing.
+Environment=AZVPND_OPENVPN=/usr/sbin/openvpn
+# `adm` group is the Debian/Ubuntu convention for users who can read
+# system logs and similar; matches "sudoers-ish on a desktop install"
+# without requiring a dedicated azvpn group. Override per-distro.
+Environment=AZVPND_GROUP=adm
+Environment=RUST_LOG=info
+
+# Hardening — adjust once the Linux DNS impl (systemd-resolved
+# D-Bus) lands, since that needs CAP_NET_BIND_SERVICE or D-Bus
+# access. Network namespace isolation is intentionally NOT set: we
+# *are* the host's tunnel.
 NoNewPrivileges=true
 ProtectSystem=strict
 ProtectHome=true
-ReadWritePaths=/var/run/azvpn /var/log/azvpn /etc/resolv.conf
+ReadWritePaths=/var/run/azvpn
 
 [Install]
 WantedBy=multi-user.target
