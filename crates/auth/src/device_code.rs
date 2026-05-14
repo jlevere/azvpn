@@ -1,7 +1,7 @@
 use std::time::{Duration, SystemTime};
 
 use serde::Deserialize;
-use tracing::{debug, info};
+use tracing::{debug, info, instrument};
 
 use crate::{AadConfig, Error, Token};
 
@@ -46,6 +46,7 @@ impl DeviceCodeFlow {
         }
     }
 
+    #[instrument(skip_all, fields(tenant = %self.config.tenant_id))]
     pub async fn start(&self) -> Result<DeviceCodePrompt, Error> {
         let url = format!(
             "https://login.microsoftonline.com/{}/oauth2/v2.0/devicecode",
@@ -82,6 +83,7 @@ impl DeviceCodeFlow {
         })
     }
 
+    #[instrument(skip_all, name = "device_code_poll")]
     pub async fn poll_for_token(&self, prompt: &DeviceCodePrompt) -> Result<Token, Error> {
         let url = format!(
             "https://login.microsoftonline.com/{}/oauth2/v2.0/token",
