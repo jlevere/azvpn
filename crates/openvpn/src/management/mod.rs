@@ -20,7 +20,7 @@ mod state;
 pub use client::ManagementClient;
 pub use event::{Event, LogLevel, Realm};
 pub use push::{
-    AddrFamily, Ifconfig, PushOptions, PushedRoute, RedirectGateway, ipv4_mask_to_prefix,
-    ipv4_prefix_to_mask,
+    AddrFamily, Compression, Ifconfig, PushOptions, PushedRoute, RedirectGateway,
+    ipv4_mask_to_prefix, ipv4_prefix_to_mask,
 };
 pub use state::VpnState;

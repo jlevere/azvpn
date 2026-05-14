@@ -18,8 +18,8 @@ mod process;
 
 pub use config::{ConfigBuilder, bundled_root_ca_sha1};
 pub use management::{
-    AddrFamily, Event, Ifconfig, LogLevel, ManagementClient, PushOptions, PushedRoute,
-    RedirectGateway, Realm, VpnState, ipv4_mask_to_prefix, ipv4_prefix_to_mask,
+    AddrFamily, Compression, Event, Ifconfig, LogLevel, ManagementClient, PushOptions,
+    PushedRoute, RedirectGateway, Realm, VpnState, ipv4_mask_to_prefix, ipv4_prefix_to_mask,
 };
 pub use process::OpenVpnProcess;
 

@@ -26,6 +26,18 @@ pub struct PushedRoute {
     pub family: AddrFamily,
 }
 
+impl PushedRoute {
+    #[must_use]
+    pub fn is_ipv4(&self) -> bool {
+        matches!(self.family, AddrFamily::V4)
+    }
+
+    #[must_use]
+    pub fn is_ipv6(&self) -> bool {
+        matches!(self.family, AddrFamily::V6)
+    }
+}
+
 #[derive(Debug, Clone, Copy, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
 pub enum AddrFamily {
     V4,
@@ -141,6 +153,59 @@ impl RedirectGateway {
     }
 }
 
+/// Data-channel compression mode pushed by the gateway. Most production
+/// gateways either don't push this directive at all (good) or push a
+/// handshake-only stub (also fine). An "active" variant means real
+/// compression alongside encryption — CRIME / VORACLE-class attacks
+/// exploit compressibility leaks through encrypted streams, so the
+/// apply layer refuses it.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum Compression {
+    /// `compress stub` — wire-protocol no-op, no actual compression.
+    Stub,
+    /// `compress stub-v2` — same idea, newer wire form.
+    StubV2,
+    /// `comp-lzo no` — legacy directive with compression explicitly off.
+    CompLzoOff,
+    /// Real compression algorithm. Preserved verbatim (e.g. `lz4-v2`,
+    /// `comp-lzo`, `comp-lzo adaptive`) for diagnostics.
+    Active(String),
+}
+
+impl Compression {
+    fn parse(s: &str) -> Self {
+        let trimmed = s.trim();
+        if trimmed.eq_ignore_ascii_case("stub") {
+            Self::Stub
+        } else if trimmed.eq_ignore_ascii_case("stub-v2") {
+            Self::StubV2
+        } else if trimmed.eq_ignore_ascii_case("comp-lzo no") {
+            Self::CompLzoOff
+        } else {
+            Self::Active(trimmed.to_owned())
+        }
+    }
+
+    /// Safe to apply — no real compression on encrypted bytes.
+    #[must_use]
+    pub fn is_safe(&self) -> bool {
+        matches!(self, Self::Stub | Self::StubV2 | Self::CompLzoOff)
+    }
+}
+
+/// Parse a `<prefix><u32>` directive into `target`. Returns `true` when
+/// `token` matched the prefix (regardless of whether the inner number
+/// parsed) so the caller can short-circuit further dispatch.
+fn take_u32(token: &str, prefix: &str, target: &mut Option<u32>) -> bool {
+    let Some(rest) = token.strip_prefix(prefix) else {
+        return false;
+    };
+    if let Ok(value) = rest.parse() {
+        *target = Some(value);
+    }
+    true
+}
+
 /// OR-merge two `RedirectGateway` flag sets. A `PUSH_REPLY` carrying
 /// both `redirect-gateway def1` and `redirect-gateway-ipv6` (or two
 /// `redirect-gateway` directives, which `OpenVPN` config allows) should
@@ -215,11 +280,9 @@ pub struct PushOptions {
     /// the gateway think I am?".
     pub peer_id: Option<u32>,
     /// `compress <algo>` / legacy `comp-lzo` — data-channel compression.
-    /// Captured here so the apply path can refuse known-dangerous
-    /// algorithms (CRIME/VORACLE-style attacks against compressed
-    /// encrypted streams). `stub-v2` is the OK case: no actual
-    /// compression, just protocol-handshake bytes.
-    pub compress: Option<String>,
+    /// Parsed into a typed [`Compression`] so the apply layer can match
+    /// on safe vs active variants instead of string-comparing wire forms.
+    pub compress: Option<Compression>,
     /// Tokens we didn't recognise — preserved verbatim so debug output shows
     /// everything the gateway told us.
     pub extras: Vec<String>,
@@ -231,23 +294,21 @@ impl PushOptions {
     /// stripping the surrounding `PUSH_REPLY,…'` framing first.
     pub(crate) fn parse(options_line: &str) -> Self {
         let mut opts = Self::default();
-        let mut recognised = 0usize;
+        let mut saw_any = false;
         for token in options_line.split(',') {
             let token = token.trim();
             if token.is_empty() {
                 continue;
             }
-            if Self::parse_token(&mut opts, token) {
-                recognised += 1;
-                continue;
+            saw_any = true;
+            if !Self::parse_token(&mut opts, token) {
+                opts.extras.push(token.to_owned());
             }
-            opts.extras.push(token.to_owned());
         }
-        if recognised == 0 && opts.extras.is_empty() {
+        if !saw_any {
             tracing::warn!(
-                "PUSH_REPLY arrived with no recognisable or unknown directives — \
-                 gateway likely misconfigured; the tunnel will come up with no \
-                 routes or DNS"
+                "PUSH_REPLY arrived empty — gateway likely misconfigured; \
+                 the tunnel will come up with no routes or DNS"
             );
         }
         opts
@@ -376,49 +437,41 @@ impl PushOptions {
             }
             return true;
         }
-        if let Some(rest) = token.strip_prefix("tun-mtu ") {
-            if let Ok(mtu) = rest.parse() {
-                opts.tun_mtu = Some(mtu);
-            }
+        // Single-`u32`-value directives: `<key> <number>`. Order matters
+        // for prefix matching — longer prefixes first so `ping-restart`
+        // doesn't shadow as `ping`.
+        if take_u32(token, "tun-mtu ", &mut opts.tun_mtu)
+            || take_u32(token, "ping-restart ", &mut opts.ping_restart)
+            || take_u32(token, "ping-exit ", &mut opts.ping_exit)
+            || take_u32(token, "ping ", &mut opts.ping)
+            || take_u32(token, "peer-id ", &mut opts.peer_id)
+        {
             return true;
         }
         if let Some(rest) = token.strip_prefix("cipher ") {
             opts.cipher = Some(rest.to_owned());
             return true;
         }
-        if let Some(rest) = token.strip_prefix("ping-restart ") {
-            if let Ok(secs) = rest.parse() {
-                opts.ping_restart = Some(secs);
-            }
-            return true;
-        }
-        if let Some(rest) = token.strip_prefix("ping-exit ") {
-            if let Ok(secs) = rest.parse() {
-                opts.ping_exit = Some(secs);
-            }
-            return true;
-        }
-        if let Some(rest) = token.strip_prefix("ping ") {
-            if let Ok(secs) = rest.parse() {
-                opts.ping = Some(secs);
-            }
-            return true;
-        }
-        if let Some(rest) = token.strip_prefix("peer-id ") {
-            if let Ok(id) = rest.parse() {
-                opts.peer_id = Some(id);
-            }
-            return true;
-        }
         // `compress <algo>` (OpenVPN 2.4+) and legacy `comp-lzo [adaptive]`
-        // both end up here. Stash the algo; the apply layer is the one
-        // that refuses dangerous values.
+        // both end up parsed into the typed `Compression` enum. The apply
+        // layer refuses the active-algorithm variant; the handshake-only
+        // stub/comp-lzo-off forms pass through.
         if let Some(rest) = token.strip_prefix("compress ") {
-            opts.compress = Some(rest.to_owned());
+            opts.compress = Some(Compression::parse(rest));
             return true;
         }
-        if token == "comp-lzo" || token.starts_with("comp-lzo ") {
-            opts.compress = Some(token.to_owned());
+        if let Some(rest) = token.strip_prefix("comp-lzo") {
+            // `comp-lzo` alone, `comp-lzo no`, `comp-lzo adaptive`, etc.
+            let body = if rest.is_empty() {
+                "comp-lzo".to_owned()
+            } else if let Some(args) = rest.strip_prefix(' ') {
+                format!("comp-lzo {args}")
+            } else {
+                // Not actually our prefix (e.g. `comp-lzo-something`);
+                // let it fall through to extras.
+                return false;
+            };
+            opts.compress = Some(Compression::parse(&body));
             return true;
         }
         // `redirect-gateway-ipv6` is the older form (pre-OpenVPN 2.5);
@@ -634,16 +687,28 @@ mod tests {
         assert_eq!(opts.ping_restart, Some(60));
         assert_eq!(opts.ping_exit, Some(120));
         assert_eq!(opts.peer_id, Some(7));
-        assert_eq!(opts.compress.as_deref(), Some("stub-v2"));
+        assert_eq!(opts.compress, Some(Compression::StubV2));
         assert!(opts.extras.is_empty(), "extras: {:?}", opts.extras);
     }
 
     #[test]
     fn comp_lzo_legacy_form_captured() {
         let opts = PushOptions::parse("comp-lzo,topology subnet");
-        assert_eq!(opts.compress.as_deref(), Some("comp-lzo"));
+        assert_eq!(
+            opts.compress,
+            Some(Compression::Active("comp-lzo".into())),
+            "bare comp-lzo means active legacy LZO"
+        );
         let opts2 = PushOptions::parse("comp-lzo no,topology subnet");
-        assert_eq!(opts2.compress.as_deref(), Some("comp-lzo no"));
+        assert_eq!(opts2.compress, Some(Compression::CompLzoOff));
+    }
+
+    #[test]
+    fn compression_is_safe_matches_handshake_only_variants() {
+        assert!(Compression::Stub.is_safe());
+        assert!(Compression::StubV2.is_safe());
+        assert!(Compression::CompLzoOff.is_safe());
+        assert!(!Compression::Active("lz4".into()).is_safe());
     }
 
     #[test]

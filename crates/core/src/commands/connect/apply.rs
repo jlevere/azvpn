@@ -3,7 +3,7 @@
 //! every push-reply — the first call installs, every later call diffs
 //! and only changes what actually moved.
 
-use azvpn_openvpn::PushOptions;
+use azvpn_openvpn::{PushOptions, PushedRoute};
 use azvpn_profile::VpnProfile;
 use ipnet::IpNet;
 use tracing::info;
@@ -35,37 +35,11 @@ async fn apply_routes(manager: &mut RouteManager, push_opts: &PushOptions) -> Re
         tracing::warn!("no route-gateway in push reply — skipping route install");
         return Ok(());
     };
-    // Filter out routes the management-line parser admitted with an
-    // invalid (family, prefix-length) combo. Real gateways don't do
-    // this, but a bug or hostile push shouldn't crash the manager.
-    // Also drop v6 routes when no v6 ifconfig was pushed — installing
-    // them would point a v6 destination at a v4-only tunnel.
     let has_v6_ifconfig = push_opts.ifconfig_ipv6.is_some();
     let mut desired: Vec<IpNet> = push_opts
         .routes
         .iter()
-        .filter_map(|r| {
-            if matches!(r.family, azvpn_openvpn::AddrFamily::V6) && !has_v6_ifconfig {
-                tracing::warn!(
-                    destination = %r.destination,
-                    prefix = r.prefix,
-                    "skipping IPv6 pushed route — no ifconfig-ipv6 in push reply"
-                );
-                return None;
-            }
-            match route::pushed_to_ipnet(r) {
-                Ok(net) => Some(net),
-                Err(e) => {
-                    tracing::warn!(
-                        destination = %r.destination,
-                        prefix = r.prefix,
-                        error = %e,
-                        "skipping route with invalid prefix length"
-                    );
-                    None
-                }
-            }
-        })
+        .filter_map(|r| route_for_apply(r, has_v6_ifconfig))
         .collect();
 
     if let Some(rg) = push_opts.redirect_gateway {
@@ -83,6 +57,38 @@ async fn apply_routes(manager: &mut RouteManager, push_opts: &PushOptions) -> Re
 
     manager.apply(&desired, gateway).await?;
     Ok(())
+}
+
+/// Decide whether a single pushed route should make it into the apply
+/// set. Drops:
+///
+/// - IPv6 routes when no `ifconfig-ipv6` was pushed (would point a v6
+///   destination at a v4-only tunnel).
+/// - Routes the management-line parser admitted with an invalid
+///   (family, prefix-length) pairing.
+///
+/// Both rejections log a `warn!` so an operator can see what dropped.
+fn route_for_apply(r: &PushedRoute, has_v6_ifconfig: bool) -> Option<IpNet> {
+    if r.is_ipv6() && !has_v6_ifconfig {
+        tracing::warn!(
+            destination = %r.destination,
+            prefix = r.prefix,
+            "skipping IPv6 pushed route — no ifconfig-ipv6 in push reply"
+        );
+        return None;
+    }
+    match route::pushed_to_ipnet(r) {
+        Ok(net) => Some(net),
+        Err(e) => {
+            tracing::warn!(
+                destination = %r.destination,
+                prefix = r.prefix,
+                error = %e,
+                "skipping route with invalid prefix length"
+            );
+            None
+        }
+    }
 }
 
 /// Apply DNS suffixes + servers. `DnsManager::apply` is documented as
