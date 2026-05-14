@@ -111,6 +111,8 @@ dependencies = [
  "azvpn-auth",
  "azvpn-openvpn",
  "azvpn-profile",
+ "serde",
+ "serde_json",
  "thiserror",
  "tokio",
  "tracing",
