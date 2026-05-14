@@ -4,7 +4,7 @@
 use std::net::{IpAddr, Ipv4Addr, SocketAddr, SocketAddrV4};
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use azvpn_core::commands::connect::{self, ConnectOptions, ConnectionStatus};
 use azvpn_ipc::{
@@ -40,6 +40,33 @@ struct ActiveConnection {
 #[derive(Clone, Default)]
 pub struct AzvpndServer {
     state: Arc<DaemonState>,
+}
+
+impl AzvpndServer {
+    /// Tear down the active connection (if any) and wait for the
+    /// connect task to finish. Called from the daemon's signal-driven
+    /// shutdown path so SIGTERM produces a clean teardown — routes,
+    /// DNS key, openvpn child — instead of leaving kernel state for
+    /// the next boot to inherit.
+    pub async fn shutdown(&self) {
+        let active = self.state.active.lock().await;
+        if let Some(conn) = active.as_ref() {
+            info!("cancelling active connection for shutdown");
+            conn.cancel.cancel();
+        }
+        drop(active);
+
+        // Wait until the connect task clears its slot. The task drops
+        // routes, DNS, openvpn child during this window; once it
+        // takes() the slot we know cleanup is done.
+        let poll = Duration::from_millis(100);
+        loop {
+            if self.state.active.lock().await.is_none() {
+                break;
+            }
+            tokio::time::sleep(poll).await;
+        }
+    }
 }
 
 impl AzvpnApi for AzvpndServer {
