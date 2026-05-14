@@ -14,10 +14,12 @@ path = "src/main.rs"
 [dependencies]
 azvpn-core = { workspace = true }
 azvpn-ipc = { workspace = true }
+azvpn-openvpn = { workspace = true }
 futures = { workspace = true }
 tarpc = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true }
+tokio-util = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 

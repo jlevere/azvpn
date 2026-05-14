@@ -13,6 +13,7 @@ use std::path::PathBuf;
 
 use azvpn_openvpn::{ConfigBuilder, Event, OpenVpnConfig, OpenVpnProcess, PushOptions, VpnState};
 use azvpn_profile::{AuthType, VpnProfile};
+use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
 use tracing::{info, instrument};
 
@@ -32,13 +33,31 @@ pub struct ConnectOptions {
     pub verbose: bool,
 }
 
+/// Latest connection state. Driven by openvpn's mgmt-state events plus
+/// the synthetic ones the connect loop emits before / after openvpn
+/// itself owns the lifecycle. Observers (e.g. the daemon's `status`
+/// handler) use [`tokio::sync::watch`] to read the current value
+/// without locking; [`watch::Receiver::changed`] / `wait_for` give a
+/// natural "wait until Connected" primitive.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum ConnectionStatus {
+    Idle,
+    Connecting,
+    Authenticating,
+    OpenVpn(VpnState),
+    Exited { code: Option<i32> },
+    Failed(String),
+}
+
 #[allow(clippy::too_many_lines)]
 #[instrument(skip_all, name = "connect", fields(profile = %opts.profile_path.display()))]
 pub async fn run(
     opts: ConnectOptions,
     access_token: Option<String>,
+    status_tx: watch::Sender<ConnectionStatus>,
     cancel: CancellationToken,
 ) -> Result<()> {
+    let _ = status_tx.send(ConnectionStatus::Connecting);
     let profile = VpnProfile::from_file(&opts.profile_path)?;
     let server = profile
         .primary_server()
@@ -108,6 +127,7 @@ pub async fn run(
                         } else {
                             info!(?state, "vpn state");
                         }
+                        let _ = status_tx.send(ConnectionStatus::OpenVpn(state.clone()));
                         if *state == VpnState::Connected {
                             info!(server = %server.fqdn, "connected");
                             if !dns_installed
@@ -166,6 +186,7 @@ pub async fn run(
 
     let code = process.wait().await?;
     info!(?code, "openvpn process exited");
+    let _ = status_tx.send(ConnectionStatus::Exited { code });
 
     // Wake up any other tasks holding a clone of the token (the signal
     // listener, primarily) so they exit instead of parking on a signal

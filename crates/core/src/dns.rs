@@ -29,7 +29,7 @@ pub type Result<T> = std::result::Result<T, Error>;
 /// `apply` is idempotent: first call installs, subsequent calls replace.
 /// `clear` removes whatever's live. Dropping the manager has the same
 /// effect as a final `clear` plus releasing platform resources.
-pub trait DnsManager {
+pub trait DnsManager: Send {
     /// Install or replace the active DNS settings.
     ///
     /// `suffixes` are split-horizon match domains (e.g. `["corp.example.com",
