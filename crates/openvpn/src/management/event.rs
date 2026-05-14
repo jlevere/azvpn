@@ -1,0 +1,260 @@
+//! Typed events flowing OUT of openvpn over the management socket.
+//! The on-wire form is one line per event, prefixed with `>SOMETHING:`;
+//! [`parse_line`] dispatches each prefix to its typed variant.
+
+use std::net::IpAddr;
+
+use super::push::PushOptions;
+use super::state::VpnState;
+
+#[derive(Debug)]
+pub enum Event {
+    State {
+        state: VpnState,
+        local_ip: Option<IpAddr>,
+    },
+    Hold,
+    /// `>PASSWORD:Need '<realm>' username/password` — openvpn is asking
+    /// the management socket to provide credentials for `realm`. For
+    /// Azure the realm is always `Auth`; the prompt fires on TLS
+    /// renegotiation when the initial `auth-user-pass` file is no longer
+    /// in scope. The caller responds with
+    /// [`crate::ManagementClient::send_auth`].
+    PasswordPrompt { realm: String },
+    /// `>PASSWORD:Auth-Token:<token>` — openvpn delivering a fresh
+    /// auth-token issued by the gateway, out-of-band from `PUSH_REPLY`.
+    /// Functionally equivalent to [`PushOptions::auth_token`] but this
+    /// is the canonical management-socket path; some openvpn versions
+    /// only emit it via this notification.
+    AuthTokenIssued { token: String },
+    /// `>PASSWORD:Verification Failed: '<realm>'` — server rejected the
+    /// credentials we sent for `realm`. Terminal for the connection.
+    PasswordVerificationFailed { realm: String },
+    /// `>FATAL:<message>` — openvpn has hit an unrecoverable error and
+    /// is about to exit. Terminal for the connection. Carries the
+    /// message verbatim so callers can surface a specific cause
+    /// (auth failure, TLS handshake error, cert chain mismatch, etc.).
+    Fatal(String),
+    Info(String),
+    ByteCount { rx: u64, tx: u64 },
+    Log(String),
+    /// Boxed because `PushOptions` is significantly larger than the other
+    /// variants — keeps the enum compact for the common state/log path.
+    PushReply(Box<PushOptions>),
+}
+
+/// Parse one line of management output into a typed [`Event`].
+/// Returns `None` for lines we don't (yet) recognise — caller loops
+/// and tries the next line.
+pub(crate) fn parse_line(line: &str) -> Option<Event> {
+    if let Some(rest) = line.strip_prefix(">STATE:") {
+        let mut parts = rest.splitn(5, ',');
+        let _timestamp = parts.next();
+        if let Some(state_str) = parts.next() {
+            let _description = parts.next();
+            let local_ip = parts.next().and_then(|s| s.parse().ok());
+            return Some(Event::State {
+                state: VpnState::parse(state_str),
+                local_ip,
+            });
+        }
+    }
+
+    if line.starts_with(">HOLD:") {
+        return Some(Event::Hold);
+    }
+
+    if let Some(rest) = line.strip_prefix(">PASSWORD:") {
+        return Some(parse_password_line(rest));
+    }
+
+    if let Some(rest) = line.strip_prefix(">BYTECOUNT:") {
+        let mut parts = rest.splitn(2, ',');
+        if let (Some(rx_str), Some(tx_str)) = (parts.next(), parts.next())
+            && let (Ok(rx), Ok(tx)) = (rx_str.parse(), tx_str.parse())
+        {
+            return Some(Event::ByteCount { rx, tx });
+        }
+    }
+
+    if let Some(rest) = line.strip_prefix(">LOG:") {
+        if let Some(opts) = rest
+            .splitn(3, ',')
+            .nth(2)
+            .and_then(|csv| csv.strip_prefix("PUSH: Received control message: 'PUSH_REPLY,"))
+            .and_then(|s| s.strip_suffix('\''))
+        {
+            return Some(Event::PushReply(Box::new(PushOptions::parse(opts))));
+        }
+        return Some(Event::Log(rest.to_owned()));
+    }
+
+    if let Some(rest) = line.strip_prefix(">INFO:") {
+        return Some(Event::Info(rest.to_owned()));
+    }
+
+    if let Some(rest) = line.strip_prefix(">FATAL:") {
+        return Some(Event::Fatal(rest.to_owned()));
+    }
+
+    None
+}
+
+/// Classify a `>PASSWORD:` line. The three shapes we recognise:
+///
+/// - `Need '<realm>' username/password [SC:...]` — credential prompt
+/// - `Auth-Token:<token>` — gateway-issued reneg bearer
+/// - `Verification Failed: '<realm>'` — server rejected our creds
+///
+/// Anything else (including challenge-response extensions we don't
+/// support yet) falls back to [`Event::Info`] so the line still
+/// surfaces in logs.
+fn parse_password_line(rest: &str) -> Event {
+    if let Some(realm) = rest
+        .strip_prefix("Need '")
+        .and_then(|s| s.split_once('\''))
+        .map(|(realm, _)| realm.to_owned())
+    {
+        return Event::PasswordPrompt { realm };
+    }
+    if let Some(token) = rest.strip_prefix("Auth-Token:") {
+        return Event::AuthTokenIssued {
+            token: token.to_owned(),
+        };
+    }
+    if let Some(realm) = rest
+        .strip_prefix("Verification Failed: '")
+        .and_then(|s| s.split_once('\''))
+        .map(|(realm, _)| realm.to_owned())
+    {
+        return Event::PasswordVerificationFailed { realm };
+    }
+    Event::Info(rest.to_owned())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_state_with_ip() {
+        let line = ">STATE:1715600000,CONNECTED,SUCCESS,10.0.8.4,1.2.3.4,443,,";
+        let event = parse_line(line).unwrap();
+        match event {
+            Event::State { state, local_ip } => {
+                assert_eq!(state, VpnState::Connected);
+                assert_eq!(local_ip, Some("10.0.8.4".parse().unwrap()));
+            }
+            _ => panic!("expected State event"),
+        }
+    }
+
+    #[test]
+    fn parse_state_without_ip() {
+        let line = ">STATE:1715600000,CONNECTING,,,,,,";
+        let event = parse_line(line).unwrap();
+        match event {
+            Event::State { state, local_ip } => {
+                assert_eq!(state, VpnState::Connecting);
+                assert!(local_ip.is_none());
+            }
+            _ => panic!("expected State event"),
+        }
+    }
+
+    #[test]
+    fn parse_password_prompt_extracts_realm() {
+        let event = parse_line(">PASSWORD:Need 'Auth' username/password").unwrap();
+        match event {
+            Event::PasswordPrompt { realm } => assert_eq!(realm, "Auth"),
+            other => panic!("expected PasswordPrompt, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_password_prompt_with_challenge_response_extension() {
+        let line = ">PASSWORD:Need 'Auth' username/password SC:1,Please enter SecurID PIN+code";
+        let event = parse_line(line).unwrap();
+        match event {
+            Event::PasswordPrompt { realm } => assert_eq!(realm, "Auth"),
+            other => panic!("expected PasswordPrompt, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_auth_token_issued() {
+        let line = ">PASSWORD:Auth-Token:eyJhbGciOiJIUzI1NiJ9.payload.sig";
+        let event = parse_line(line).unwrap();
+        match event {
+            Event::AuthTokenIssued { token } => {
+                assert_eq!(token, "eyJhbGciOiJIUzI1NiJ9.payload.sig");
+            }
+            other => panic!("expected AuthTokenIssued, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_password_verification_failed() {
+        let event = parse_line(">PASSWORD:Verification Failed: 'Auth'").unwrap();
+        match event {
+            Event::PasswordVerificationFailed { realm } => assert_eq!(realm, "Auth"),
+            other => panic!("expected PasswordVerificationFailed, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_unknown_password_line_falls_through_to_info() {
+        let event = parse_line(">PASSWORD:Configured Successfully").unwrap();
+        assert!(matches!(event, Event::Info(_)));
+    }
+
+    #[test]
+    fn parse_fatal_carries_message_verbatim() {
+        let line = ">FATAL:Cannot allocate TUN/TAP dev dynamically";
+        let event = parse_line(line).unwrap();
+        match event {
+            Event::Fatal(msg) => assert_eq!(msg, "Cannot allocate TUN/TAP dev dynamically"),
+            other => panic!("expected Fatal, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_bytecount() {
+        let line = ">BYTECOUNT:12345,67890";
+        let event = parse_line(line).unwrap();
+        match event {
+            Event::ByteCount { rx, tx } => {
+                assert_eq!(rx, 12345);
+                assert_eq!(tx, 67890);
+            }
+            _ => panic!("expected ByteCount event"),
+        }
+    }
+
+    #[test]
+    fn parse_regular_log_not_push() {
+        let line = ">LOG:1715600000,D,some debug message";
+        let event = parse_line(line).unwrap();
+        assert!(matches!(event, Event::Log(_)));
+    }
+
+    #[test]
+    fn parse_push_reply_from_log_envelope() {
+        let line = ">LOG:1715600000,I,PUSH: Received control message: 'PUSH_REPLY,\
+            dhcp-option DNS 10.0.0.4,topology subnet'";
+        let event = parse_line(line).unwrap();
+        match event {
+            Event::PushReply(opts) => {
+                assert_eq!(opts.dns_servers.len(), 1);
+            }
+            other => panic!("expected PushReply, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn unknown_lines_are_skipped() {
+        assert!(parse_line("SUCCESS: real-time state notification set to ON").is_none());
+        assert!(parse_line("END").is_none());
+        assert!(parse_line(">OPENVPN(--version) something").is_none());
+    }
+}
