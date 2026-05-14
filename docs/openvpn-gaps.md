@@ -269,19 +269,20 @@ surface deferred to a future CLI-display pass.
 
 ---
 
-### 12.  Byte counters surfaced
+### 12.  ~~Byte counters surfaced~~ ✅ shipped
 
-**Status:** `Event::ByteCount` parsed, sent to `tracing::debug`,
-never user-visible.
+`bytecount 1` enabled on the mgmt socket alongside `state on` and
+`log on`; the connect loop pushes each `>BYTECOUNT:rx,tx` event into
+a `watch::Sender<Option<(u64, u64)>>` (`send_if_modified` so an idle
+tunnel doesn't wake subscribers every second). Daemon's
+`ActiveConnection` holds the matching receiver; `StatusReport` grew
+a `bytes: Option<ByteCount>` field (`rx_bytes` / `tx_bytes`) populated
+on every `status` RPC. `azvpn status` renders a `traffic:` line with
+human-readable KiB/MiB/GiB/TiB.
 
-**Where:** `crates/core/src/commands/connect.rs:183-185` (consume).
-`status` RPC + CLI command for the surface.
-
-**Scope:** ~60 LOC.
-
-**Done when:** `azvpn status` shows rolling rx / tx + a per-second
-rate. Probably stored in `RunningSession` as
-`Arc<AtomicU64>` counters.
+Rolling per-second rate deferred — the cumulative totals are what
+`mullvad status` / `tailscale status` show too; clients can diff
+successive polls if they need a rate.
 
 ---
 

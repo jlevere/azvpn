@@ -82,6 +82,7 @@ pub async fn run(
     access_token: Option<String>,
     status_tx: watch::Sender<ConnectionStatus>,
     pushed_tx: watch::Sender<Option<PushOptions>>,
+    bytes_tx: watch::Sender<Option<(u64, u64)>>,
     cancel: CancellationToken,
 ) -> Result<()> {
     // Profile parse + root-CA check are pure functions of the profile
@@ -101,6 +102,7 @@ pub async fn run(
             access_token.as_deref(),
             &status_tx,
             &pushed_tx,
+            &bytes_tx,
             cancel.clone(),
         )
         .await;
@@ -161,6 +163,7 @@ async fn attempt(
     access_token: Option<&str>,
     status_tx: &watch::Sender<ConnectionStatus>,
     pushed_tx: &watch::Sender<Option<PushOptions>>,
+    bytes_tx: &watch::Sender<Option<(u64, u64)>>,
     cancel: CancellationToken,
 ) -> AttemptOutcome {
     let _ = status_tx.send(ConnectionStatus::Connecting);
@@ -224,6 +227,15 @@ async fn attempt(
     }
     if let Err(e) = mgmt.send("log on").await {
         return AttemptOutcome::Transient(e.into());
+    }
+    // `bytecount N` makes openvpn emit `>BYTECOUNT:rx,tx` every N
+    // seconds. 1s is dense enough for a snappy live status read without
+    // saturating the mgmt-socket reader (the watch channel coalesces).
+    if let Err(e) = mgmt.send("bytecount 1").await {
+        // Non-fatal — older openvpn builds without bytecount support
+        // would reject this. We lose the counter, the rest of the
+        // tunnel works.
+        tracing::warn!(error = %e, "failed to enable bytecount reporting");
     }
     if let Err(e) = mgmt.hold_release().await {
         return AttemptOutcome::Transient(e.into());
@@ -493,6 +505,18 @@ async fn attempt(
                     }
                     Event::ByteCount { rx, tx } => {
                         tracing::debug!(rx, tx, "byte count");
+                        // Coalesce via send_if_modified so a static
+                        // (idle) tunnel doesn't wake every status
+                        // subscriber once per second.
+                        bytes_tx.send_if_modified(|cur| {
+                            let next = Some((rx, tx));
+                            if *cur == next {
+                                false
+                            } else {
+                                *cur = next;
+                                true
+                            }
+                        });
                     }
                 }
             }
