@@ -70,6 +70,11 @@ humansize = "2"
 # Human-readable Duration formatting / parsing (`2h 5m 30s`). Used by
 # the CLI's uptime line in `azvpn status`.
 humantime = "2"
+# Modern datetime library by BurntSushi (regex/ripgrep). We only need
+# epoch-seconds → RFC 3339 here, but jiff handles TZ + parsing if more
+# datetime work shows up later — replaces hand-rolled civil-from-days
+# arithmetic for JWT iat/exp claim rendering.
+jiff = "0.2"
 
 azvpn-core = { path = "crates/core" }
 azvpn-ipc = { path = "crates/ipc" }
