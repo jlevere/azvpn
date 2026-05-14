@@ -83,7 +83,7 @@ impl From<&BasicTokenResponse> for Token {
 pub use auth_code::AuthCodeFlow;
 pub use device_code::{DeviceCodeFlow, DeviceCodePrompt};
 pub use refresh::{ARM_RESOURCE, GRAPH_RESOURCE, RefreshGrant};
-pub use token_cache::TokenCache;
+pub use token_cache::{CacheKey, TokenCache};
 
 /// Crate-wide `Result` type.
 pub type Result<T> = std::result::Result<T, Error>;
