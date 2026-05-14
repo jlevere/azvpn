@@ -92,9 +92,15 @@ impl AzvpnApi for AzvpndServer {
 
         // Static mgmt port — the daemon owns the only openvpn child.
         let mgmt_addr = SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 7505));
+        // `AZVPND_OPENVPN` lets the launchd plist point straight at a
+        // specific binary (e.g. the patched nix-store openvpn that
+        // accepts long AAD bearer tokens) without depending on $PATH
+        // lookup — launchd's PATH is minimal and varies by platform.
+        let openvpn_binary = std::env::var_os("AZVPND_OPENVPN")
+            .map_or_else(|| PathBuf::from("openvpn"), PathBuf::from);
         let opts = ConnectOptions {
             profile_path: req.profile_path.clone(),
-            openvpn_binary: PathBuf::from("openvpn"),
+            openvpn_binary,
             mgmt_addr,
             verbose: req.verbose,
         };

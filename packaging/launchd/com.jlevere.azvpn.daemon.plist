@@ -1,23 +1,28 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!--
-  launchd unit for an `azvpn` system daemon.
+  launchd unit for the `azvpnd` system daemon.
 
-  This file is a placeholder. The daemon binary it references
-  (/usr/local/libexec/azvpn-daemon) does NOT yet exist — the daemon is
-  scheduled for a later milestone, after Linux / Windows ship. Phase 8 of
-  the refactor lays this scaffolding so that the daemon, when it lands,
-  just plugs into existing packaging without re-doing service-manager
-  glue.
+  Install:
+    sudo install -m 0755 target/release/azvpnd /usr/local/libexec/azvpnd
+    sudo install -m 0644 packaging/launchd/com.jlevere.azvpn.daemon.plist \
+        /Library/LaunchDaemons/com.jlevere.azvpn.daemon.plist
+    sudo launchctl bootstrap system \
+        /Library/LaunchDaemons/com.jlevere.azvpn.daemon.plist
 
-  Install path when the daemon ships:
-    /Library/LaunchDaemons/com.jlevere.azvpn.daemon.plist
-  Load:
-    sudo launchctl bootstrap system /Library/LaunchDaemons/com.jlevere.azvpn.daemon.plist
   Inspect:
     sudo launchctl print system/com.jlevere.azvpn.daemon
+    ls -la /var/run/azvpn/azvpnd.sock     # expect srw-rw---- root admin
+    tail -f /var/log/azvpnd.log
 
-  The daemon will need to run as root (TUN device + DNS settings); no
-  `UserName` override.
+  Reload after a binary rebuild:
+    sudo launchctl kickstart -k system/com.jlevere.azvpn.daemon
+
+  Remove:
+    sudo launchctl bootout system/com.jlevere.azvpn.daemon
+
+  The daemon runs as root — it owns the openvpn child, DNS settings via
+  SCDynamicStore, and route table edits. The CLI (`azvpn`) runs as the
+  invoking user and talks to it over /var/run/azvpn/azvpnd.sock.
 -->
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
   "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -28,7 +33,7 @@
 
     <key>ProgramArguments</key>
     <array>
-        <string>/usr/local/libexec/azvpn-daemon</string>
+        <string>/usr/local/libexec/azvpnd</string>
     </array>
 
     <key>RunAtLoad</key>
@@ -38,9 +43,30 @@
     <true/>
 
     <key>StandardOutPath</key>
-    <string>/var/log/azvpn-daemon.log</string>
+    <string>/var/log/azvpnd.log</string>
     <key>StandardErrorPath</key>
-    <string>/var/log/azvpn-daemon.log</string>
+    <string>/var/log/azvpnd.log</string>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <!-- `AZVPND_OPENVPN` pins the openvpn binary. Override this with
+             the path to the *patched* openvpn 2.6.x that accepts long
+             auth-user-pass lines (stock openvpn truncates the AAD
+             bearer token). The flake's devshell rebuilds it from
+             `patches/openvpn-increase-user-pass-len.patch`. Resolve
+             once and bake the result into this plist:
+
+               nix develop --command which openvpn
+
+             Without an override, the daemon falls back to `openvpn` on
+             $PATH — which launchd keeps minimal. -->
+        <key>AZVPND_OPENVPN</key>
+        <string>/usr/local/sbin/openvpn</string>
+        <!-- `info` level is right for normal operation; bump to `debug`
+             on the daemon to chase a bug. -->
+        <key>RUST_LOG</key>
+        <string>info</string>
+    </dict>
 
     <!-- Soft limit; tunnel pumps occasional bursts of small allocations. -->
     <key>SoftResourceLimits</key>
