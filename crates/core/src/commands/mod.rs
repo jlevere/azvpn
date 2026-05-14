@@ -14,4 +14,5 @@ pub mod connect;
 pub mod disconnect;
 pub mod info;
 pub mod pushed;
+pub mod shutdown;
 pub mod status;
