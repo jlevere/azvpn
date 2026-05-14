@@ -95,6 +95,17 @@ pub struct PushOptions {
     pub tun_mtu: Option<u32>,
     /// Cipher / data-channel options the gateway selected.
     pub cipher: Option<String>,
+    /// Short-lived bearer token the gateway pushes so the client can
+    /// re-auth at TLS renegotiation (`reneg-sec`, typically 1h–8h) without
+    /// re-prompting the user. Replaces the password on the next
+    /// `>PASSWORD:Need 'Auth' ...` prompt; see [`Event::PasswordPrompt`].
+    /// The gateway can deliver this either in `PUSH_REPLY` (this field)
+    /// or via a dedicated [`Event::AuthTokenIssued`] notification.
+    pub auth_token: Option<String>,
+    /// Optional username override that travels with `auth-token`. When
+    /// present, used as the username on the re-auth response; without it
+    /// the client keeps the original initial-auth username.
+    pub auth_token_user: Option<String>,
     /// Tokens we didn't recognise — preserved verbatim so debug output shows
     /// everything the gateway told us.
     pub extras: Vec<String>,
@@ -257,6 +268,14 @@ impl PushOptions {
             opts.cipher = Some(rest.to_owned());
             return true;
         }
+        if let Some(rest) = token.strip_prefix("auth-token-user ") {
+            opts.auth_token_user = Some(rest.to_owned());
+            return true;
+        }
+        if let Some(rest) = token.strip_prefix("auth-token ") {
+            opts.auth_token = Some(rest.to_owned());
+            return true;
+        }
         // `topology <subnet|p2p|net30>` controls how the `ifconfig` second
         // value is interpreted (netmask for subnet, peer for p2p). We
         // only consume `Ifconfig.local`; the openvpn child applies the
@@ -275,7 +294,21 @@ pub enum Event {
         local_ip: Option<IpAddr>,
     },
     Hold,
-    PasswordNeeded(String),
+    /// `>PASSWORD:Need '<realm>' username/password` — openvpn is asking
+    /// the management socket to provide credentials for `realm`. For
+    /// Azure the realm is always `Auth`; the prompt fires on TLS
+    /// renegotiation when the initial `auth-user-pass` file is no longer
+    /// in scope. The caller responds with [`ManagementClient::send_auth`].
+    PasswordPrompt { realm: String },
+    /// `>PASSWORD:Auth-Token:<token>` — openvpn delivering a fresh
+    /// auth-token issued by the gateway, out-of-band from `PUSH_REPLY`.
+    /// Functionally equivalent to [`PushOptions::auth_token`] but this
+    /// is the canonical management-socket path; some openvpn versions
+    /// only emit it via this notification.
+    AuthTokenIssued { token: String },
+    /// `>PASSWORD:Verification Failed: '<realm>'` — server rejected the
+    /// credentials we sent for `realm`. Terminal for the connection.
+    PasswordVerificationFailed { realm: String },
     Info(String),
     ByteCount { rx: u64, tx: u64 },
     Log(String),
@@ -354,6 +387,38 @@ impl ManagementClient {
         }
     }
 
+    /// Classify a `>PASSWORD:` line. The three shapes we recognise:
+    ///
+    /// - `Need '<realm>' username/password [SC:...]` — credential prompt
+    /// - `Auth-Token:<token>` — gateway-issued reneg bearer
+    /// - `Verification Failed: '<realm>'` — server rejected our creds
+    ///
+    /// Anything else (including challenge-response extensions we don't
+    /// support yet) falls back to [`Event::Info`] so the line still
+    /// surfaces in logs.
+    fn parse_password_line(rest: &str) -> Event {
+        if let Some(realm) = rest
+            .strip_prefix("Need '")
+            .and_then(|s| s.split_once('\''))
+            .map(|(realm, _)| realm.to_owned())
+        {
+            return Event::PasswordPrompt { realm };
+        }
+        if let Some(token) = rest.strip_prefix("Auth-Token:") {
+            return Event::AuthTokenIssued {
+                token: token.to_owned(),
+            };
+        }
+        if let Some(realm) = rest
+            .strip_prefix("Verification Failed: '")
+            .and_then(|s| s.split_once('\''))
+            .map(|(realm, _)| realm.to_owned())
+        {
+            return Event::PasswordVerificationFailed { realm };
+        }
+        Event::Info(rest.to_owned())
+    }
+
     fn parse_line(line: &str) -> Option<Event> {
         if let Some(rest) = line.strip_prefix(">STATE:") {
             let mut parts = rest.splitn(5, ',');
@@ -373,10 +438,7 @@ impl ManagementClient {
         }
 
         if let Some(rest) = line.strip_prefix(">PASSWORD:") {
-            if rest.starts_with("Need") {
-                return Some(Event::PasswordNeeded(rest.to_owned()));
-            }
-            return Some(Event::Info(rest.to_owned()));
+            return Some(Self::parse_password_line(rest));
         }
 
         if let Some(rest) = line.strip_prefix(">BYTECOUNT:") {
@@ -516,6 +578,76 @@ mod tests {
         );
         assert_eq!(opts.tun_mtu, Some(1400));
         assert_eq!(opts.cipher.as_deref(), Some("AES-256-GCM"));
+        assert!(opts.extras.is_empty(), "extras: {:?}", opts.extras);
+    }
+
+    #[test]
+    fn parse_password_prompt_extracts_realm() {
+        let event = ManagementClient::parse_line(">PASSWORD:Need 'Auth' username/password").unwrap();
+        match event {
+            Event::PasswordPrompt { realm } => assert_eq!(realm, "Auth"),
+            other => panic!("expected PasswordPrompt, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_password_prompt_with_challenge_response_extension() {
+        // `SC:1,...` is the challenge-response continuation. We don't yet
+        // act on it, but the realm should still parse cleanly.
+        let line = ">PASSWORD:Need 'Auth' username/password SC:1,Please enter SecurID PIN+code";
+        let event = ManagementClient::parse_line(line).unwrap();
+        match event {
+            Event::PasswordPrompt { realm } => assert_eq!(realm, "Auth"),
+            other => panic!("expected PasswordPrompt, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_auth_token_issued() {
+        let line = ">PASSWORD:Auth-Token:eyJhbGciOiJIUzI1NiJ9.payload.sig";
+        let event = ManagementClient::parse_line(line).unwrap();
+        match event {
+            Event::AuthTokenIssued { token } => {
+                assert_eq!(token, "eyJhbGciOiJIUzI1NiJ9.payload.sig");
+            }
+            other => panic!("expected AuthTokenIssued, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_password_verification_failed() {
+        let event =
+            ManagementClient::parse_line(">PASSWORD:Verification Failed: 'Auth'").unwrap();
+        match event {
+            Event::PasswordVerificationFailed { realm } => assert_eq!(realm, "Auth"),
+            other => panic!("expected PasswordVerificationFailed, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_unknown_password_line_falls_through_to_info() {
+        // Some openvpn versions send `>PASSWORD:Configured Successfully` —
+        // we surface it as info so it lands in the log but isn't a typed
+        // event.
+        let event = ManagementClient::parse_line(">PASSWORD:Configured Successfully").unwrap();
+        assert!(matches!(event, Event::Info(_)));
+    }
+
+    #[test]
+    fn push_reply_carries_auth_token() {
+        let line = ">LOG:1715600000,I,PUSH: Received control message: 'PUSH_REPLY,\
+            auth-token AAAA-BBBB-CCCC,\
+            auth-token-user vpn-user-7,\
+            route-gateway 10.0.8.1,\
+            ifconfig 10.0.8.4 255.255.255.0,\
+            topology subnet'";
+        let event = ManagementClient::parse_line(line).unwrap();
+        let Event::PushReply(opts) = event else {
+            panic!("expected PushReply");
+        };
+        assert_eq!(opts.auth_token.as_deref(), Some("AAAA-BBBB-CCCC"));
+        assert_eq!(opts.auth_token_user.as_deref(), Some("vpn-user-7"));
+        // And the line still has no leftover extras.
         assert!(opts.extras.is_empty(), "extras: {:?}", opts.extras);
     }
 
