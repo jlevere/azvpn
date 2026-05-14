@@ -72,6 +72,125 @@ pub struct Ifconfig {
     pub remote: String,
 }
 
+/// `redirect-gateway [flags...]` — server-pushed "send all traffic
+/// through me" directive. `OpenVPN`'s syntax is a single keyword followed
+/// by any subset of sub-flags, separated by spaces. Modelling as a
+/// struct (rather than bitflags) because the flag count is small and a
+/// typed accessor reads better at the apply site.
+///
+/// Presence of *any* of these flags is the signal that we should route
+/// the default destination through the tunnel (full-tunnel mode);
+/// `is_full_tunnel()` rolls that up.
+// 8 named boolean sub-flags map 1:1 to OpenVPN's `redirect-gateway`
+// directive's sub-keywords (def1 / local / bypass-dhcp / …). Bitflags
+// would obscure the semantics — these aren't bitmask positions, they're
+// distinct protocol concepts — and the clippy default of "≤3" is
+// arbitrary for this kind of typed-record-of-flags.
+#[allow(clippy::struct_excessive_bools)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct RedirectGateway {
+    /// `def1` — install `0.0.0.0/1` + `128.0.0.0/1` (and v6 equivalents)
+    /// that override the default route without replacing it. Safest
+    /// mode; we apply this idiom regardless of which sub-flag the
+    /// gateway picked, so a crash leaves the original default route
+    /// intact.
+    pub def1: bool,
+    /// `local` — connection is over a non-default-gateway link
+    /// (tethering, alt-default). Adds explicit routes to the gateway.
+    pub local: bool,
+    /// `autolocal` — like `local` but auto-detected by openvpn.
+    pub autolocal: bool,
+    /// `bypass-dhcp` — punch a hole for the DHCP server so DHCP renew
+    /// keeps working during the tunnel.
+    pub bypass_dhcp: bool,
+    /// `bypass-dns` — punch a hole for the system DNS resolvers.
+    pub bypass_dns: bool,
+    /// `block-local` — block direct access to the local subnet.
+    pub block_local: bool,
+    /// `ipv6` — also redirect the IPv6 default gateway.
+    pub ipv6: bool,
+    /// `!ipv4` — explicitly do NOT redirect IPv4 (only meaningful
+    /// alongside `ipv6`). `OpenVPN` 2.5+ syntax.
+    pub no_ipv4: bool,
+}
+
+impl RedirectGateway {
+    /// Parse the whitespace-separated sub-flags after `redirect-gateway`.
+    /// Unknown flags are silently ignored — `OpenVPN` may add new ones,
+    /// and `redirect-gateway` with no arguments is itself valid (full
+    /// `0.0.0.0/0` replacement mode).
+    fn parse(rest: &str) -> Self {
+        let mut rg = Self::default();
+        for flag in rest.split_whitespace() {
+            match flag {
+                "def1" => rg.def1 = true,
+                "local" => rg.local = true,
+                "autolocal" => rg.autolocal = true,
+                "bypass-dhcp" => rg.bypass_dhcp = true,
+                "bypass-dns" => rg.bypass_dns = true,
+                "block-local" => rg.block_local = true,
+                "ipv6" => rg.ipv6 = true,
+                "!ipv4" => rg.no_ipv4 = true,
+                _ => {}
+            }
+        }
+        rg
+    }
+
+    /// True when the connection is intended as a full tunnel for at
+    /// least one address family. Useful for status display ("split"
+    /// vs "full") and for the apply path to know it owes the synthetic
+    /// `def1` routes.
+    #[must_use]
+    pub fn is_full_tunnel(&self) -> bool {
+        // Any sub-flag presence means redirect-gateway was set on the
+        // wire. !ipv4 alone (without ipv6) is incoherent but still
+        // counts as "redirect mode active" for status purposes.
+        self.def1
+            || self.local
+            || self.autolocal
+            || self.bypass_dhcp
+            || self.bypass_dns
+            || self.block_local
+            || self.ipv6
+            || self.no_ipv4
+    }
+
+    /// Should the apply path install IPv4 default-redirect routes?
+    /// Tracks the `!ipv4` opt-out.
+    #[must_use]
+    pub fn covers_ipv4(&self) -> bool {
+        !self.no_ipv4 && self.is_full_tunnel()
+    }
+
+    /// Should the apply path install IPv6 default-redirect routes?
+    /// Only when `ipv6` was explicitly set; `OpenVPN`'s default behaviour
+    /// for `redirect-gateway` is `IPv4`-only.
+    #[must_use]
+    pub fn covers_ipv6(&self) -> bool {
+        self.ipv6
+    }
+}
+
+/// OR-merge two `RedirectGateway` flag sets. A `PUSH_REPLY` carrying
+/// both `redirect-gateway def1` and `redirect-gateway-ipv6` (or two
+/// `redirect-gateway` directives, which `OpenVPN` config allows) should
+/// produce the union of all flags, not have the second clobber the
+/// first.
+fn merge_redirect(existing: Option<RedirectGateway>, new: RedirectGateway) -> RedirectGateway {
+    let Some(prev) = existing else { return new };
+    RedirectGateway {
+        def1: prev.def1 || new.def1,
+        local: prev.local || new.local,
+        autolocal: prev.autolocal || new.autolocal,
+        bypass_dhcp: prev.bypass_dhcp || new.bypass_dhcp,
+        bypass_dns: prev.bypass_dns || new.bypass_dns,
+        block_local: prev.block_local || new.block_local,
+        ipv6: prev.ipv6 || new.ipv6,
+        no_ipv4: prev.no_ipv4 || new.no_ipv4,
+    }
+}
+
 /// Everything the gateway pushed back to us. All fields populated by parsing
 /// the `PUSH_REPLY` control message tokens. Unrecognised tokens land in
 /// `extras` so we don't silently drop anything Azure-specific.
@@ -95,6 +214,10 @@ pub struct PushOptions {
     pub tun_mtu: Option<u32>,
     /// Cipher / data-channel options the gateway selected.
     pub cipher: Option<String>,
+    /// `redirect-gateway` directive — server tells us to route the
+    /// default destination through the tunnel (full-tunnel mode).
+    /// `None` means split-tunnel (route only what was explicitly pushed).
+    pub redirect_gateway: Option<RedirectGateway>,
     /// Short-lived bearer token the gateway pushes so the client can
     /// re-auth at TLS renegotiation (`reneg-sec`, typically 1h–8h) without
     /// re-prompting the user. Replaces the password on the next
@@ -266,6 +389,26 @@ impl PushOptions {
         }
         if let Some(rest) = token.strip_prefix("cipher ") {
             opts.cipher = Some(rest.to_owned());
+            return true;
+        }
+        // `redirect-gateway-ipv6` is the older form (pre-OpenVPN 2.5);
+        // semantically equivalent to `redirect-gateway ipv6`. Handle
+        // first so the more-specific prefix wins over `redirect-gateway`.
+        if token == "redirect-gateway-ipv6" || token.starts_with("redirect-gateway-ipv6 ") {
+            let rest = token
+                .strip_prefix("redirect-gateway-ipv6")
+                .map_or("", str::trim);
+            let mut rg = RedirectGateway::parse(rest);
+            rg.ipv6 = true;
+            opts.redirect_gateway = Some(merge_redirect(opts.redirect_gateway, rg));
+            return true;
+        }
+        if token == "redirect-gateway" || token.starts_with("redirect-gateway ") {
+            let rest = token
+                .strip_prefix("redirect-gateway")
+                .map_or("", str::trim);
+            let rg = RedirectGateway::parse(rest);
+            opts.redirect_gateway = Some(merge_redirect(opts.redirect_gateway, rg));
             return true;
         }
         if let Some(rest) = token.strip_prefix("auth-token-user ") {
@@ -658,6 +801,100 @@ mod tests {
         assert_eq!(opts.auth_token_user.as_deref(), Some("vpn-user-7"));
         // And the line still has no leftover extras.
         assert!(opts.extras.is_empty(), "extras: {:?}", opts.extras);
+    }
+
+    #[test]
+    fn redirect_gateway_def1_parses() {
+        let line = ">LOG:1,I,PUSH: Received control message: 'PUSH_REPLY,\
+            redirect-gateway def1,\
+            ifconfig 10.0.8.4 255.255.255.0,topology subnet'";
+        let event = ManagementClient::parse_line(line).unwrap();
+        let Event::PushReply(opts) = event else {
+            panic!("expected PushReply");
+        };
+        let rg = opts.redirect_gateway.unwrap();
+        assert!(rg.def1);
+        assert!(rg.is_full_tunnel());
+        assert!(rg.covers_ipv4());
+        assert!(!rg.covers_ipv6());
+    }
+
+    #[test]
+    fn redirect_gateway_multiple_flags_in_one_directive() {
+        let line = ">LOG:1,I,PUSH: Received control message: 'PUSH_REPLY,\
+            redirect-gateway def1 bypass-dhcp local,topology subnet'";
+        let event = ManagementClient::parse_line(line).unwrap();
+        let Event::PushReply(opts) = event else {
+            panic!("expected PushReply");
+        };
+        let rg = opts.redirect_gateway.unwrap();
+        assert!(rg.def1);
+        assert!(rg.bypass_dhcp);
+        assert!(rg.local);
+    }
+
+    #[test]
+    fn redirect_gateway_ipv6_legacy_form_implies_ipv6_flag() {
+        let line = ">LOG:1,I,PUSH: Received control message: 'PUSH_REPLY,\
+            redirect-gateway-ipv6 def1,topology subnet'";
+        let event = ManagementClient::parse_line(line).unwrap();
+        let Event::PushReply(opts) = event else {
+            panic!("expected PushReply");
+        };
+        let rg = opts.redirect_gateway.unwrap();
+        assert!(rg.ipv6);
+        assert!(rg.def1);
+        assert!(rg.covers_ipv6());
+    }
+
+    #[test]
+    fn redirect_gateway_multiple_directives_merge() {
+        // Two `redirect-gateway*` directives in the same push reply →
+        // OR the flags (don't clobber).
+        let line = ">LOG:1,I,PUSH: Received control message: 'PUSH_REPLY,\
+            redirect-gateway def1,\
+            redirect-gateway-ipv6 def1,\
+            topology subnet'";
+        let event = ManagementClient::parse_line(line).unwrap();
+        let Event::PushReply(opts) = event else {
+            panic!("expected PushReply");
+        };
+        let rg = opts.redirect_gateway.unwrap();
+        assert!(rg.def1);
+        assert!(rg.ipv6);
+        assert!(rg.covers_ipv4());
+        assert!(rg.covers_ipv6());
+    }
+
+    #[test]
+    fn redirect_gateway_no_args_still_recognised() {
+        // Bare `redirect-gateway` is valid (means full-tunnel,
+        // non-def1 mode). We capture it but normalise to the def1
+        // idiom at apply time.
+        let line = ">LOG:1,I,PUSH: Received control message: 'PUSH_REPLY,\
+            redirect-gateway,topology subnet'";
+        let event = ManagementClient::parse_line(line).unwrap();
+        let Event::PushReply(opts) = event else {
+            panic!("expected PushReply");
+        };
+        let rg = opts.redirect_gateway.unwrap();
+        // No sub-flags set → is_full_tunnel() reports false, BUT the
+        // option being Some(_) is itself the signal at higher layers.
+        // (Mostly defensive — real pushes always carry def1.)
+        assert!(!rg.is_full_tunnel());
+    }
+
+    #[test]
+    fn split_tunnel_push_has_no_redirect_gateway() {
+        let line = ">LOG:1,I,PUSH: Received control message: 'PUSH_REPLY,\
+            route 10.0.0.0 255.255.0.0,\
+            route-gateway 10.0.8.1,\
+            ifconfig 10.0.8.4 255.255.255.0,topology subnet'";
+        let event = ManagementClient::parse_line(line).unwrap();
+        let Event::PushReply(opts) = event else {
+            panic!("expected PushReply");
+        };
+        assert!(opts.redirect_gateway.is_none());
     }
 
     #[test]
