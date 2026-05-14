@@ -203,6 +203,15 @@ pub async fn run(
                         let _ = mgmt.send("signal SIGTERM").await;
                         break;
                     }
+                    Event::Fatal(msg) => {
+                        tracing::error!("openvpn fatal: {msg}");
+                        let _ = status_tx
+                            .send(ConnectionStatus::Failed(format!("openvpn fatal: {msg}")));
+                        // openvpn will exit on its own after emitting >FATAL:,
+                        // so we don't need to signal it — just stop pumping
+                        // events and let the wait() at loop exit reap it.
+                        break;
+                    }
                     Event::PushReply(opts) => {
                         let opts = *opts;
                         info!(

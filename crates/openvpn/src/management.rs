@@ -309,6 +309,11 @@ pub enum Event {
     /// `>PASSWORD:Verification Failed: '<realm>'` — server rejected the
     /// credentials we sent for `realm`. Terminal for the connection.
     PasswordVerificationFailed { realm: String },
+    /// `>FATAL:<message>` — openvpn has hit an unrecoverable error and
+    /// is about to exit. Terminal for the connection. Carries the
+    /// message verbatim so callers can surface a specific cause
+    /// (auth failure, TLS handshake error, cert chain mismatch, etc.).
+    Fatal(String),
     Info(String),
     ByteCount { rx: u64, tx: u64 },
     Log(String),
@@ -464,6 +469,10 @@ impl ManagementClient {
 
         if let Some(rest) = line.strip_prefix(">INFO:") {
             return Some(Event::Info(rest.to_owned()));
+        }
+
+        if let Some(rest) = line.strip_prefix(">FATAL:") {
+            return Some(Event::Fatal(rest.to_owned()));
         }
 
         None
@@ -649,6 +658,16 @@ mod tests {
         assert_eq!(opts.auth_token_user.as_deref(), Some("vpn-user-7"));
         // And the line still has no leftover extras.
         assert!(opts.extras.is_empty(), "extras: {:?}", opts.extras);
+    }
+
+    #[test]
+    fn parse_fatal_carries_message_verbatim() {
+        let line = ">FATAL:Cannot allocate TUN/TAP dev dynamically";
+        let event = ManagementClient::parse_line(line).unwrap();
+        match event {
+            Event::Fatal(msg) => assert_eq!(msg, "Cannot allocate TUN/TAP dev dynamically"),
+            other => panic!("expected Fatal, got {other:?}"),
+        }
     }
 
     #[test]
