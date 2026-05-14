@@ -1,39 +1,52 @@
-//! `azvpn connect` — drives the AAD device-code flow, then hands a fresh
-//! access token to `core::commands::connect`.
+//! `azvpn connect` — acquires an AAD access token (device-code flow if
+//! needed), then asks the daemon to bring up the tunnel via tarpc.
 //!
-//! Auth is the CLI's responsibility (we have $HOME, a terminal, and the
-//! user's browser; the daemon has none of those). For AAD profiles we
-//! either reuse a cached token or run the device-code flow; for
-//! certificate profiles we pass `None` through.
+//! The CLI runs as the user and owns auth; the daemon runs as root and
+//! owns the privileged tunnel work. The two talk over a Unix socket.
 
-use std::net::SocketAddr;
 use std::path::Path;
+use std::time::{Duration, Instant};
 
 use azvpn_auth::{AadConfig, DeviceCodeFlow, DeviceCodePrompt, Token, TokenCache};
-use azvpn_core::commands::connect::{self, ConnectOptions};
-use azvpn_core::commands::shutdown::{self, CancellationToken};
+use azvpn_ipc::ConnectRequest;
 use azvpn_profile::{AuthType, VpnProfile};
 
+use crate::daemon_client::connect_to_daemon;
 use crate::Result;
 
-pub async fn run(
-    profile_path: &Path,
-    openvpn_binary: &Path,
-    mgmt_addr: SocketAddr,
-    verbose: bool,
-) -> Result<()> {
+/// How long we let the daemon's `Connect` RPC stay open. The whole
+/// device-code path runs in the CLI before we even call the daemon, so
+/// this only needs to cover openvpn handshake + first push reply —
+/// generous 3 minutes covers slow gateways.
+const CONNECT_DEADLINE: Duration = Duration::from_secs(180);
+const DISCONNECT_DEADLINE: Duration = Duration::from_secs(30);
+
+pub async fn run(profile_path: &Path, verbose: bool) -> Result<()> {
     let profile = VpnProfile::from_file(profile_path)?;
     let access_token = ensure_access_token(&profile).await?;
 
-    let opts = ConnectOptions {
+    let client = connect_to_daemon().await?;
+
+    let req = ConnectRequest {
         profile_path: profile_path.to_owned(),
-        openvpn_binary: openvpn_binary.to_owned(),
-        mgmt_addr,
+        access_token,
         verbose,
     };
-    let cancel = CancellationToken::new();
-    shutdown::listen_for_signals(cancel.clone());
-    connect::run(opts, access_token, cancel).await?;
+
+    let mut ctx = tarpc::context::current();
+    ctx.deadline = Instant::now() + CONNECT_DEADLINE;
+    eprintln!("requesting connection from daemon...");
+    client.connect(ctx, req).await??;
+    eprintln!("connected. Ctrl-C to disconnect.");
+
+    // Park until the user signals. The daemon owns the tunnel
+    // lifecycle now — the CLI is just a control channel.
+    let _ = tokio::signal::ctrl_c().await;
+    eprintln!("\ndisconnecting...");
+
+    let mut ctx = tarpc::context::current();
+    ctx.deadline = Instant::now() + DISCONNECT_DEADLINE;
+    let _ = client.disconnect(ctx).await??;
     Ok(())
 }
 
@@ -50,10 +63,6 @@ async fn ensure_access_token(profile: &VpnProfile) -> Result<Option<String>> {
             let aad_config = AadConfig::from(aad_profile);
             let cache = TokenCache::new(&TokenCache::default_path());
 
-            // A cache hit *must* include a refresh_token — without one
-            // we can't drive the post-connect Graph/ARM helpers.
-            // Older caches that pre-date refresh-token persistence are
-            // treated as misses so the next device-code flow rebuilds.
             let token = match cache.load().filter(|t| t.refresh_token.is_some()) {
                 Some(cached) => cached,
                 None => run_device_code(aad_config, &cache).await?,
@@ -82,12 +91,10 @@ fn print_prompt(p: &DeviceCodePrompt) {
     eprintln!();
 }
 
-/// Open the URL in the user's default browser. Under sudo, drop
-/// privileges to `SUDO_UID` before exec so the browser launches in the
-/// real user's Aqua session instead of root's. This becomes obsolete
-/// once the daemon split lands — the CLI will run as the user
-/// natively.
 fn open_browser(url: &str) {
+    // Note: this still has the sudo-aware fallback. Once the daemon
+    // split is fully landed the CLI runs as the user natively and the
+    // `setuid` dance disappears entirely (phase 7).
     #[cfg(unix)]
     if let Some(uid) = std::env::var("SUDO_UID")
         .ok()

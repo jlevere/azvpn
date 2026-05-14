@@ -40,6 +40,15 @@ pub enum Error {
     #[error("dns resolver: {0}")]
     DnsResolver(#[from] hickory_resolver::error::ResolveError),
 
+    // ---------- daemon IPC ----------
+    /// Transport-level RPC error (socket disconnected, deadline, …).
+    #[error("daemon rpc: {0}")]
+    Rpc(#[from] tarpc::client::RpcError),
+    /// Application error surfaced by the daemon. Variants are defined
+    /// in `azvpn-ipc::IpcError`.
+    #[error("daemon: {0}")]
+    Daemon(#[from] azvpn_ipc::IpcError),
+
     // ---------- CLI-local failure modes ----------
     /// `whoami` got a cache miss — file absent or access token expired
     /// with no refresh available.

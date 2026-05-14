@@ -8,6 +8,7 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use azvpn_ipc::AzvpnApiClient;
+use tarpc::client::Config;
 use tarpc::serde_transport;
 use tarpc::tokio_serde::formats::Bincode;
 use tarpc::tokio_util::codec::length_delimited::LengthDelimitedCodec;
@@ -24,7 +25,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let conn = UnixStream::connect(&path).await?;
     let codec = LengthDelimitedCodec::builder().new_framed(conn);
     let transport = serde_transport::new(codec, Bincode::default());
-    let client = AzvpnApiClient::new(Default::default(), transport).spawn();
+    let client = AzvpnApiClient::new(Config::default(), transport).spawn();
 
     let mut ctx = tarpc::context::current();
     ctx.deadline = std::time::Instant::now() + Duration::from_secs(5);

@@ -29,6 +29,16 @@ pub struct DnsGuard {
     store: Option<SCDynamicStore>,
 }
 
+// SAFETY: Apple documents `SCDynamicStore` as thread-safe ("The
+// functions in this header are thread-safe."). The `system-configuration`
+// crate doesn't propagate `Send` because the inner `SCDynamicStoreRef` is
+// a raw pointer, but the underlying Core Foundation object can be sent
+// between threads as long as retain/release is balanced — which `TCFType`
+// guarantees. We need `Send` so the daemon's connect handler can spawn
+// the run loop onto a multi-threaded tokio runtime.
+#[allow(unsafe_code)]
+unsafe impl Send for DnsGuard {}
+
 impl Default for DnsGuard {
     fn default() -> Self {
         Self::new()

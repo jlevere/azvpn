@@ -6,7 +6,7 @@ use tracing::{debug, trace};
 
 use crate::Error;
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum VpnState {
     Connecting,
     Resolve,

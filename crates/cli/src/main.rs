@@ -1,9 +1,9 @@
-use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4};
 use std::path::PathBuf;
 
 use clap::{Parser, Subcommand};
 
 mod connect;
+mod daemon_client;
 mod disconnect;
 mod dns;
 mod error;
@@ -32,19 +32,11 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
-    /// Connect to a VPN profile
+    /// Connect to a VPN profile (talks to the running azvpnd daemon).
     Connect {
         /// Path to Azure VPN profile XML
         #[arg(short, long)]
         profile: PathBuf,
-
-        /// Path to openvpn binary
-        #[arg(long, default_value = "openvpn")]
-        openvpn: PathBuf,
-
-        /// Management interface port
-        #[arg(long, default_value_t = 7505)]
-        mgmt_port: u16,
     },
     /// Disconnect the active VPN session
     Disconnect,
@@ -97,15 +89,7 @@ async fn main() {
     logging::init(cli.verbose);
 
     let exit_code = match cli.command {
-        Command::Connect {
-            profile,
-            openvpn,
-            mgmt_port,
-        } => {
-            let mgmt_addr =
-                SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::LOCALHOST, mgmt_port));
-            report(connect::run(&profile, &openvpn, mgmt_addr, cli.verbose).await)
-        }
+        Command::Connect { profile } => report(connect::run(&profile, cli.verbose).await),
         Command::Disconnect => report(disconnect::run()),
         Command::Status => report(status::run()),
         Command::Whoami => report(whoami::run()),
