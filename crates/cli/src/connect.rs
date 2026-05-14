@@ -3,6 +3,7 @@ use std::net::SocketAddr;
 use std::path::Path;
 
 use azvpn_auth::{AadConfig, DeviceCodeFlow, TokenCache};
+use azvpn_core::dns::{self, DnsManager};
 use azvpn_core::session::{RunningSession, SessionGuard};
 use azvpn_openvpn::{ConfigBuilder, Event, OpenVpnConfig, OpenVpnProcess, PushOptions, VpnState};
 use azvpn_profile::{AuthType, VpnProfile};
@@ -124,9 +125,7 @@ pub async fn run(
 
     let mut push_opts = PushOptions::default();
     let mut sigterm = unix_signal(SignalKind::terminate())?;
-
-    #[cfg(target_os = "macos")]
-    let mut dns_guard: Option<azvpn_tunnel_darwin::DnsGuard> = None;
+    let mut dns_manager = dns::new_manager();
 
     loop {
         tokio::select! {
@@ -155,8 +154,7 @@ pub async fn run(
                         }
                         if *state == VpnState::Connected {
                             eprintln!("connected to {}", server.fqdn);
-                            #[cfg(target_os = "macos")]
-                            apply_dns(&mut dns_guard, &mut session, &profile, &push_opts);
+                            apply_dns(dns_manager.as_mut(), &mut session, &profile, &push_opts);
                         }
                         if *state == VpnState::Exiting {
                             info!("openvpn exiting");
@@ -193,8 +191,8 @@ pub async fn run(
         }
     }
 
-    #[cfg(target_os = "macos")]
-    drop(dns_guard.take());
+    dns_manager.clear();
+    drop(dns_manager);
 
     let code = process.wait().await?;
     info!(?code, "openvpn process exited");
@@ -202,9 +200,8 @@ pub async fn run(
     Ok(())
 }
 
-#[cfg(target_os = "macos")]
 fn apply_dns(
-    guard: &mut Option<azvpn_tunnel_darwin::DnsGuard>,
+    manager: &mut dyn DnsManager,
     session: &mut RunningSession,
     profile: &VpnProfile,
     push_opts: &PushOptions,
@@ -220,17 +217,7 @@ fn apply_dns(
     }
 
     info!(?suffixes, ?dns_servers, "applying DNS resolvers");
-    let result = match guard.as_mut() {
-        Some(g) => g.update(&suffixes, &dns_servers),
-        None => match azvpn_tunnel_darwin::DnsGuard::install(&suffixes, &dns_servers) {
-            Ok(g) => {
-                *guard = Some(g);
-                Ok(())
-            }
-            Err(e) => Err(e),
-        },
-    };
-    match result {
+    match manager.apply(&suffixes, &dns_servers) {
         Ok(()) => {
             if let Err(e) = session.record_dns(&suffixes, &dns_servers) {
                 tracing::warn!(error = %e, "failed to record DNS in session file");
@@ -240,7 +227,6 @@ fn apply_dns(
     }
 }
 
-#[cfg(target_os = "macos")]
 fn collect_dns_inputs<'p>(
     profile: &'p VpnProfile,
     push_opts: &'p PushOptions,

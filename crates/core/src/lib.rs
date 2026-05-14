@@ -1,5 +1,6 @@
 use std::net::IpAddr;
 
+pub mod dns;
 pub mod session;
 pub mod tunnel;
 
