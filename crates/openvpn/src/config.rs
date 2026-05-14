@@ -1,8 +1,10 @@
 use std::fmt::Write;
-use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+use std::net::{IpAddr, SocketAddr};
 use std::path::Path;
 
 use azvpn_profile::{Route, TransportProtocol, VpnProfile};
+
+use crate::management::ipv4_prefix_to_mask;
 
 // DigiCert Global Root G2 — the CA used by Azure VPN P2S gateways.
 // SHA1 fingerprint: df3c24f9bfd666761b268073fe06d1cc8d4f82a4
@@ -159,13 +161,13 @@ enum RouteKind {
 fn write_route(config: &mut String, route: &Route, kind: RouteKind) {
     match (route.destination, kind) {
         (IpAddr::V4(addr), RouteKind::Include) => {
-            writeln!(config, "route {addr} {}", ipv4_mask(route.mask)).unwrap();
+            writeln!(config, "route {addr} {}", ipv4_prefix_to_mask(route.mask)).unwrap();
         }
         (IpAddr::V4(addr), RouteKind::Exclude) => {
             writeln!(
                 config,
                 "route {addr} {} net_gateway",
-                ipv4_mask(route.mask)
+                ipv4_prefix_to_mask(route.mask)
             )
             .unwrap();
         }
@@ -176,15 +178,6 @@ fn write_route(config: &mut String, route: &Route, kind: RouteKind) {
             writeln!(config, "route-ipv6 {addr}/{} net_gateway", route.mask).unwrap();
         }
     }
-}
-
-fn ipv4_mask(prefix: u8) -> Ipv4Addr {
-    if prefix == 0 {
-        return Ipv4Addr::UNSPECIFIED;
-    }
-    let prefix = prefix.min(32);
-    let bits: u32 = 0xFFFF_FFFF_u32 << (32 - prefix);
-    Ipv4Addr::from(bits)
 }
 
 impl ConfigBuilder<'_> {
@@ -215,16 +208,6 @@ mod tests {
     use super::*;
     use azvpn_profile::VpnProfile;
     use std::net::{Ipv4Addr, SocketAddrV4};
-
-    #[test]
-    fn ipv4_mask_conversion() {
-        assert_eq!(ipv4_mask(0), Ipv4Addr::UNSPECIFIED);
-        assert_eq!(ipv4_mask(8), Ipv4Addr::new(255, 0, 0, 0));
-        assert_eq!(ipv4_mask(16), Ipv4Addr::new(255, 255, 0, 0));
-        assert_eq!(ipv4_mask(24), Ipv4Addr::new(255, 255, 255, 0));
-        assert_eq!(ipv4_mask(32), Ipv4Addr::BROADCAST);
-        assert_eq!(ipv4_mask(33), Ipv4Addr::BROADCAST);
-    }
 
     #[test]
     fn include_and_exclude_routes_emitted() {
