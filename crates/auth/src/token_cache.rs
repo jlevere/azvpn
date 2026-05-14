@@ -28,16 +28,13 @@ impl TokenCache {
         }
     }
 
-    /// Per-user cache path. `dirs::state_dir()` honors `XDG_STATE_HOME`
-    /// on Linux (returns `None` on macOS/Windows, where we fall back to
-    /// `data_local_dir()` → `~/Library/Application Support` on macOS,
-    /// `%LOCALAPPDATA%` on Windows). The CLI runs as the user, so this
-    /// resolves to the invoking user's home naturally — no `SUDO_USER`
-    /// gymnastics needed since the daemon split.
+    /// Per-user cache path. `state_dir()` is the right home on Linux
+    /// (`XDG_STATE_HOME`) but returns `None` on macOS / Windows — fall
+    /// back to `data_local_dir()` there.
     ///
     /// # Panics
-    /// If the platform exposes neither a state dir nor a data-local dir —
-    /// shouldn't happen on macOS, Linux, or Windows.
+    /// If the platform exposes neither — not the case on macOS, Linux,
+    /// or Windows.
     #[must_use]
     pub fn default_path() -> PathBuf {
         dirs::state_dir()

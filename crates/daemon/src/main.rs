@@ -10,6 +10,7 @@
 //!   - cancels any in-progress connection via its child token, so
 //!     openvpn / DNS / routes tear down before we exit.
 
+mod config;
 mod routes;
 mod server;
 mod socket;
@@ -38,10 +39,11 @@ const SHUTDOWN_GRACE: Duration = Duration::from_secs(4);
 async fn main() -> ExitCode {
     init_tracing();
 
-    let config = socket::Config::from_env();
+    let config = config::Config::from_env();
     info!(
-        path = %config.path.display(),
-        group = %config.group,
+        socket = %config.socket_path.display(),
+        group = %config.socket_group,
+        openvpn = %config.openvpn_binary.display(),
         "azvpnd starting"
     );
 
@@ -56,7 +58,7 @@ async fn main() -> ExitCode {
     // One shared server instance — every accepted connection talks to
     // the same `Arc<DaemonState>`, otherwise concurrent CLI calls see
     // different worlds.
-    let server = AzvpndServer::default();
+    let server = AzvpndServer::new(config.openvpn_binary);
     let shutdown = CancellationToken::new();
     spawn_signal_listener(shutdown.clone());
 
