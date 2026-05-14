@@ -235,13 +235,16 @@ async fn attempt(
         Ok(r) => r,
         Err(e) => return AttemptOutcome::Fatal(e.into()),
     };
-    // DNS apply replaces; route apply diffs. Both are safe to call
-    // repeatedly, so we gate only on "has the kernel-visible interface
-    // been up at least once" — the first apply waits for CONNECTED so
-    // DNS / routes don't land before the tunnel is reachable; subsequent
-    // PUSH_REPLYs (TLS renegotiation, gateway-side reconfig) re-apply
-    // immediately so the live state tracks the gateway's authoritative
-    // view.
+    // DNS apply replaces; route apply diffs. Both are idempotent set-
+    // replace, so we re-run them on every CONNECTED transition (not just
+    // the first). This is load-bearing: on a SIGUSR1 reconnect openvpn
+    // emits "Pulled options changed on restart" and closes-and-reopens
+    // the tun device. Any routes we installed on the *previous* tun get
+    // orphaned by the kernel when the interface goes away, and we never
+    // see another PUSH_REPLY to retrigger an apply. Re-applying on every
+    // CONNECTED catches that case — the new tun is already up by the
+    // time CONNECTED fires (per docs/openvpn-gaps.md §6), so the routes
+    // land on the live interface.
     let mut have_connected = false;
     let mut reneg_creds = RenegCreds::for_profile(profile);
     // Set inside the event loop to record why we broke out. None means
@@ -328,9 +331,27 @@ async fn attempt(
                                 true
                             }
                         });
-                        if *state == VpnState::Connected && !have_connected {
-                            info!(server = %server.fqdn, "connected");
-                            have_connected = true;
+                        if *state == VpnState::Connected {
+                            if !have_connected {
+                                info!(server = %server.fqdn, "connected");
+                                have_connected = true;
+                            }
+                            // Clear-then-apply on every CONNECTED. openvpn's
+                            // options-import / SIGUSR1 reconnect tears down
+                            // the old tun under us; macOS doesn't always
+                            // delete the routes pointing at the dead
+                            // interface — sometimes it silently re-resolves
+                            // them onto whatever interface holds the default
+                            // route (en0), leaving zombie entries that look
+                            // valid but black-hole every packet. Just
+                            // clearing our cache isn't enough because the
+                            // next add hits `EEXIST` against the stale
+                            // kernel entry and our handler treats that as
+                            // success. clear() deletes by destination,
+                            // which evicts the stale route regardless of
+                            // which interface it's currently bound to; the
+                            // subsequent apply re-adds onto the live tun.
+                            route_manager.clear().await;
                             apply::tunnel_state(
                                 dns_manager.as_mut(),
                                 &mut route_manager,
