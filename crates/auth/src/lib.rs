@@ -54,7 +54,7 @@ impl From<&BasicTokenResponse> for Token {
         // conservative default than panic.
         let expires_in = t
             .expires_in()
-            .unwrap_or_else(|| Duration::from_secs(3600));
+            .unwrap_or_else(|| Duration::from_hours(1));
         Self {
             access_token: t.access_token().secret().to_owned(),
             expires_at: SystemTime::now() + expires_in,

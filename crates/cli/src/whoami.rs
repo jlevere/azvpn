@@ -11,11 +11,6 @@ use serde::Deserialize;
 
 use crate::{Error, Result};
 
-#[derive(Deserialize)]
-struct Cached {
-    access_token: String,
-}
-
 #[derive(Debug, Deserialize)]
 struct Claims {
     #[serde(default)]
@@ -46,18 +41,10 @@ pub struct Summary {
 }
 
 fn load_claims() -> Result<Claims> {
-    let path = TokenCache::default_path();
-    let raw = std::fs::read_to_string(&path).map_err(|e| {
-        if e.kind() == std::io::ErrorKind::NotFound {
-            Error::NoCachedToken {
-                path: path.display().to_string(),
-            }
-        } else {
-            Error::Io(e)
-        }
-    })?;
-    let cached: Cached = serde_json::from_str(&raw)?;
-    decode_claims(&cached.access_token)
+    let access = TokenCache::auto()
+        .load_access_token()
+        .ok_or(Error::NoCachedToken)?;
+    decode_claims(&access)
 }
 
 fn decode_claims(jwt: &str) -> Result<Claims> {

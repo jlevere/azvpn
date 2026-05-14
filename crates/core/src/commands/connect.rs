@@ -299,10 +299,10 @@ fn collect_dns_inputs<'p>(
     push_opts: &'p PushOptions,
 ) -> (Vec<&'p str>, Vec<std::net::IpAddr>) {
     let mut suffixes = profile.dns_suffixes();
-    if let Some(pushed) = push_opts.domain.as_deref() {
-        if !suffixes.iter().any(|s| s.trim_start_matches('.') == pushed) {
-            suffixes.push(pushed);
-        }
+    if let Some(pushed) = push_opts.domain.as_deref()
+        && !suffixes.iter().any(|s| s.trim_start_matches('.') == pushed)
+    {
+        suffixes.push(pushed);
     }
 
     let dns_servers: Vec<std::net::IpAddr> = if push_opts.dns_servers.is_empty() {
