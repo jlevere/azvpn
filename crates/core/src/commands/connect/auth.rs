@@ -90,9 +90,7 @@ pub(super) fn build_auth_file(
 ) -> Result<Option<tempfile::NamedTempFile>> {
     match (&profile.clientauth.auth_type, access_token) {
         (AuthType::Aad, Some(token)) => {
-            let mut f = tempfile::Builder::new().prefix("azvpn-auth-").tempfile()?;
-            writeln!(f, "{AAD_AUTH_USERNAME}")?;
-            writeln!(f, "{token}")?;
+            let f = write_creds_file(AAD_AUTH_USERNAME, token)?;
             info!("wrote AAD auth-user-pass file");
             Ok(Some(f))
         }
@@ -140,13 +138,20 @@ pub(super) fn build_auth_file(
                 .ok_or_else(|| {
                     Error::Other("<usernamepass><password> missing or empty".into())
                 })?;
-            let mut f = tempfile::Builder::new().prefix("azvpn-auth-").tempfile()?;
-            writeln!(f, "{username}")?;
-            writeln!(f, "{password}")?;
+            let f = write_creds_file(username, password)?;
             info!(auth = ?profile.clientauth.auth_type, "wrote username/password auth file");
             Ok(Some(f))
         }
     }
+}
+
+/// `username\npassword\n` in an auto-deleted tempfile — the format
+/// openvpn's `--auth-user-pass <file>` expects.
+fn write_creds_file(username: &str, password: &str) -> Result<tempfile::NamedTempFile> {
+    let mut f = tempfile::Builder::new().prefix("azvpn-auth-").tempfile()?;
+    writeln!(f, "{username}")?;
+    writeln!(f, "{password}")?;
+    Ok(f)
 }
 
 #[cfg(test)]

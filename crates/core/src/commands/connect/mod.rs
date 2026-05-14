@@ -21,7 +21,7 @@ use std::net::SocketAddr;
 use std::path::PathBuf;
 
 use azvpn_openvpn::{
-    ConfigBuilder, Event, OpenVpnConfig, OpenVpnProcess, PushOptions, VpnState,
+    ConfigBuilder, Event, OpenVpnConfig, OpenVpnProcess, PushOptions, Realm, VpnState,
 };
 use azvpn_profile::VpnProfile;
 use tokio::sync::watch;
@@ -84,6 +84,12 @@ pub async fn run(
     pushed_tx: watch::Sender<Option<PushOptions>>,
     cancel: CancellationToken,
 ) -> Result<()> {
+    // Profile parse + root-CA check are pure functions of the profile
+    // XML and don't change between retries; hoist out of the loop so
+    // we don't re-read the file 8× per failing connect.
+    let profile = VpnProfile::from_file(&opts.profile_path)?;
+    validation::bundled_root_matches(&profile)?;
+
     let mut backoff = retry::default_backoff();
     let mut attempt_no: u32 = 0;
     loop {
@@ -91,7 +97,8 @@ pub async fn run(
         info!(attempt = attempt_no, "connect attempt");
         let outcome = attempt(
             &opts,
-            access_token.clone(),
+            &profile,
+            access_token.as_deref(),
             &status_tx,
             &pushed_tx,
             cancel.clone(),
@@ -127,7 +134,9 @@ pub async fn run(
                     error = %e,
                     "transient connect failure; retrying"
                 );
-                let _ = status_tx.send(ConnectionStatus::Connecting);
+                // No status_tx.send here: attempt() emits Connecting
+                // at its own entry, so doing it here too would push a
+                // duplicate event before the sleep.
                 tokio::select! {
                     () = tokio::time::sleep(delay) => {}
                     () = cancel.cancelled() => {
@@ -141,36 +150,31 @@ pub async fn run(
 }
 
 /// One bring-up + run-the-event-loop attempt. Caller (`run()` above)
-/// owns the retry policy. Returning [`AttemptOutcome`] rather than
-/// `Result<()>` lets us distinguish "config is wrong, stop retrying"
-/// from "network blip, try again."
+/// owns the retry policy and the parsed profile (re-parsing on every
+/// retry would re-read disk + XML for no benefit). Returning
+/// [`AttemptOutcome`] rather than `Result<()>` lets us distinguish
+/// "config is wrong, stop retrying" from "network blip, try again."
 #[allow(clippy::too_many_lines)]
 async fn attempt(
     opts: &ConnectOptions,
-    access_token: Option<String>,
+    profile: &VpnProfile,
+    access_token: Option<&str>,
     status_tx: &watch::Sender<ConnectionStatus>,
     pushed_tx: &watch::Sender<Option<PushOptions>>,
     cancel: CancellationToken,
 ) -> AttemptOutcome {
     let _ = status_tx.send(ConnectionStatus::Connecting);
-    let profile = match VpnProfile::from_file(&opts.profile_path) {
-        Ok(p) => p,
-        Err(e) => return AttemptOutcome::Fatal(e.into()),
-    };
     let Some(server) = profile.primary_server() else {
         return AttemptOutcome::Fatal(Error::Other("no server in profile".into()));
     };
     info!(server = %server.fqdn, "loaded profile");
 
-    if let Err(e) = validation::bundled_root_matches(&profile) {
-        return AttemptOutcome::Fatal(e);
-    }
-    let auth_file = match build_auth_file(&profile, access_token.as_deref()) {
+    let auth_file = match build_auth_file(profile, access_token) {
         Ok(f) => f,
         Err(e) => return AttemptOutcome::Fatal(e),
     };
 
-    let mut builder = ConfigBuilder::new(&profile, opts.mgmt_addr);
+    let mut builder = ConfigBuilder::new(profile, opts.mgmt_addr);
     if let Some(ref af) = auth_file {
         builder = builder.auth_user_pass_file(af.path());
     }
@@ -239,7 +243,7 @@ async fn attempt(
     // immediately so the live state tracks the gateway's authoritative
     // view.
     let mut have_connected = false;
-    let mut reneg_creds = RenegCreds::for_profile(&profile);
+    let mut reneg_creds = RenegCreds::for_profile(profile);
     // Set inside the event loop to record why we broke out. None means
     // "openvpn exited on its own" — exit code decides post-loop.
     let mut outcome: Option<AttemptOutcome> = None;
@@ -307,9 +311,22 @@ async fn attempt(
                         } else {
                             info!(?state, "vpn state");
                         }
-                        let _ = status_tx.send(ConnectionStatus::OpenVpn {
+                        // openvpn re-emits the same state several times
+                        // during establishment (CONNECTING fires ~5×
+                        // before AUTH); send_if_modified compares
+                        // PartialEq and skips the notify when nothing
+                        // changed so watchers don't wake on duplicates.
+                        let new_status = ConnectionStatus::OpenVpn {
                             state: state.clone(),
                             local_ip,
+                        };
+                        status_tx.send_if_modified(|cur| {
+                            if *cur == new_status {
+                                false
+                            } else {
+                                *cur = new_status;
+                                true
+                            }
                         });
                         if *state == VpnState::Connected && !have_connected {
                             info!(server = %server.fqdn, "connected");
@@ -318,7 +335,7 @@ async fn attempt(
                                 dns_manager.as_mut(),
                                 &mut route_manager,
                                 &mut session,
-                                &profile,
+                                profile,
                                 &push_opts,
                             )
                             .await;
@@ -339,11 +356,10 @@ async fn attempt(
                             break;
                         }
                     }
-                    Event::PasswordPrompt { realm } => {
-                        if realm != "Auth" {
-                            tracing::warn!(realm, "ignoring password prompt for non-Auth realm");
-                            continue;
-                        }
+                    Event::PasswordPrompt { realm: Realm::Other(name) } => {
+                        tracing::warn!(realm = %name, "ignoring password prompt for non-Auth realm");
+                    }
+                    Event::PasswordPrompt { realm: Realm::Auth } => {
                         let Some((user, token)) = reneg_creds.response() else {
                             tracing::error!(
                                 "gateway asked for re-auth credentials but no auth-token \
@@ -356,7 +372,7 @@ async fn attempt(
                         if let Err(e) = mgmt.send_auth(user, token).await {
                             tracing::error!(error = %e, "failed to send re-auth response");
                         } else {
-                            info!(realm, "responded to re-auth prompt with cached auth-token");
+                            info!("responded to re-auth prompt with cached auth-token");
                         }
                     }
                     Event::AuthTokenIssued { token } => {
@@ -364,7 +380,7 @@ async fn attempt(
                         reneg_creds.set_token(token);
                     }
                     Event::PasswordVerificationFailed { realm } => {
-                        tracing::error!(realm, "gateway rejected credentials — terminal");
+                        tracing::error!(%realm, "gateway rejected credentials — terminal");
                         let msg =
                             format!("credentials rejected by gateway (realm {realm})");
                         let _ = status_tx.send(ConnectionStatus::Failed(msg.clone()));
@@ -425,7 +441,7 @@ async fn attempt(
                                 dns_manager.as_mut(),
                                 &mut route_manager,
                                 &mut session,
-                                &profile,
+                                profile,
                                 &push_opts,
                             )
                             .await;

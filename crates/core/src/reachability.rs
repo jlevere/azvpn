@@ -18,7 +18,7 @@
 use std::time::{Duration, Instant};
 
 use futures::StreamExt as _;
-use if_watch::{IfEvent, tokio::IfWatcher};
+use if_watch::tokio::IfWatcher;
 use tracing::{debug, warn};
 
 #[derive(Debug, thiserror::Error)]
@@ -92,21 +92,3 @@ impl ReachabilityWatcher {
     }
 }
 
-/// Wider classification of an [`IfEvent`] — currently unused but kept
-/// as a hook for future "interface X went away" / "interface X came
-/// back" diagnostics in `azvpn status`.
-#[allow(dead_code)]
-#[derive(Debug)]
-pub enum Change {
-    InterfaceUp(ipnet::IpNet),
-    InterfaceDown(ipnet::IpNet),
-}
-
-impl From<IfEvent> for Change {
-    fn from(ev: IfEvent) -> Self {
-        match ev {
-            IfEvent::Up(net) => Self::InterfaceUp(net),
-            IfEvent::Down(net) => Self::InterfaceDown(net),
-        }
-    }
-}
