@@ -1,3 +1,17 @@
+//! `OpenVPN` data-plane wrapper.
+//!
+//! We don't implement the `OpenVPN` protocol ourselves — we shell out to
+//! reference `openvpn` 2.x and drive it through its TCP management
+//! interface (Mullvad model). This crate owns:
+//!
+//! - [`ConfigBuilder`] — turns an Azure profile + options into an `.ovpn`
+//!   the child process reads on startup.
+//! - [`OpenVpnProcess`] — spawn / wait / kill the openvpn child, plus a
+//!   retrying `connect_management` for the mgmt-socket handshake.
+//! - [`ManagementClient`] — async reader/writer over the mgmt TCP socket,
+//!   parsing the prefix-tagged log lines into typed [`Event`] values
+//!   (state transitions, push-reply payloads, byte counts).
+
 mod config;
 mod management;
 mod process;

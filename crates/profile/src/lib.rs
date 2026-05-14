@@ -1,3 +1,14 @@
+//! Azure VPN profile XML parser.
+//!
+//! Targets the Microsoft Azure VPN Client `.AzureVpnProfile.xml` format,
+//! which is shared between VPN Gateway and Virtual WAN. Schema reference:
+//! <https://learn.microsoft.com/en-us/azure/vpn-gateway/azure-vpn-client-optional-configurations>.
+//!
+//! The whole shape is a [`VpnProfile`] tree with typed fields — no
+//! stringly-typed config, IPs parsed into [`std::net::IpAddr`], transport
+//! into a [`TransportProtocol`] enum, auth into [`AuthType`]. Parse errors
+//! and validation failures land in [`Error`].
+
 use std::net::IpAddr;
 
 use serde::Deserialize;

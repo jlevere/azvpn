@@ -1,19 +1,24 @@
-use std::net::IpAddr;
+//! Connection lifecycle and orchestration for `azvpn`.
+//!
+//! The platform-agnostic core. Owns:
+//!
+//! - [`commands`] — the CLI-facing facade. Each subcommand (`connect`,
+//!   `disconnect`, `status`, `info`, `pushed`) has a `run` / `current` /
+//!   `collect` entry point here. The CLI crate is presentation only.
+//! - [`dns`] — split-horizon DNS abstraction. A [`dns::DnsManager`] trait
+//!   plus a `new_manager()` factory selects the per-platform impl
+//!   (`tunnel-darwin`, `tunnel-linux`, `tunnel-windows`).
+//! - [`session`] — on-disk record of a running `connect` instance, used
+//!   by `disconnect` / `status` / `info` to locate the live process.
+//!
+//! All cross-crate errors funnel into one [`Error`] enum so callers can
+//! write a single handler.
 
 pub mod commands;
 pub mod dns;
 pub mod session;
-pub mod tunnel;
 
 pub type Result<T> = std::result::Result<T, Error>;
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum ConnectionState {
-    Disconnected,
-    Connecting,
-    Connected { server: String, local_ip: IpAddr },
-    Disconnecting,
-}
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
