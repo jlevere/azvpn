@@ -57,6 +57,47 @@ pub fn pushed_to_ipnet(r: &PushedRoute) -> Result<IpNet, ipnet::PrefixLenError> 
     }
 }
 
+/// Synthesize the `def1` split routes for a redirect-gateway push.
+///
+/// `0.0.0.0/1` + `128.0.0.0/1` together cover every IPv4 destination
+/// and bear a longer prefix than the system's `0.0.0.0/0` default
+/// route, so they take precedence in the kernel's longest-prefix-match
+/// without modifying or replacing the original default. Same idea for
+/// `::/1` + `8000::/1`. This is the openvpn `def1` idiom — strictly
+/// safer than tearing down `0.0.0.0/0` because a crashed daemon leaves
+/// the original default route intact.
+///
+/// # Panics
+/// Theoretically panics if `Ipv4Net::new(addr, 1)` or `Ipv6Net::new(addr, 1)`
+/// can fail for prefix=1, which they can't: prefix 1 is bounded well below
+/// the 32 / 128 maxima. Kept as `expect` rather than `unwrap` so a future
+/// `ipnet` major bump that changes invariants surfaces with a clear message.
+#[must_use]
+pub fn redirect_gateway_routes(rg: azvpn_openvpn::RedirectGateway) -> Vec<IpNet> {
+    let mut routes = Vec::with_capacity(4);
+    if rg.covers_ipv4() {
+        routes.push(IpNet::V4(
+            Ipv4Net::new(std::net::Ipv4Addr::UNSPECIFIED, 1)
+                .expect("prefix=1 is always valid for IPv4"),
+        ));
+        routes.push(IpNet::V4(
+            Ipv4Net::new(std::net::Ipv4Addr::new(128, 0, 0, 0), 1)
+                .expect("prefix=1 is always valid for IPv4"),
+        ));
+    }
+    if rg.covers_ipv6() {
+        routes.push(IpNet::V6(
+            Ipv6Net::new(std::net::Ipv6Addr::UNSPECIFIED, 1)
+                .expect("prefix=1 is always valid for IPv6"),
+        ));
+        routes.push(IpNet::V6(
+            Ipv6Net::new(std::net::Ipv6Addr::new(0x8000, 0, 0, 0, 0, 0, 0, 0), 1)
+                .expect("prefix=1 is always valid for IPv6"),
+        ));
+    }
+    routes
+}
+
 /// Compute the (`to_add`, `to_remove`) split between `current` and `desired`
 /// route sets, where each route is keyed by destination CIDR and carries
 /// its gateway. A CIDR present in both with a different gateway counts
@@ -277,6 +318,44 @@ mod tests {
         let (to_add, to_remove) = diff(&current, &desired);
         assert_eq!(to_add, vec![net("10.1.0.0/16")]);
         assert!(to_remove.is_empty());
+    }
+
+    #[test]
+    fn redirect_gateway_routes_v4_only() {
+        let rg = azvpn_openvpn::RedirectGateway {
+            def1: true,
+            ..azvpn_openvpn::RedirectGateway::default()
+        };
+        let routes = redirect_gateway_routes(rg);
+        assert_eq!(routes.len(), 2);
+        assert!(routes.contains(&net("0.0.0.0/1")));
+        assert!(routes.contains(&net("128.0.0.0/1")));
+    }
+
+    #[test]
+    fn redirect_gateway_routes_v4_and_v6() {
+        let rg = azvpn_openvpn::RedirectGateway {
+            def1: true,
+            ipv6: true,
+            ..azvpn_openvpn::RedirectGateway::default()
+        };
+        let routes = redirect_gateway_routes(rg);
+        assert_eq!(routes.len(), 4);
+        assert!(routes.contains(&net("::/1")));
+        assert!(routes.contains(&net("8000::/1")));
+    }
+
+    #[test]
+    fn redirect_gateway_routes_v6_only_when_no_ipv4_set() {
+        let rg = azvpn_openvpn::RedirectGateway {
+            ipv6: true,
+            no_ipv4: true,
+            ..azvpn_openvpn::RedirectGateway::default()
+        };
+        let routes = redirect_gateway_routes(rg);
+        assert_eq!(routes.len(), 2);
+        assert!(routes.contains(&net("::/1")));
+        assert!(!routes.iter().any(|r| matches!(r, IpNet::V4(_))));
     }
 
     #[test]
