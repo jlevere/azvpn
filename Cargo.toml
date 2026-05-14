@@ -55,3 +55,25 @@ cast_possible_truncation = "allow"
 module_name_repetitions = "allow"
 missing_errors_doc = "allow"
 must_use_candidate = "allow"
+
+# `dist init` reads this when generating release workflows. Targets here
+# are the matrix we ship binaries for; installers default to the shapes
+# package managers actually consume on each platform. Keep this aligned
+# with `packaging/` — adding a target here usually means a parallel
+# template under that directory.
+[workspace.metadata.dist]
+cargo-dist-version = "0.28.0"
+ci = ["github"]
+installers = ["shell", "powershell", "homebrew"]
+targets = [
+    "aarch64-apple-darwin",
+    "x86_64-apple-darwin",
+    "x86_64-unknown-linux-gnu",
+    "aarch64-unknown-linux-gnu",
+    "x86_64-pc-windows-msvc",
+]
+# `pr-run-mode = "plan"` keeps PRs out of the release pipeline — only tag
+# pushes trigger the actual build. `install-path` defaults to ~/.cargo/bin
+# which is wrong for a system VPN client; flip to a system bindir.
+pr-run-mode = "plan"
+install-path = "/usr/local/bin"

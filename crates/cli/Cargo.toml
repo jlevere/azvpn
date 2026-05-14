@@ -11,6 +11,27 @@ repository.workspace = true
 name = "azvpn"
 path = "src/main.rs"
 
+# `cargo bundle --release` produces a `.app` wrapping the CLI. We're not a
+# real GUI — the bundle exists so we can ship a `/Applications` drop-in for
+# users who don't have a CLI workflow, and so a future GUI target slots in
+# without re-doing this scaffolding. Icon / category / Info.plist tweaks
+# live alongside under `packaging/macos/`.
+[package.metadata.bundle]
+name = "azvpn"
+identifier = "com.jlevere.azvpn"
+category = "public.app-category.utilities"
+short_description = "Cross-platform Azure VPN client"
+long_description = """
+A from-scratch reimplementation of the Microsoft Azure VPN Client as a
+portable Rust CLI/library. Connects to Azure Virtual WAN P2S OpenVPN
+gateways with Microsoft Entra ID (AAD) or certificate authentication.
+"""
+# No `osx_minimum_system_version` pin until we test on older macOS; the
+# default tracks the current SDK. No `osx_url_schemes` — we don't open
+# from `azvpn://` links yet.
+# No `osx_info_plist_exts` block — entitlements stay empty until we
+# adopt NetworkExtension. We wrap `openvpn`, so no NEKit needed.
+
 [dependencies]
 azvpn-auth = { workspace = true }
 azvpn-core = { workspace = true }

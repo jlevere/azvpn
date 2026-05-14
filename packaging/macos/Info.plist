@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Info.plist override consumed by `cargo bundle`.
+
+  The CLI binary doubles as the bundle's main executable so a future GUI
+  can land in `crates/cli/src/gui.rs` (or a separate crate) without
+  rewriting packaging. `LSUIElement=true` keeps the bundle out of the
+  Dock — without a real UI we don't want a phantom dock tile when the CLI
+  is invoked from `open -a azvpn`.
+-->
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleIdentifier</key>
+    <string>com.jlevere.azvpn</string>
+    <key>CFBundleName</key>
+    <string>azvpn</string>
+    <key>CFBundleDisplayName</key>
+    <string>Azure VPN</string>
+    <key>CFBundleExecutable</key>
+    <string>azvpn</string>
+    <key>CFBundlePackageType</key>
+    <string>APPL</string>
+    <key>LSUIElement</key>
+    <true/>
+    <key>LSMinimumSystemVersion</key>
+    <string>13.0</string>
+</dict>
+</plist>

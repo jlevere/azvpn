@@ -1,0 +1,40 @@
+# systemd unit for the `azvpn` daemon.
+#
+# Placeholder — the daemon binary (/usr/lib/azvpn/azvpn-daemon) does not
+# yet exist. This file ships with the .deb/.rpm so that the Linux daemon
+# milestone only has to add the binary, not the packaging glue. Until
+# then, on Linux this unit is installed but never enabled.
+#
+# Install path:
+#   /etc/systemd/system/azvpn.service
+# Enable + start (post-daemon):
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now azvpn.service
+#
+# The daemon needs root for TUN + resolved DBus, so no `User=` override.
+# `Restart=on-failure` keeps the tunnel alive across transient gateway
+# blips; explicit disconnects via `azvpn disconnect` (exit 0) are not
+# restarted.
+
+[Unit]
+Description=Azure VPN client daemon
+Documentation=https://github.com/jlevere/azvpn
+After=network-online.target systemd-resolved.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/lib/azvpn/azvpn-daemon
+Restart=on-failure
+RestartSec=5
+
+# Hardening defaults — tighten further once the daemon's actual syscall
+# surface is known. Network namespace isolation is intentionally NOT set:
+# we *are* the host's tunnel.
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/run/azvpn /var/log/azvpn /etc/resolv.conf
+
+[Install]
+WantedBy=multi-user.target
