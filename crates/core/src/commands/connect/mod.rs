@@ -29,6 +29,7 @@ use tokio_util::sync::CancellationToken;
 use tracing::{info, instrument};
 
 use crate::dns;
+use crate::reachability::ReachabilityWatcher;
 use crate::route::RouteManager;
 use crate::session::RunningSession;
 use crate::{Error, Result};
@@ -242,6 +243,22 @@ async fn attempt(
     // Set inside the event loop to record why we broke out. None means
     // "openvpn exited on its own" — exit code decides post-loop.
     let mut outcome: Option<AttemptOutcome> = None;
+    // Watch for wifi↔ethernet handoffs / sleep-wake / adapter cycles
+    // so we can soft-restart openvpn the moment the network moves,
+    // instead of waiting 60+s for keepalive to time out. Failure to
+    // open the watcher (sandboxing, capability missing) is non-fatal
+    // — we just lose the snappy-reconnect property.
+    let mut reachability = match ReachabilityWatcher::new() {
+        Ok(w) => Some(w),
+        Err(e) => {
+            tracing::warn!(
+                error = %e,
+                "reachability watcher unavailable; tunnel will rely on \
+                 openvpn keepalive for network-change recovery"
+            );
+            None
+        }
+    };
 
     loop {
         tokio::select! {
@@ -252,6 +269,23 @@ async fn attempt(
                 let _ = mgmt.send("signal SIGTERM").await;
                 outcome = Some(AttemptOutcome::Completed);
                 break;
+            }
+
+            // Network reachability — wifi → ethernet hand-off, sleep/wake.
+            // SIGUSR1 is openvpn's soft-restart signal: keeps the tunnel
+            // session state, just re-runs TLS over the now-current path.
+            // Only fires after we've connected — pre-CONNECTED, openvpn
+            // is still establishing and a soft restart would race.
+            () = async {
+                match reachability.as_mut() {
+                    Some(w) => w.next_change().await,
+                    None => std::future::pending().await,
+                }
+            }, if have_connected => {
+                info!("network reachability changed; soft-restarting tunnel");
+                if let Err(e) = mgmt.send("signal SIGUSR1").await {
+                    tracing::warn!(error = %e, "failed to soft-restart openvpn");
+                }
             }
 
             event = mgmt.read_event() => {
