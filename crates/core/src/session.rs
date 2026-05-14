@@ -4,7 +4,7 @@
 //! `disconnect` / `status` to locate the running process. The file is
 //! removed on clean shutdown via [`SessionGuard`]'s Drop.
 
-use std::net::SocketAddr;
+use std::net::{IpAddr, SocketAddr};
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -32,6 +32,13 @@ pub struct RunningSession {
     pub server_fqdn: String,
     /// Unix epoch seconds.
     pub started_at: u64,
+    /// DNS suffixes installed via `SCDynamicStore` (macOS) or equivalent.
+    /// Populated by `connect` once the tunnel reaches Connected.
+    #[serde(default)]
+    pub dns_suffixes: Vec<String>,
+    /// DNS servers paired with the suffixes above.
+    #[serde(default)]
+    pub dns_servers: Vec<IpAddr>,
 }
 
 impl RunningSession {
@@ -50,7 +57,18 @@ impl RunningSession {
             profile_path,
             server_fqdn,
             started_at,
+            dns_suffixes: Vec::new(),
+            dns_servers: Vec::new(),
         })
+    }
+
+    /// Update the DNS fields and re-save the on-disk record. Called by
+    /// `connect` after `DnsGuard::install`/`update` succeeds so `info` and
+    /// `status` can show what was wired without re-reading `SCDynamicStore`.
+    pub fn record_dns(&mut self, suffixes: &[&str], servers: &[IpAddr]) -> Result<(), Error> {
+        self.dns_suffixes = suffixes.iter().map(|s| (*s).to_owned()).collect();
+        self.dns_servers = servers.to_vec();
+        self.save()
     }
 
     pub fn save(&self) -> Result<(), Error> {
