@@ -55,7 +55,7 @@ async fn exchange_for(scope: &str) -> Result<String> {
     let cache = TokenCache::new(&TokenCache::default_path());
     let refresh = cache.load_refresh_token().ok_or(Error::NoRefreshToken)?;
     let ctx = read_context()?;
-    let grant = RefreshGrant::new(ctx.tenant_id, ctx.client_id);
+    let grant = RefreshGrant::new(ctx.tenant_id, ctx.client_id)?;
     Ok(grant.exchange(&refresh, scope).await?.access_token)
 }
 

@@ -73,7 +73,7 @@ async fn ensure_access_token(profile: &VpnProfile) -> Result<Option<String>> {
 }
 
 async fn run_device_code(config: AadConfig, cache: &TokenCache) -> Result<Token> {
-    let flow = DeviceCodeFlow::new(config);
+    let flow = DeviceCodeFlow::new(config)?;
     let prompt = flow.start().await?;
     print_prompt(&prompt);
     open_browser(&prompt.verification_uri);
