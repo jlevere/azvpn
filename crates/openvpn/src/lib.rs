@@ -16,7 +16,7 @@ mod config;
 mod management;
 mod process;
 
-pub use config::ConfigBuilder;
+pub use config::{ConfigBuilder, bundled_root_ca_sha1};
 pub use management::{
     AddrFamily, Event, Ifconfig, ManagementClient, PushOptions, PushedRoute, VpnState,
     ipv4_mask_to_prefix, ipv4_prefix_to_mask,
