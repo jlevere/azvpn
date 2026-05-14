@@ -7,20 +7,12 @@
 //! the refresh token for a Graph-audience access token. AAD allows this
 //! because the well-known Azure VPN client ID (`41b23e61-...`) has consent
 //! pre-configured for the relevant Graph scopes.
-//!
-//! Thin wrapper over [`oauth2::basic::BasicClient::exchange_refresh_token`];
-//! the heavy lifting is form-encoding, error mapping, and rotation handling
-//! inside that crate.
-
-use std::time::{Duration, SystemTime};
 
 use oauth2::basic::{BasicClient, BasicTokenResponse};
-use oauth2::{
-    ClientId, EndpointNotSet, EndpointSet, RefreshToken, Scope, TokenResponse, TokenUrl,
-};
+use oauth2::{ClientId, EndpointNotSet, EndpointSet, RefreshToken, Scope};
 use tracing::{info, instrument};
 
-use crate::{Error, Token};
+use crate::{Error, Token, aad_http_client, aad_token_url};
 
 /// Well-known Microsoft Graph resource. `/.default` asks AAD for all
 /// statically-configured Graph scopes the user has consented to.
@@ -30,13 +22,14 @@ pub const GRAPH_RESOURCE: &str = "https://graph.microsoft.com/.default";
 /// management-plane queries — vnet/gateway listings, etc.).
 pub const ARM_RESOURCE: &str = "https://management.azure.com/.default";
 
-/// Typestate alias — refresh grant only needs the token endpoint.
+/// [`BasicClient`] specialised for the refresh-token grant: token endpoint
+/// is the only one that matters.
 type AadRefreshClient = BasicClient<
-    EndpointNotSet, // auth_uri
-    EndpointNotSet, // device_authorization_url
-    EndpointNotSet, // introspection_url
-    EndpointNotSet, // revocation_url
-    EndpointSet,    // token_uri
+    EndpointNotSet,
+    EndpointNotSet,
+    EndpointNotSet,
+    EndpointNotSet,
+    EndpointSet,
 >;
 
 pub struct RefreshGrant {
@@ -48,21 +41,12 @@ pub struct RefreshGrant {
 impl RefreshGrant {
     pub fn new(tenant_id: impl Into<String>, client_id: impl Into<String>) -> Result<Self, Error> {
         let tenant_id = tenant_id.into();
-        let token_url = TokenUrl::new(format!(
-            "https://login.microsoftonline.com/{tenant_id}/oauth2/v2.0/token"
-        ))
-        .map_err(|e| Error::Other(format!("invalid token URL: {e}")))?;
-
-        let client =
-            BasicClient::new(ClientId::new(client_id.into())).set_token_uri(token_url);
-
-        let http = reqwest::ClientBuilder::new()
-            .redirect(reqwest::redirect::Policy::none())
-            .build()?;
+        let token_url = aad_token_url(&tenant_id)?;
+        let client = BasicClient::new(ClientId::new(client_id.into())).set_token_uri(token_url);
 
         Ok(Self {
             tenant_id,
-            http,
+            http: aad_http_client()?,
             client,
         })
     }
@@ -80,19 +64,15 @@ impl RefreshGrant {
             .await
             .map_err(|e| Error::TokenAcquisition(format!("refresh-token grant failed: {e}")))?;
 
-        let expires_in = token_result
-            .expires_in()
-            .unwrap_or_else(|| Duration::from_secs(3600));
-        // AAD usually rotates the refresh token on each exchange — prefer
-        // the new one if returned, otherwise the caller can keep the old.
-        let new_refresh = token_result.refresh_token().map(|r| r.secret().to_owned());
-
-        info!(scope, expires_in = expires_in.as_secs(), "refresh-token exchange ok");
-        Ok(Token {
-            access_token: token_result.access_token().secret().to_owned(),
-            expires_at: SystemTime::now() + expires_in,
-            refresh_token: new_refresh,
-        })
+        let token = Token::from(&token_result);
+        // AAD usually rotates the refresh token on each exchange — `Token`
+        // already prefers the new one if returned; the caller can keep
+        // the old refresh token if `token.refresh_token` is None.
+        info!(
+            scope,
+            has_new_refresh = token.refresh_token.is_some(),
+            "refresh-token exchange ok"
+        );
+        Ok(token)
     }
 }
-

@@ -76,7 +76,7 @@ async fn run_device_code(config: AadConfig, cache: &TokenCache) -> Result<Token>
     let flow = DeviceCodeFlow::new(config)?;
     let prompt = flow.start().await?;
     print_prompt(&prompt);
-    open_browser(&prompt.verification_uri);
+    open_browser(prompt.verification_uri());
     let token = flow.poll_for_token(&prompt).await?;
     cache.save(&token);
     Ok(token)
@@ -84,10 +84,10 @@ async fn run_device_code(config: AadConfig, cache: &TokenCache) -> Result<Token>
 
 fn print_prompt(p: &DeviceCodePrompt) {
     eprintln!();
-    eprintln!("  Open:  {}", p.verification_uri);
-    eprintln!("  Code:  {}", p.user_code);
+    eprintln!("  Open:  {}", p.verification_uri());
+    eprintln!("  Code:  {}", p.user_code());
     eprintln!();
-    eprintln!("{}", p.message);
+    eprintln!("{}", p.message());
     eprintln!();
 }
 
