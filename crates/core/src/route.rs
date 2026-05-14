@@ -12,19 +12,28 @@
 //! async work cleanly so for a non-panicking shutdown the explicit
 //! `clear().await` is the right path.
 
-use std::net::{IpAddr, Ipv4Addr};
+use std::net::IpAddr;
 
-use azvpn_openvpn::AddrFamily;
+use azvpn_openvpn::PushedRoute;
 use net_route::{Handle, Route};
 use tracing::{debug, info, warn};
 
-/// One route to install. The user-facing struct stays minimal — we
-/// derive `net_route::Route` fields from `gateway` (or fall back to the
-/// session's pushed `route_gateway` at install time).
+/// One route to install. Constructed by the caller from any source
+/// (push-reply, profile XML, manual entry); the manager doesn't care
+/// where they came from.
 #[derive(Debug, Clone)]
 pub struct RouteSpec {
     pub destination: IpAddr,
     pub prefix: u8,
+}
+
+impl From<&PushedRoute> for RouteSpec {
+    fn from(r: &PushedRoute) -> Self {
+        Self {
+            destination: r.destination,
+            prefix: r.prefix,
+        }
+    }
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -128,73 +137,33 @@ impl Drop for RouteManager {
     }
 }
 
-/// Convert openvpn's stringly-typed push-reply route (destination,
-/// IPv4 netmask or IPv6 prefix length) into a [`RouteSpec`]. Returns
-/// `None` for inputs we can't parse — the caller logs and skips.
-#[must_use]
-pub fn parse_pushed_route(
-    destination: &str,
-    mask_or_prefix: &str,
-    family: AddrFamily,
-) -> Option<RouteSpec> {
-    let dest: IpAddr = destination.parse().ok()?;
-    let prefix = match family {
-        AddrFamily::V4 => {
-            let mask: Ipv4Addr = mask_or_prefix.parse().ok()?;
-            mask_to_prefix(mask)?
-        }
-        AddrFamily::V6 => mask_or_prefix.parse::<u8>().ok().filter(|p| *p <= 128)?,
-    };
-    Some(RouteSpec {
-        destination: dest,
-        prefix,
-    })
-}
-
-/// Convert a contiguous IPv4 netmask (`255.255.255.0`) into its prefix
-/// length (`24`). Returns `None` for non-contiguous masks (which would
-/// be malformed input from openvpn anyway).
-fn mask_to_prefix(mask: Ipv4Addr) -> Option<u8> {
-    let bits = u32::from(mask);
-    // Contiguous masks have the form `1*0*` — every set bit packed at
-    // the top. So total ones == leading ones is the contiguity test;
-    // this works at both endpoints (0.0.0.0 and 255.255.255.255) where
-    // shift-based checks need special-casing.
-    if bits.count_ones() != bits.leading_ones() {
-        return None;
-    }
-    u8::try_from(bits.leading_ones()).ok()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use azvpn_openvpn::AddrFamily;
 
     #[test]
-    fn mask_to_prefix_round_trip() {
-        assert_eq!(mask_to_prefix(Ipv4Addr::new(255, 255, 255, 0)), Some(24));
-        assert_eq!(mask_to_prefix(Ipv4Addr::new(255, 255, 0, 0)), Some(16));
-        assert_eq!(mask_to_prefix(Ipv4Addr::BROADCAST), Some(32));
-        assert_eq!(mask_to_prefix(Ipv4Addr::UNSPECIFIED), Some(0));
-        assert_eq!(mask_to_prefix(Ipv4Addr::new(255, 255, 192, 0)), Some(18));
+    fn from_pushed_v4() {
+        let r = PushedRoute {
+            destination: "10.0.0.0".parse().unwrap(),
+            prefix: 24,
+            gateway: None,
+            family: AddrFamily::V4,
+        };
+        let spec = RouteSpec::from(&r);
+        assert_eq!(spec.destination, "10.0.0.0".parse::<IpAddr>().unwrap());
+        assert_eq!(spec.prefix, 24);
     }
 
     #[test]
-    fn mask_to_prefix_rejects_non_contiguous() {
-        // 11111111.00000000.11111111.00000000 — discontiguous.
-        assert_eq!(mask_to_prefix(Ipv4Addr::new(255, 0, 255, 0)), None);
-    }
-
-    #[test]
-    fn parse_pushed_v4_route() {
-        let r = parse_pushed_route("10.0.0.0", "255.255.255.0", AddrFamily::V4).unwrap();
-        assert_eq!(r.destination, "10.0.0.0".parse::<IpAddr>().unwrap());
-        assert_eq!(r.prefix, 24);
-    }
-
-    #[test]
-    fn parse_pushed_v6_route() {
-        let r = parse_pushed_route("fd00::", "64", AddrFamily::V6).unwrap();
-        assert_eq!(r.prefix, 64);
+    fn from_pushed_v6() {
+        let r = PushedRoute {
+            destination: "fd00::".parse().unwrap(),
+            prefix: 64,
+            gateway: None,
+            family: AddrFamily::V6,
+        };
+        let spec = RouteSpec::from(&r);
+        assert_eq!(spec.prefix, 64);
     }
 }

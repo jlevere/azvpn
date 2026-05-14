@@ -16,11 +16,11 @@ pub fn run() -> Result<()> {
 }
 
 fn print(p: &PushOptions) {
-    if let Some((local, remote)) = &p.ifconfig {
-        println!("ifconfig:       {local} → {remote}");
+    if let Some(cfg) = &p.ifconfig {
+        println!("ifconfig:       {} → {}", cfg.local, cfg.remote);
     }
-    if let Some((local, remote)) = &p.ifconfig_ipv6 {
-        println!("ifconfig-ipv6:  {local} → {remote}");
+    if let Some(cfg) = &p.ifconfig_ipv6 {
+        println!("ifconfig-ipv6:  {} → {}", cfg.local, cfg.remote);
     }
     if let Some(mtu) = p.tun_mtu {
         println!("tun-mtu:        {mtu}");
@@ -76,8 +76,8 @@ fn print(p: &PushOptions) {
             .iter()
             .filter(|r| r.family == AddrFamily::V6)
             .collect();
-        v4.sort_by(|a, b| a.destination.cmp(&b.destination));
-        v6.sort_by(|a, b| a.destination.cmp(&b.destination));
+        v4.sort_by_key(|r| r.destination);
+        v6.sort_by_key(|r| r.destination);
         for r in v4 {
             print_route(r);
         }
@@ -96,11 +96,7 @@ fn print(p: &PushOptions) {
 }
 
 fn print_route(r: &PushedRoute) {
-    let sep = match r.family {
-        AddrFamily::V4 => " ",
-        AddrFamily::V6 => "/",
-    };
-    let dest = format!("{}{sep}{}", r.destination, r.mask_or_prefix);
+    let dest = format!("{}/{}", r.destination, r.prefix);
     match &r.gateway {
         Some(gw) => println!("  {dest:<30} via {gw}"),
         None => println!("  {dest}"),

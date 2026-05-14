@@ -17,7 +17,7 @@ use tokio_util::sync::CancellationToken;
 use tracing::{info, instrument};
 
 use crate::dns::{self, DnsManager};
-use crate::route::{self, RouteManager, RouteSpec};
+use crate::route::{RouteManager, RouteSpec};
 use crate::session::{RunningSession, SessionGuard};
 use crate::{Error, Result};
 
@@ -234,35 +234,15 @@ async fn install_routes(
     manager: &mut RouteManager,
     push_opts: &PushOptions,
 ) -> Result<()> {
-    let Some(gw_str) = push_opts.route_gateway.as_deref() else {
+    let Some(gateway) = push_opts.route_gateway else {
         tracing::warn!("no route-gateway in push reply — skipping route install");
         return Ok(());
     };
-    let gateway: std::net::IpAddr = gw_str
-        .parse()
-        .map_err(|_| Error::Other(format!("invalid route-gateway from gateway: {gw_str}")))?;
-
-    let specs: Vec<RouteSpec> = push_opts
-        .routes
-        .iter()
-        .filter_map(|r| {
-            route::parse_pushed_route(&r.destination, &r.mask_or_prefix, r.family)
-                .or_else(|| {
-                    tracing::warn!(
-                        dest = %r.destination,
-                        mask = %r.mask_or_prefix,
-                        "could not parse pushed route, skipping"
-                    );
-                    None
-                })
-        })
-        .collect();
-
-    if specs.is_empty() {
+    if push_opts.routes.is_empty() {
         info!("no pushed routes to install");
         return Ok(());
     }
-
+    let specs: Vec<RouteSpec> = push_opts.routes.iter().map(RouteSpec::from).collect();
     manager.apply(&specs, gateway).await?;
     Ok(())
 }
