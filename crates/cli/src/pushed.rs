@@ -2,7 +2,7 @@
 //! captured `PUSH_REPLY`. Pure formatting on the CLI side; the daemon
 //! owns the data.
 
-use azvpn_ipc::{AddrFamily, PushOptions, PushedRoute};
+use azvpn_ipc::{PushOptions, PushedRoute};
 
 use crate::daemon_client::connect_to_daemon;
 use crate::{Error, Result};
@@ -68,16 +68,10 @@ fn print(p: &PushOptions) {
     if !p.routes.is_empty() {
         println!();
         println!("Routes ({})", p.routes.len());
-        let mut v4: Vec<&PushedRoute> = p
-            .routes
-            .iter()
-            .filter(|r| r.family == AddrFamily::V4)
-            .collect();
-        let mut v6: Vec<&PushedRoute> = p
-            .routes
-            .iter()
-            .filter(|r| r.family == AddrFamily::V6)
-            .collect();
+        let mut v4: Vec<&PushedRoute> =
+            p.routes.iter().filter(|r| r.is_ipv4()).collect();
+        let mut v6: Vec<&PushedRoute> =
+            p.routes.iter().filter(|r| r.is_ipv6()).collect();
         v4.sort_by_key(|r| r.destination);
         v6.sort_by_key(|r| r.destination);
         for r in v4 {

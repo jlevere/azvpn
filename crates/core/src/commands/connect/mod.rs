@@ -417,14 +417,7 @@ async fn attempt(
                             has_auth_token = opts.auth_token.is_some(),
                             "received push options"
                         );
-                        if let Err(e) =
-                            validation::pushed_cipher_acceptable(opts.cipher.as_deref())
-                                .and_then(|()| {
-                                    validation::pushed_compression_acceptable(
-                                        opts.compress.as_deref(),
-                                    )
-                                })
-                        {
+                        if let Err(e) = validation::push_reply_acceptable(&opts) {
                             tracing::error!(error = %e, "refusing push reply on crypto policy");
                             let _ = status_tx.send(ConnectionStatus::Failed(e.to_string()));
                             let _ = mgmt.send("signal SIGTERM").await;

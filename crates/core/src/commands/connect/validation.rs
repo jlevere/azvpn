@@ -10,10 +10,19 @@
 //! Both keep validation logic out of the orchestration loop so the
 //! event match arms stay focused on dispatch.
 
-use azvpn_openvpn::bundled_root_ca_sha1;
+use azvpn_openvpn::{Compression, PushOptions, bundled_root_ca_sha1};
 use azvpn_profile::VpnProfile;
 
 use crate::{Error, Result};
+
+/// Aggregate gate run against every `PUSH_REPLY` before we apply it.
+/// New per-rule helpers slot in here so the caller doesn't end up
+/// with a growing `and_then` chain.
+pub(super) fn push_reply_acceptable(opts: &PushOptions) -> Result<()> {
+    pushed_cipher_acceptable(opts.cipher.as_deref())?;
+    pushed_compression_acceptable(opts.compress.as_ref())?;
+    Ok(())
+}
 
 /// Ciphers we hard-refuse if the gateway pushes them. Two failure modes
 /// covered:
@@ -97,27 +106,24 @@ pub(super) fn pushed_cipher_acceptable(cipher: Option<&str>) -> Result<()> {
 
 /// Reject a `PUSH_REPLY` that turns on data-channel compression for
 /// real compression algorithms — CRIME / VORACLE-class attacks exploit
-/// the compressibility leak through encrypted streams. `stub` and
-/// `stub-v2` are fine: they're handshake-only no-ops kept for protocol
-/// compatibility. `comp-lzo no` is also fine — the keyword is present
-/// but compression is explicitly off.
-pub(super) fn pushed_compression_acceptable(compress: Option<&str>) -> Result<()> {
+/// the compressibility leak through encrypted streams. The handshake-
+/// only `stub` / `stub-v2` and the explicit-off `comp-lzo no` forms
+/// pass; anything else is an active algorithm and gets refused.
+pub(super) fn pushed_compression_acceptable(compress: Option<&Compression>) -> Result<()> {
     let Some(compress) = compress else {
         return Ok(());
     };
-    let trimmed = compress.trim();
-    let lower = trimmed.to_ascii_lowercase();
-    // Allow-list the known-safe forms; anything else is an active
-    // compression algorithm.
-    let safe = lower == "stub"
-        || lower == "stub-v2"
-        || lower == "comp-lzo no"
-        || lower.is_empty();
-    if safe {
+    if compress.is_safe() {
         return Ok(());
     }
+    let wire = match compress {
+        Compression::Active(s) => s.as_str(),
+        // Unreachable: is_safe() above returned false, so the only
+        // remaining variant is Active. Kept as a defensive default.
+        Compression::Stub | Compression::StubV2 | Compression::CompLzoOff => "(unknown)",
+    };
     Err(Error::Other(format!(
-        "gateway pushed data-channel compression `{trimmed}` — refusing the \
+        "gateway pushed data-channel compression `{wire}` — refusing the \
          connection. Compression alongside encryption enables CRIME/VORACLE-style \
          leaks; turn it off at the gateway or downgrade to `compress stub-v2`."
     )))
@@ -236,20 +242,17 @@ mod tests {
     }
 
     #[test]
-    fn compression_validation_accepts_stub_forms() {
-        pushed_compression_acceptable(Some("stub")).expect("stub is handshake-only");
-        pushed_compression_acceptable(Some("stub-v2")).expect("stub-v2 is handshake-only");
-        pushed_compression_acceptable(Some("comp-lzo no")).expect("explicit off");
+    fn compression_validation_accepts_safe_variants() {
+        for safe in [Compression::Stub, Compression::StubV2, Compression::CompLzoOff] {
+            pushed_compression_acceptable(Some(&safe)).expect("safe variant must pass");
+        }
     }
 
     #[test]
-    fn compression_validation_rejects_active_algorithms() {
-        for algo in ["lz4", "lz4-v2", "lzo", "comp-lzo", "comp-lzo adaptive"] {
-            assert!(
-                pushed_compression_acceptable(Some(algo)).is_err(),
-                "{algo} should be rejected"
-            );
-        }
+    fn compression_validation_rejects_active_variant() {
+        let active = Compression::Active("lz4-v2".into());
+        let err = pushed_compression_acceptable(Some(&active)).unwrap_err().to_string();
+        assert!(err.contains("lz4-v2"));
     }
 
     #[test]
