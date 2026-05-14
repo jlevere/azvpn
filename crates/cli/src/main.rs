@@ -9,6 +9,7 @@ mod disconnect;
 mod dns;
 mod info;
 mod me;
+mod pushed;
 mod status;
 mod whoami;
 
@@ -57,6 +58,9 @@ enum Command {
     /// Call Microsoft Graph /v1.0/me using a refreshed token — the same
     /// query the official Microsoft Azure VPN Client makes post-auth
     Me,
+    /// Show everything the gateway pushed (routes, DHCP options, ifconfig,
+    /// cipher) — captured from the openvpn `PUSH_REPLY` at connect time
+    Pushed,
     /// DNS queries — verify split-horizon resolution against the gateway
     #[command(subcommand)]
     Dns(DnsCommand),
@@ -102,6 +106,7 @@ async fn main() {
         Command::Whoami => report(whoami::run()),
         Command::Info => report(info::run().await),
         Command::Me => report(me::run().await),
+        Command::Pushed => report(pushed::run()),
         Command::Dns(DnsCommand::Lookup { host, via }) => {
             report(dns::lookup(&host, via.as_deref()).await)
         }

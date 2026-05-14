@@ -8,6 +8,7 @@ use std::net::{IpAddr, SocketAddr};
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use azvpn_openvpn::PushOptions;
 use serde::{Deserialize, Serialize};
 
 /// One canonical path on both macOS and Linux. `/var/run` is root-owned and
@@ -39,6 +40,11 @@ pub struct RunningSession {
     /// DNS servers paired with the suffixes above.
     #[serde(default)]
     pub dns_servers: Vec<IpAddr>,
+    /// Everything the gateway pushed back in `PUSH_REPLY` — routes,
+    /// route-gateway, ifconfig, DHCP options, etc. Captured verbatim so
+    /// `azvpn pushed` can surface the gateway's intent without re-querying.
+    #[serde(default)]
+    pub pushed: Option<PushOptions>,
 }
 
 impl RunningSession {
@@ -59,7 +65,14 @@ impl RunningSession {
             started_at,
             dns_suffixes: Vec::new(),
             dns_servers: Vec::new(),
+            pushed: None,
         })
+    }
+
+    /// Capture the gateway's `PUSH_REPLY` and re-save the on-disk record.
+    pub fn record_pushed(&mut self, pushed: PushOptions) -> Result<(), Error> {
+        self.pushed = Some(pushed);
+        self.save()
     }
 
     /// Update the DNS fields and re-save the on-disk record. Called by

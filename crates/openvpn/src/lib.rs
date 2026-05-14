@@ -3,7 +3,7 @@ mod management;
 mod process;
 
 pub use config::ConfigBuilder;
-pub use management::{Event, ManagementClient, PushOptions, VpnState};
+pub use management::{AddrFamily, Event, ManagementClient, PushOptions, PushedRoute, VpnState};
 pub use process::OpenVpnProcess;
 
 use std::net::SocketAddr;

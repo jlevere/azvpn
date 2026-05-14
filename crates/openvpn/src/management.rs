@@ -41,10 +41,50 @@ impl VpnState {
     }
 }
 
-#[derive(Debug, Clone, Default)]
+/// One route directive from the gateway's `PUSH_REPLY`.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct PushedRoute {
+    pub destination: String,
+    /// Dotted IPv4 netmask (`255.255.255.0`) or IPv6 prefix length (`64`),
+    /// preserved as the gateway sent it.
+    pub mask_or_prefix: String,
+    /// Optional explicit gateway. `None` means "send through the tunnel".
+    pub gateway: Option<String>,
+    pub family: AddrFamily,
+}
+
+#[derive(Debug, Clone, Copy, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+pub enum AddrFamily {
+    V4,
+    V6,
+}
+
+/// Everything the gateway pushed back to us. All fields populated by parsing
+/// the `PUSH_REPLY` control message tokens. Unrecognised tokens land in
+/// `extras` so we don't silently drop anything Azure-specific.
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 pub struct PushOptions {
     pub dns_servers: Vec<IpAddr>,
     pub domain: Option<String>,
+    /// Multiple search domains via `dhcp-option DOMAIN-SEARCH <suffix>`.
+    pub domain_search: Vec<String>,
+    pub ntp_servers: Vec<IpAddr>,
+    pub wins_servers: Vec<IpAddr>,
+    pub routes: Vec<PushedRoute>,
+    /// `route-gateway <ip>` — gateway for tunneled routes that don't specify
+    /// their own.
+    pub route_gateway: Option<String>,
+    /// `ifconfig <local> <peer/netmask>` — tunnel-interface assignment.
+    pub ifconfig: Option<(String, String)>,
+    /// `ifconfig-ipv6 <local>/<prefix> <remote>`.
+    pub ifconfig_ipv6: Option<(String, String)>,
+    /// MTU pushed via `tun-mtu` or `link-mtu`.
+    pub tun_mtu: Option<u32>,
+    /// Cipher / data-channel options the gateway selected.
+    pub cipher: Option<String>,
+    /// Tokens we didn't recognise — preserved verbatim so debug output shows
+    /// everything the gateway told us.
+    pub extras: Vec<String>,
 }
 
 impl PushOptions {
@@ -52,15 +92,101 @@ impl PushOptions {
         let mut opts = Self::default();
         for token in options_line.split(',') {
             let token = token.trim();
-            if let Some(addr_str) = token.strip_prefix("dhcp-option DNS ") {
-                if let Ok(addr) = addr_str.parse() {
-                    opts.dns_servers.push(addr);
-                }
-            } else if let Some(domain) = token.strip_prefix("dhcp-option DOMAIN ") {
-                opts.domain = Some(domain.to_owned());
+            if token.is_empty() {
+                continue;
             }
+            if Self::parse_token(&mut opts, token) {
+                continue;
+            }
+            opts.extras.push(token.to_owned());
         }
         opts
+    }
+
+    /// Try to classify a single `PUSH_REPLY` token. Returns `true` if it was
+    /// recognised (regardless of whether the inner value parsed) — `false`
+    /// means the caller should keep it as an `extra`.
+    fn parse_token(opts: &mut Self, token: &str) -> bool {
+        if let Some(rest) = token.strip_prefix("dhcp-option DNS ") {
+            if let Ok(addr) = rest.parse() {
+                opts.dns_servers.push(addr);
+            }
+            return true;
+        }
+        if let Some(rest) = token.strip_prefix("dhcp-option DOMAIN-SEARCH ") {
+            opts.domain_search.push(rest.to_owned());
+            return true;
+        }
+        if let Some(rest) = token.strip_prefix("dhcp-option DOMAIN ") {
+            opts.domain = Some(rest.to_owned());
+            return true;
+        }
+        if let Some(rest) = token.strip_prefix("dhcp-option NTP ") {
+            if let Ok(addr) = rest.parse() {
+                opts.ntp_servers.push(addr);
+            }
+            return true;
+        }
+        if let Some(rest) = token.strip_prefix("dhcp-option WINS ") {
+            if let Ok(addr) = rest.parse() {
+                opts.wins_servers.push(addr);
+            }
+            return true;
+        }
+        if let Some(rest) = token.strip_prefix("route-ipv6 ") {
+            // `route-ipv6 <addr>/<prefix> [gateway]`
+            let mut parts = rest.split_whitespace();
+            if let Some(cidr) = parts.next() {
+                let (dest, prefix) = cidr.split_once('/').unwrap_or((cidr, "128"));
+                opts.routes.push(PushedRoute {
+                    destination: dest.to_owned(),
+                    mask_or_prefix: prefix.to_owned(),
+                    gateway: parts.next().map(str::to_owned),
+                    family: AddrFamily::V6,
+                });
+            }
+            return true;
+        }
+        if let Some(rest) = token.strip_prefix("route ") {
+            // `route <dest> <mask> [gateway]`
+            let mut parts = rest.split_whitespace();
+            if let (Some(dest), Some(mask)) = (parts.next(), parts.next()) {
+                opts.routes.push(PushedRoute {
+                    destination: dest.to_owned(),
+                    mask_or_prefix: mask.to_owned(),
+                    gateway: parts.next().map(str::to_owned),
+                    family: AddrFamily::V4,
+                });
+            }
+            return true;
+        }
+        if let Some(rest) = token.strip_prefix("route-gateway ") {
+            opts.route_gateway = Some(rest.to_owned());
+            return true;
+        }
+        if let Some(rest) = token.strip_prefix("ifconfig-ipv6 ") {
+            if let Some((local, remote)) = rest.split_once(' ') {
+                opts.ifconfig_ipv6 = Some((local.to_owned(), remote.to_owned()));
+            }
+            return true;
+        }
+        if let Some(rest) = token.strip_prefix("ifconfig ") {
+            if let Some((local, remote)) = rest.split_once(' ') {
+                opts.ifconfig = Some((local.to_owned(), remote.to_owned()));
+            }
+            return true;
+        }
+        if let Some(rest) = token.strip_prefix("tun-mtu ") {
+            if let Ok(mtu) = rest.parse() {
+                opts.tun_mtu = Some(mtu);
+            }
+            return true;
+        }
+        if let Some(rest) = token.strip_prefix("cipher ") {
+            opts.cipher = Some(rest.to_owned());
+            return true;
+        }
+        false
     }
 }
 
@@ -75,7 +201,9 @@ pub enum Event {
     Info(String),
     ByteCount { rx: u64, tx: u64 },
     Log(String),
-    PushReply(PushOptions),
+    /// Boxed because `PushOptions` is significantly larger than the other
+    /// variants — keeps the enum compact for the common state/log path.
+    PushReply(Box<PushOptions>),
 }
 
 pub struct ManagementClient {
@@ -189,7 +317,7 @@ impl ManagementClient {
                 .and_then(|csv| csv.strip_prefix("PUSH: Received control message: 'PUSH_REPLY,"))
                 .and_then(|s| s.strip_suffix('\''))
             {
-                return Some(Event::PushReply(PushOptions::parse(opts)));
+                return Some(Event::PushReply(Box::new(PushOptions::parse(opts))));
             }
             return Some(Event::Log(rest.to_owned()));
         }
@@ -234,17 +362,59 @@ mod tests {
 
     #[test]
     fn parse_push_reply() {
-        let line = ">LOG:1715600000,I,PUSH: Received control message: 'PUSH_REPLY,dhcp-option DNS 10.0.0.4,dhcp-option DNS 10.0.0.5,dhcp-option DOMAIN corp.internal,route 10.0.0.0 255.255.0.0,route-gateway 10.0.8.1,ifconfig 10.0.8.4 255.255.255.0'";
+        let line = ">LOG:1715600000,I,PUSH: Received control message: 'PUSH_REPLY,\
+            dhcp-option DNS 10.0.0.4,\
+            dhcp-option DNS 10.0.0.5,\
+            dhcp-option DOMAIN corp.internal,\
+            dhcp-option DOMAIN-SEARCH dev.corp.internal,\
+            dhcp-option DOMAIN-SEARCH ops.corp.internal,\
+            dhcp-option NTP 10.0.0.10,\
+            dhcp-option WINS 10.0.0.20,\
+            route 10.0.0.0 255.255.0.0,\
+            route 10.1.0.0 255.255.255.0 10.0.8.1,\
+            route-ipv6 fd00::/64,\
+            route-gateway 10.0.8.1,\
+            ifconfig 10.0.8.4 255.255.255.0,\
+            ifconfig-ipv6 fd00::4/64 fd00::1,\
+            tun-mtu 1400,\
+            cipher AES-256-GCM,\
+            topology subnet'";
         let event = ManagementClient::parse_line(line).unwrap();
-        match event {
-            Event::PushReply(opts) => {
-                assert_eq!(opts.dns_servers.len(), 2);
-                assert_eq!(opts.dns_servers[0], "10.0.0.4".parse::<IpAddr>().unwrap());
-                assert_eq!(opts.dns_servers[1], "10.0.0.5".parse::<IpAddr>().unwrap());
-                assert_eq!(opts.domain.as_deref(), Some("corp.internal"));
-            }
-            _ => panic!("expected PushReply event"),
-        }
+        let Event::PushReply(opts) = event else {
+            panic!("expected PushReply event");
+        };
+
+        assert_eq!(opts.dns_servers, [
+            "10.0.0.4".parse::<IpAddr>().unwrap(),
+            "10.0.0.5".parse().unwrap(),
+        ]);
+        assert_eq!(opts.domain.as_deref(), Some("corp.internal"));
+        assert_eq!(opts.domain_search, ["dev.corp.internal", "ops.corp.internal"]);
+        assert_eq!(opts.ntp_servers, ["10.0.0.10".parse::<IpAddr>().unwrap()]);
+        assert_eq!(opts.wins_servers, ["10.0.0.20".parse::<IpAddr>().unwrap()]);
+
+        assert_eq!(opts.routes.len(), 3);
+        assert_eq!(opts.routes[0].destination, "10.0.0.0");
+        assert_eq!(opts.routes[0].mask_or_prefix, "255.255.0.0");
+        assert!(opts.routes[0].gateway.is_none());
+        assert_eq!(opts.routes[0].family, AddrFamily::V4);
+        assert_eq!(opts.routes[1].gateway.as_deref(), Some("10.0.8.1"));
+        assert_eq!(opts.routes[2].family, AddrFamily::V6);
+        assert_eq!(opts.routes[2].destination, "fd00::");
+        assert_eq!(opts.routes[2].mask_or_prefix, "64");
+
+        assert_eq!(opts.route_gateway.as_deref(), Some("10.0.8.1"));
+        assert_eq!(
+            opts.ifconfig,
+            Some(("10.0.8.4".into(), "255.255.255.0".into()))
+        );
+        assert_eq!(
+            opts.ifconfig_ipv6,
+            Some(("fd00::4/64".into(), "fd00::1".into()))
+        );
+        assert_eq!(opts.tun_mtu, Some(1400));
+        assert_eq!(opts.cipher.as_deref(), Some("AES-256-GCM"));
+        assert_eq!(opts.extras, ["topology subnet"]);
     }
 
     #[test]
