@@ -7,6 +7,40 @@ use std::net::IpAddr;
 use super::push::PushOptions;
 use super::state::VpnState;
 
+/// `OpenVPN`'s log-level letter from `>LOG:<ts>,<level>,<msg>`.
+/// Maps `F/E/W/N/I/D/V` to the standard severity ladder so callers
+/// can dispatch at the right [`tracing`] level instead of treating
+/// every log line as the same priority.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LogLevel {
+    Fatal,
+    Error,
+    Warn,
+    Notice,
+    Info,
+    Debug,
+    Verbose,
+    /// `OpenVPN` versions occasionally emit characters not in the
+    /// documented set; preserve so the caller can still surface the
+    /// message at a default level rather than dropping it.
+    Unknown,
+}
+
+impl LogLevel {
+    pub(crate) fn from_char(c: char) -> Self {
+        match c {
+            'F' => Self::Fatal,
+            'E' => Self::Error,
+            'W' => Self::Warn,
+            'N' => Self::Notice,
+            'I' => Self::Info,
+            'D' => Self::Debug,
+            'V' => Self::Verbose,
+            _ => Self::Unknown,
+        }
+    }
+}
+
 /// openvpn's `>PASSWORD:` realm tag. The primary auth realm is `Auth`;
 /// proxy / HTTP-Auth realms exist in theory but Azure never uses them.
 /// Typed so call sites pattern-match instead of string-compare.
@@ -67,7 +101,14 @@ pub enum Event {
     Fatal(String),
     Info(String),
     ByteCount { rx: u64, tx: u64 },
-    Log(String),
+    /// `>LOG:<timestamp>,<level>,<message>` — openvpn's structured
+    /// log line. The wire-form timestamp is discarded (we have our
+    /// own logger's), but the level is preserved so the caller can
+    /// dispatch errors / warnings at the appropriate `tracing` level.
+    Log {
+        level: LogLevel,
+        message: String,
+    },
     /// Boxed because `PushOptions` is significantly larger than the other
     /// variants — keeps the enum compact for the common state/log path.
     PushReply(Box<PushOptions>),
@@ -108,15 +149,32 @@ pub(crate) fn parse_line(line: &str) -> Option<Event> {
     }
 
     if let Some(rest) = line.strip_prefix(">LOG:") {
-        if let Some(opts) = rest
-            .splitn(3, ',')
-            .nth(2)
-            .and_then(|csv| csv.strip_prefix("PUSH: Received control message: 'PUSH_REPLY,"))
+        // Format: `<timestamp>,<level-char>,<message>`. We discard
+        // the timestamp (the tracing layer adds its own) and parse
+        // the level letter into a typed enum so dispatch happens at
+        // the right severity downstream.
+        let mut parts = rest.splitn(3, ',');
+        let _timestamp = parts.next();
+        let level = parts
+            .next()
+            .and_then(|s| s.chars().next())
+            .map_or(LogLevel::Unknown, LogLevel::from_char);
+        let message = parts.next().unwrap_or("");
+
+        // PUSH_REPLY arrives wrapped in a regular log line; intercept
+        // before treating it as a normal Log event so the caller gets
+        // a typed PushReply.
+        if let Some(opts) = message
+            .strip_prefix("PUSH: Received control message: 'PUSH_REPLY,")
             .and_then(|s| s.strip_suffix('\''))
         {
             return Some(Event::PushReply(Box::new(PushOptions::parse(opts))));
         }
-        return Some(Event::Log(rest.to_owned()));
+
+        return Some(Event::Log {
+            level,
+            message: message.to_owned(),
+        });
     }
 
     if let Some(rest) = line.strip_prefix(">INFO:") {
@@ -262,10 +320,36 @@ mod tests {
     }
 
     #[test]
-    fn parse_regular_log_not_push() {
+    fn parse_regular_log_splits_level_and_message() {
         let line = ">LOG:1715600000,D,some debug message";
         let event = parse_line(line).unwrap();
-        assert!(matches!(event, Event::Log(_)));
+        match event {
+            Event::Log { level, message } => {
+                assert_eq!(level, LogLevel::Debug);
+                assert_eq!(message, "some debug message");
+            }
+            other => panic!("expected Log, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_log_levels_cover_full_set() {
+        for (letter, expected) in [
+            ('F', LogLevel::Fatal),
+            ('E', LogLevel::Error),
+            ('W', LogLevel::Warn),
+            ('N', LogLevel::Notice),
+            ('I', LogLevel::Info),
+            ('D', LogLevel::Debug),
+            ('V', LogLevel::Verbose),
+            ('Q', LogLevel::Unknown),
+        ] {
+            let line = format!(">LOG:1,{letter},hello");
+            match parse_line(&line).unwrap() {
+                Event::Log { level, .. } => assert_eq!(level, expected, "letter {letter}"),
+                other => panic!("expected Log for {letter}, got {other:?}"),
+            }
+        }
     }
 
     #[test]

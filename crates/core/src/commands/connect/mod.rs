@@ -21,7 +21,7 @@ use std::net::SocketAddr;
 use std::path::PathBuf;
 
 use azvpn_openvpn::{
-    ConfigBuilder, Event, OpenVpnConfig, OpenVpnProcess, PushOptions, Realm, VpnState,
+    ConfigBuilder, Event, LogLevel, OpenVpnConfig, OpenVpnProcess, PushOptions, Realm, VpnState,
 };
 use azvpn_profile::VpnProfile;
 use tokio::sync::watch;
@@ -447,8 +447,30 @@ async fn attempt(
                             .await;
                         }
                     }
-                    Event::Info(msg) | Event::Log(msg) => {
-                        info!("{msg}");
+                    Event::Info(msg) => {
+                        info!(target: "openvpn", "{msg}");
+                    }
+                    Event::Log { level, message } => {
+                        // Dispatch at the tracing level openvpn marked the
+                        // line with, so warnings and fatals don't drown
+                        // alongside chatty INFO/DEBUG state-machine noise.
+                        match level {
+                            LogLevel::Fatal | LogLevel::Error => {
+                                tracing::error!(target: "openvpn", "{message}");
+                            }
+                            LogLevel::Warn => {
+                                tracing::warn!(target: "openvpn", "{message}");
+                            }
+                            LogLevel::Notice | LogLevel::Info | LogLevel::Unknown => {
+                                info!(target: "openvpn", "{message}");
+                            }
+                            LogLevel::Debug => {
+                                tracing::debug!(target: "openvpn", "{message}");
+                            }
+                            LogLevel::Verbose => {
+                                tracing::trace!(target: "openvpn", "{message}");
+                            }
+                        }
                     }
                     Event::ByteCount { rx, tx } => {
                         tracing::debug!(rx, tx, "byte count");
