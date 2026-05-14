@@ -1,5 +1,6 @@
 use std::net::IpAddr;
 
+pub mod session;
 pub mod tunnel;
 
 #[derive(Debug, Clone, PartialEq, Eq)]

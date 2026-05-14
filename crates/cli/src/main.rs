@@ -5,6 +5,8 @@ use clap::{Parser, Subcommand};
 use tracing_subscriber::EnvFilter;
 
 mod connect;
+mod disconnect;
+mod status;
 
 #[derive(Parser)]
 #[command(name = "azvpn", about = "Cross-platform Azure VPN client")]
@@ -58,7 +60,7 @@ async fn main() {
 
     tracing_subscriber::fmt().with_env_filter(filter).init();
 
-    let result = match cli.command {
+    let exit_code = match cli.command {
         Command::Connect {
             profile,
             openvpn,
@@ -66,21 +68,32 @@ async fn main() {
         } => {
             let mgmt_addr =
                 SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::LOCALHOST, mgmt_port));
-            connect::run(&profile, &openvpn, mgmt_addr, cli.verbose).await
+            report(connect::run(&profile, &openvpn, mgmt_addr, cli.verbose).await)
         }
+        Command::Disconnect => report(disconnect::run().await),
+        Command::Status => report(status::run().await),
         Command::Import { path } => {
             tracing::info!(?path, "importing profile");
             eprintln!("not yet implemented");
-            Ok(())
+            0
         }
-        Command::Disconnect | Command::Status | Command::List => {
+        Command::List => {
             eprintln!("not yet implemented");
-            Ok(())
+            0
         }
     };
 
-    if let Err(e) = result {
-        eprintln!("error: {e}");
-        std::process::exit(1);
+    if exit_code != 0 {
+        std::process::exit(exit_code);
+    }
+}
+
+fn report<E: std::fmt::Display>(result: Result<(), E>) -> i32 {
+    match result {
+        Ok(()) => 0,
+        Err(e) => {
+            eprintln!("error: {e}");
+            1
+        }
     }
 }

@@ -3,6 +3,7 @@ use std::net::SocketAddr;
 use std::path::Path;
 
 use azvpn_auth::{AadConfig, DeviceCodeFlow, TokenCache};
+use azvpn_core::session::{RunningSession, SessionGuard};
 use azvpn_openvpn::{ConfigBuilder, Event, OpenVpnConfig, OpenVpnProcess, PushOptions, VpnState};
 use azvpn_profile::{AuthType, VpnProfile};
 use tokio::signal;
@@ -16,6 +17,8 @@ pub enum Error {
     Auth(#[from] azvpn_auth::Error),
     #[error("openvpn: {0}")]
     OpenVpn(#[from] azvpn_openvpn::Error),
+    #[error("session: {0}")]
+    Session(#[from] azvpn_core::session::Error),
     #[error("io: {0}")]
     Io(#[from] std::io::Error),
     #[error("{0}")]
@@ -113,6 +116,13 @@ pub async fn run(
     let mut process = OpenVpnProcess::start(&ovpn_config, config_file.path())?;
     let mut mgmt = process.connect_management().await?;
     info!("connected to management interface");
+
+    let session = RunningSession::new(
+        mgmt_addr,
+        profile_path.to_owned(),
+        server.fqdn.clone(),
+    )?;
+    let _session_guard = SessionGuard::new(&session)?;
 
     mgmt.send("state on").await?;
     mgmt.send("log on").await?;
