@@ -154,11 +154,16 @@ impl RouteManager {
                 Ok(()) => {
                     debug!(dest = %net, "route removed");
                 }
+                Err(e) if e.raw_os_error() == Some(libc::ESRCH) => {
+                    // Route already gone — openvpn's internal restart
+                    // tears down the kernel routes between push-reply
+                    // cycles, so by the time we re-apply on the second
+                    // push our installed-set still references routes
+                    // the kernel already deleted. Drop to debug — this
+                    // is the common case during reneg, not an error.
+                    debug!(dest = %net, "route already absent");
+                }
                 Err(e) => {
-                    // Non-fatal during reapply — the route may already
-                    // be gone (race with manual `route delete`, kernel
-                    // reachability cleanup). Log and continue so we
-                    // don't get stuck holding stale state.
                     warn!(dest = %net, error = %e, "route delete during apply failed");
                 }
             }
@@ -200,8 +205,16 @@ impl RouteManager {
         let count = installed.len();
         for (net, gateway) in installed {
             let route = Route::new(net.network(), net.prefix_len()).with_gateway(gateway);
-            if let Err(e) = self.handle.delete(&route).await {
-                warn!(dest = %net, error = %e, "route delete failed");
+            match self.handle.delete(&route).await {
+                Ok(()) => {}
+                Err(e) if e.raw_os_error() == Some(libc::ESRCH) => {
+                    // Already gone — openvpn's tun teardown may have
+                    // removed it via auto-flush before we got here.
+                    debug!(dest = %net, "route already absent during clear");
+                }
+                Err(e) => {
+                    warn!(dest = %net, error = %e, "route delete failed");
+                }
             }
         }
         info!(removed = count, "routes removed");

@@ -205,22 +205,15 @@ return `Ok(())` no-op for now.
 
 ## P2 — quality of life
 
-### 9.  Log levels collapsed
+### 9.  ~~Log levels collapsed~~ ✅ shipped
 
-**Status:** levels stripped.
-
-`>LOG:<ts>,<level>,<msg>` — we drop level
-(`crates/openvpn/src/management.rs:391-401`) and treat every log line
-as `Event::Log(String)`. A FATAL openvpn log is indistinguishable
-from a verbose debug line.
-
-**Where:** `crates/openvpn/src/management.rs:391-401`.
-
-**Scope:** ~40 LOC.
-
-**Done when:** `Event::Log` carries a `LogLevel { Fatal, Error,
-Warn, Notice, Info, Debug, Verbose }`. Errors and above auto-promote
-to `tracing::error!` instead of `info!`.
+`Event::Log` now carries a typed `LogLevel { Fatal, Error, Warn,
+Notice, Info, Debug, Verbose, Unknown }`. The connect-loop dispatcher
+maps each level to the matching `tracing` macro and sets
+`target: "openvpn"` so the upstream binary's log lines are filterable
+separately from our own. Wire-form timestamp gets dropped at parse
+time (the tracing layer adds its own). 8 letter-mappings + 2 new
+tests in `management/event.rs`.
 
 ---
 
