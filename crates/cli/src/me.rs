@@ -3,9 +3,10 @@
 //! against the Ghidra decomp of
 //! `MacTunnelExtension::AadController::getContentWithToken`).
 
+use azvpn_auth::cloud;
 use serde::Deserialize;
 
-use crate::{Result, aad};
+use crate::Result;
 
 #[derive(Deserialize, Debug)]
 #[serde(rename_all = "camelCase")]
@@ -23,7 +24,7 @@ struct GraphUser {
 }
 
 pub async fn run() -> Result<()> {
-    let user: GraphUser = aad::graph_get("/me").await?;
+    let user: GraphUser = cloud::graph_get("/me").await?;
     println!("graph: GET /v1.0/me");
     println!();
     if let Some(v) = &user.display_name {
