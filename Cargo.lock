@@ -291,6 +291,7 @@ dependencies = [
  "azvpn-tunnel-darwin",
  "azvpn-tunnel-linux",
  "azvpn-tunnel-windows",
+ "backon",
  "ipnet",
  "libc",
  "net-route",
@@ -385,6 +386,15 @@ dependencies = [
  "thiserror 2.0.18",
  "tokio",
  "tracing",
+]
+
+[[package]]
+name = "backon"
+version = "1.6.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "cffb0e931875b666fc4fcb20fee52e9bbd1ef836fd9e9e04ec21555f9f85f7ef"
+dependencies = [
+ "fastrand",
 ]
 
 [[package]]

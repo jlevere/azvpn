@@ -35,9 +35,11 @@ use crate::{Error, Result};
 
 mod apply;
 mod auth;
+mod retry;
 mod validation;
 
 use auth::{RenegCreds, build_auth_file};
+use retry::AttemptOutcome;
 
 /// Inputs the CLI / daemon / GUI marshals into a single bag. Stable across
 /// the orchestration call so callers can compose options without juggling
@@ -70,7 +72,9 @@ pub enum ConnectionStatus {
     Failed(String),
 }
 
-#[allow(clippy::too_many_lines)]
+/// Connect entry point. Drives `attempt()` under an exponential backoff
+/// — transient failures retry, fatal failures (config bugs, credentials
+/// rejected, weak cipher policy) propagate up immediately.
 #[instrument(skip_all, name = "connect", fields(profile = %opts.profile_path.display()))]
 pub async fn run(
     opts: ConnectOptions,
@@ -79,15 +83,91 @@ pub async fn run(
     pushed_tx: watch::Sender<Option<PushOptions>>,
     cancel: CancellationToken,
 ) -> Result<()> {
+    let mut backoff = retry::default_backoff();
+    let mut attempt_no: u32 = 0;
+    loop {
+        attempt_no += 1;
+        info!(attempt = attempt_no, "connect attempt");
+        let outcome = attempt(
+            &opts,
+            access_token.clone(),
+            &status_tx,
+            &pushed_tx,
+            cancel.clone(),
+        )
+        .await;
+        match outcome {
+            AttemptOutcome::Completed => {
+                cancel.cancel();
+                return Ok(());
+            }
+            AttemptOutcome::Fatal(e) => {
+                tracing::error!(error = %e, "connect attempt hit a fatal error; not retrying");
+                cancel.cancel();
+                return Err(e);
+            }
+            AttemptOutcome::Transient(e) => {
+                if cancel.is_cancelled() {
+                    tracing::info!("retry skipped — user cancelled");
+                    return Err(e);
+                }
+                let Some(delay) = backoff.next() else {
+                    tracing::warn!(
+                        attempts = attempt_no,
+                        error = %e,
+                        "retry budget exhausted; giving up"
+                    );
+                    cancel.cancel();
+                    return Err(e);
+                };
+                tracing::warn!(
+                    attempt = attempt_no,
+                    next_in = ?delay,
+                    error = %e,
+                    "transient connect failure; retrying"
+                );
+                let _ = status_tx.send(ConnectionStatus::Connecting);
+                tokio::select! {
+                    () = tokio::time::sleep(delay) => {}
+                    () = cancel.cancelled() => {
+                        tracing::info!("retry cancelled during backoff");
+                        return Err(e);
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// One bring-up + run-the-event-loop attempt. Caller (`run()` above)
+/// owns the retry policy. Returning [`AttemptOutcome`] rather than
+/// `Result<()>` lets us distinguish "config is wrong, stop retrying"
+/// from "network blip, try again."
+#[allow(clippy::too_many_lines)]
+async fn attempt(
+    opts: &ConnectOptions,
+    access_token: Option<String>,
+    status_tx: &watch::Sender<ConnectionStatus>,
+    pushed_tx: &watch::Sender<Option<PushOptions>>,
+    cancel: CancellationToken,
+) -> AttemptOutcome {
     let _ = status_tx.send(ConnectionStatus::Connecting);
-    let profile = VpnProfile::from_file(&opts.profile_path)?;
-    let server = profile
-        .primary_server()
-        .ok_or_else(|| Error::Other("no server in profile".into()))?;
+    let profile = match VpnProfile::from_file(&opts.profile_path) {
+        Ok(p) => p,
+        Err(e) => return AttemptOutcome::Fatal(e.into()),
+    };
+    let Some(server) = profile.primary_server() else {
+        return AttemptOutcome::Fatal(Error::Other("no server in profile".into()));
+    };
     info!(server = %server.fqdn, "loaded profile");
 
-    validation::bundled_root_matches(&profile)?;
-    let auth_file = build_auth_file(&profile, access_token.as_deref())?;
+    if let Err(e) = validation::bundled_root_matches(&profile) {
+        return AttemptOutcome::Fatal(e);
+    }
+    let auth_file = match build_auth_file(&profile, access_token.as_deref()) {
+        Ok(f) => f,
+        Err(e) => return AttemptOutcome::Fatal(e),
+    };
 
     let mut builder = ConfigBuilder::new(&profile, opts.mgmt_addr);
     if let Some(ref af) = auth_file {
@@ -98,8 +178,13 @@ pub async fn run(
     }
     let ovpn_config_content = builder.build();
 
-    let mut config_file = tempfile::Builder::new().suffix(".ovpn").tempfile()?;
-    config_file.write_all(ovpn_config_content.as_bytes())?;
+    let mut config_file = match tempfile::Builder::new().suffix(".ovpn").tempfile() {
+        Ok(f) => f,
+        Err(e) => return AttemptOutcome::Transient(Error::Io(e)),
+    };
+    if let Err(e) = config_file.write_all(ovpn_config_content.as_bytes()) {
+        return AttemptOutcome::Transient(Error::Io(e));
+    }
     info!(path = %config_file.path().display(), "wrote openvpn config");
 
     let ovpn_config = OpenVpnConfig {
@@ -107,23 +192,44 @@ pub async fn run(
         management_addr: opts.mgmt_addr,
     };
 
-    let mut process = OpenVpnProcess::start(&ovpn_config, config_file.path())?;
-    let mut mgmt = process.connect_management().await?;
+    let mut process = match OpenVpnProcess::start(&ovpn_config, config_file.path()) {
+        Ok(p) => p,
+        // Spawn failure is typically transient on macOS (launchd race)
+        // or Linux (missing capability briefly). A persistent failure
+        // burns the retry budget and then surfaces as Err to the caller.
+        Err(e) => return AttemptOutcome::Transient(e.into()),
+    };
+    let mut mgmt = match process.connect_management().await {
+        Ok(m) => m,
+        Err(e) => return AttemptOutcome::Transient(e.into()),
+    };
     info!("connected to management interface");
 
-    let mut session = RunningSession::new(
+    let mut session = match RunningSession::new(
         opts.mgmt_addr,
         opts.profile_path.clone(),
         server.fqdn.clone(),
-    )?;
+    ) {
+        Ok(s) => s,
+        Err(e) => return AttemptOutcome::Fatal(e.into()),
+    };
 
-    mgmt.send("state on").await?;
-    mgmt.send("log on").await?;
-    mgmt.hold_release().await?;
+    if let Err(e) = mgmt.send("state on").await {
+        return AttemptOutcome::Transient(e.into());
+    }
+    if let Err(e) = mgmt.send("log on").await {
+        return AttemptOutcome::Transient(e.into());
+    }
+    if let Err(e) = mgmt.hold_release().await {
+        return AttemptOutcome::Transient(e.into());
+    }
 
     let mut push_opts = PushOptions::default();
     let mut dns_manager = dns::new_manager();
-    let mut route_manager = RouteManager::new()?;
+    let mut route_manager = match RouteManager::new() {
+        Ok(r) => r,
+        Err(e) => return AttemptOutcome::Fatal(e.into()),
+    };
     // DNS apply replaces; route apply diffs. Both are safe to call
     // repeatedly, so we gate only on "has the kernel-visible interface
     // been up at least once" — the first apply waits for CONNECTED so
@@ -133,6 +239,9 @@ pub async fn run(
     // view.
     let mut have_connected = false;
     let mut reneg_creds = RenegCreds::for_profile(&profile);
+    // Set inside the event loop to record why we broke out. None means
+    // "openvpn exited on its own" — exit code decides post-loop.
+    let mut outcome: Option<AttemptOutcome> = None;
 
     loop {
         tokio::select! {
@@ -141,11 +250,22 @@ pub async fn run(
             () = cancel.cancelled() => {
                 info!("shutdown requested");
                 let _ = mgmt.send("signal SIGTERM").await;
+                outcome = Some(AttemptOutcome::Completed);
                 break;
             }
 
             event = mgmt.read_event() => {
-                let event = event?;
+                let event = match event {
+                    Ok(ev) => ev,
+                    Err(e) => {
+                        // Management socket dropped — openvpn may have
+                        // crashed, or the network underneath collapsed.
+                        // Treat as transient so the retry loop gets a
+                        // chance to reestablish.
+                        outcome = Some(AttemptOutcome::Transient(e.into()));
+                        break;
+                    }
+                };
                 match event {
                     Event::State { ref state, local_ip } => {
                         if let Some(ip) = local_ip {
@@ -171,11 +291,19 @@ pub async fn run(
                         }
                         if *state == VpnState::Exiting {
                             info!("openvpn exiting");
+                            // Don't override an outcome already set by
+                            // a preceding event (FATAL, verification
+                            // failure, etc.) — let those classifications
+                            // win. EXITING with no prior outcome means
+                            // a normal shutdown, classified after wait().
                             break;
                         }
                     }
                     Event::Hold => {
-                        mgmt.hold_release().await?;
+                        if let Err(e) = mgmt.hold_release().await {
+                            outcome = Some(AttemptOutcome::Transient(e.into()));
+                            break;
+                        }
                     }
                     Event::PasswordPrompt { realm } => {
                         if realm != "Auth" {
@@ -203,20 +331,31 @@ pub async fn run(
                     }
                     Event::PasswordVerificationFailed { realm } => {
                         tracing::error!(realm, "gateway rejected credentials — terminal");
-                        let _ = status_tx
-                            .send(ConnectionStatus::Failed(format!(
-                                "credentials rejected by gateway (realm {realm})"
-                            )));
+                        let msg =
+                            format!("credentials rejected by gateway (realm {realm})");
+                        let _ = status_tx.send(ConnectionStatus::Failed(msg.clone()));
                         let _ = mgmt.send("signal SIGTERM").await;
+                        // Rejection won't fix by retrying with the same
+                        // token — caller has to acquire a fresh AAD AT
+                        // and re-issue connect().
+                        outcome = Some(AttemptOutcome::Fatal(Error::Other(msg)));
                         break;
                     }
                     Event::Fatal(msg) => {
                         tracing::error!("openvpn fatal: {msg}");
-                        let _ = status_tx
-                            .send(ConnectionStatus::Failed(format!("openvpn fatal: {msg}")));
+                        let status_msg = format!("openvpn fatal: {msg}");
+                        let _ = status_tx.send(ConnectionStatus::Failed(status_msg.clone()));
                         // openvpn will exit on its own after emitting >FATAL:,
                         // so we don't need to signal it — just stop pumping
                         // events and let the wait() at loop exit reap it.
+                        // FATAL is the umbrella for TLS / cert-chain /
+                        // gateway-side errors that may or may not be
+                        // transient. Without explicit classification of
+                        // the message text, treat as transient so the
+                        // retry loop gets a chance — at worst we burn
+                        // the budget on a non-fixable issue and surface
+                        // the final error to the caller.
+                        outcome = Some(AttemptOutcome::Transient(Error::Other(status_msg)));
                         break;
                     }
                     Event::PushReply(opts) => {
@@ -234,6 +373,9 @@ pub async fn run(
                             tracing::error!(error = %e, "refusing push reply on cipher policy");
                             let _ = status_tx.send(ConnectionStatus::Failed(e.to_string()));
                             let _ = mgmt.send("signal SIGTERM").await;
+                            // Gateway-side misconfiguration — retrying
+                            // gets the same cipher, no point.
+                            outcome = Some(AttemptOutcome::Fatal(e));
                             break;
                         }
                         reneg_creds.absorb_push(&opts);
@@ -272,14 +414,23 @@ pub async fn run(
     dns_manager.clear();
     drop(dns_manager);
 
-    let code = process.wait().await?;
+    let code = match process.wait().await {
+        Ok(c) => c,
+        Err(e) => return AttemptOutcome::Transient(e.into()),
+    };
     info!(?code, "openvpn process exited");
     let _ = status_tx.send(ConnectionStatus::Exited { code });
 
-    // Wake up any other tasks holding a clone of the token (the signal
-    // listener, primarily) so they exit instead of parking on a signal
-    // that may never arrive.
-    cancel.cancel();
-
-    Ok(())
+    // Event-loop outcome wins. Fall back to the exit code only when
+    // we left via STATE:Exiting with no classification:
+    //
+    // - exit code 0 / killed-by-signal → Completed (we asked for it)
+    // - exit code != 0 with no signal → Transient (openvpn gave up
+    //   trying to reach the gateway and exited unhappy)
+    outcome.unwrap_or_else(|| match code {
+        Some(0) | None => AttemptOutcome::Completed,
+        Some(_) => AttemptOutcome::Transient(Error::Other(format!(
+            "openvpn exited with code {code:?}"
+        ))),
+    })
 }
