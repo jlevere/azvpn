@@ -98,10 +98,10 @@ fn print_object(obj: &DirectoryObject) {
     if obj.security_enabled == Some(true) {
         tags.push("security");
     }
-    if let Some(ty) = obj.odata_type.as_deref() {
-        if let Some(short) = ty.strip_prefix("#microsoft.graph.") {
-            tags.push(short);
-        }
+    if let Some(ty) = obj.odata_type.as_deref()
+        && let Some(short) = ty.strip_prefix("#microsoft.graph.")
+    {
+        tags.push(short);
     }
     if !tags.is_empty() {
         println!("    [{}]", tags.join(", "));

@@ -18,7 +18,7 @@ use crate::Result;
 /// device-code path runs in the CLI before we even call the daemon, so
 /// this only needs to cover openvpn handshake + first push reply —
 /// generous 3 minutes covers slow gateways.
-const CONNECT_DEADLINE: Duration = Duration::from_secs(180);
+const CONNECT_DEADLINE: Duration = Duration::from_mins(3);
 const DISCONNECT_DEADLINE: Duration = Duration::from_secs(30);
 
 pub async fn run(profile_path: &Path, verbose: bool) -> Result<()> {
@@ -63,7 +63,7 @@ async fn ensure_access_token(profile: &VpnProfile) -> Result<Option<String>> {
                 azvpn_core::Error::Other("AAD auth requires <aad> config block".into())
             })?;
             let aad_config = AadConfig::from(aad_profile);
-            let cache = TokenCache::new(&TokenCache::default_path());
+            let cache = TokenCache::auto();
 
             let token = match cache.load().filter(|t| t.refresh_token.is_some()) {
                 Some(cached) => cached,

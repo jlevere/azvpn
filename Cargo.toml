@@ -15,7 +15,7 @@ resolver = "3"
 
 [workspace.package]
 edition = "2024"
-rust-version = "1.85.0"
+rust-version = "1.95.0"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/jlevere/azvpn"
 
@@ -31,6 +31,13 @@ clap = { version = "4", features = ["derive"] }
 quick-xml = { version = "0.37", features = ["serialize"] }
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
 oauth2 = { version = "5", default-features = false, features = ["reqwest", "rustls-tls"] }
+# 4.x split into keyring-core + per-platform backend crates; the
+# combined-crate 3.x API is simpler for our needs (one entry per
+# (service, user) tuple). Features are platform-gated internally so
+# enabling all three is safe — only the relevant one activates per
+# target. `crypto-rust` keeps the Linux secret-service envelope
+# crypto in pure Rust (avoids the OpenSSL link).
+keyring = { version = "3.6", default-features = false, features = ["apple-native", "windows-native", "sync-secret-service", "crypto-rust"] }
 open = "5"
 tempfile = "3"
 system-configuration = "0.7"

@@ -50,10 +50,10 @@ pub enum Error {
     Daemon(#[from] azvpn_ipc::IpcError),
 
     // ---------- CLI-local failure modes ----------
-    /// `whoami` got a cache miss — file absent or access token expired
-    /// with no refresh available.
-    #[error("no cached token at {path}")]
-    NoCachedToken { path: String },
+    /// `whoami` got a cache miss — no entry in the keyring (or 0600
+    /// file on platforms without one).
+    #[error("no cached token (run `azvpn connect` once)")]
+    NoCachedToken,
 
     /// JWT layout / claim extraction failed (used by `whoami`).
     #[error("malformed JWT: missing {0}")]

@@ -197,21 +197,21 @@ impl PushOptions {
         if let Some(rest) = token.strip_prefix("route ") {
             // `route <dest> <mask> [gateway]`
             let mut parts = rest.split_whitespace();
-            if let (Some(dest), Some(mask)) = (parts.next(), parts.next()) {
-                if let (Ok(destination), Some(prefix)) = (
+            if let (Some(dest), Some(mask)) = (parts.next(), parts.next())
+                && let (Ok(destination), Some(prefix)) = (
                     dest.parse::<IpAddr>(),
                     mask.parse::<std::net::Ipv4Addr>()
                         .ok()
                         .and_then(ipv4_mask_to_prefix),
-                ) {
-                    let gateway = parts.next().and_then(|s| s.parse().ok());
-                    opts.routes.push(PushedRoute {
-                        destination,
-                        prefix,
-                        gateway,
-                        family: AddrFamily::V4,
-                    });
-                }
+                )
+            {
+                let gateway = parts.next().and_then(|s| s.parse().ok());
+                opts.routes.push(PushedRoute {
+                    destination,
+                    prefix,
+                    gateway,
+                    family: AddrFamily::V4,
+                });
             }
             return true;
         }
@@ -237,13 +237,13 @@ impl PushOptions {
             return true;
         }
         if let Some(rest) = token.strip_prefix("ifconfig ") {
-            if let Some((local, remote)) = rest.split_once(' ') {
-                if let Ok(local) = local.parse() {
-                    opts.ifconfig = Some(Ifconfig {
-                        local,
-                        remote: remote.to_owned(),
-                    });
-                }
+            if let Some((local, remote)) = rest.split_once(' ')
+                && let Ok(local) = local.parse()
+            {
+                opts.ifconfig = Some(Ifconfig {
+                    local,
+                    remote: remote.to_owned(),
+                });
             }
             return true;
         }
@@ -381,10 +381,10 @@ impl ManagementClient {
 
         if let Some(rest) = line.strip_prefix(">BYTECOUNT:") {
             let mut parts = rest.splitn(2, ',');
-            if let (Some(rx_str), Some(tx_str)) = (parts.next(), parts.next()) {
-                if let (Ok(rx), Ok(tx)) = (rx_str.parse(), tx_str.parse()) {
-                    return Some(Event::ByteCount { rx, tx });
-                }
+            if let (Some(rx_str), Some(tx_str)) = (parts.next(), parts.next())
+                && let (Ok(rx), Ok(tx)) = (rx_str.parse(), tx_str.parse())
+            {
+                return Some(Event::ByteCount { rx, tx });
             }
         }
 

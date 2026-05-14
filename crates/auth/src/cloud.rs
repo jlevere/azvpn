@@ -23,21 +23,15 @@ pub struct AadContext {
 }
 
 #[derive(Deserialize)]
-struct Cached {
-    access_token: String,
-}
-
-#[derive(Deserialize)]
 struct JwtContext {
     tid: Option<String>,
     appid: Option<String>,
 }
 
 pub fn read_context() -> Result<AadContext> {
-    let raw = std::fs::read_to_string(TokenCache::default_path())?;
-    let cached: Cached = serde_json::from_str(&raw)?;
-    let payload = cached
-        .access_token
+    let cache = TokenCache::auto();
+    let access = cache.load_access_token().ok_or(Error::NoCachedToken)?;
+    let payload = access
         .split('.')
         .nth(1)
         .ok_or(Error::MalformedJwt("payload"))?;
@@ -52,7 +46,7 @@ pub fn read_context() -> Result<AadContext> {
 /// Exchange the cached refresh token for an access token scoped to
 /// `resource`. The CLI cache layout is assumed (see [`TokenCache`]).
 async fn exchange_for(scope: &str) -> Result<String> {
-    let cache = TokenCache::new(&TokenCache::default_path());
+    let cache = TokenCache::auto();
     let refresh = cache.load_refresh_token().ok_or(Error::NoRefreshToken)?;
     let ctx = read_context()?;
     let grant = RefreshGrant::new(ctx.tenant_id, ctx.client_id)?;
