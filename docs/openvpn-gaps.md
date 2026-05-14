@@ -354,22 +354,17 @@ Implemented as a JSON manifest at `/var/run/azvpn/cleanup-manifest.json`
 
 ---
 
-### 19.  Captive-portal detection
+### 19.  ~~Captive-portal detection~~ ✅ shipped
 
-**Status:** not implemented.
-
-If the user's wifi gateway intercepts HTTPS, our connection fails
-confusingly ("TLS error"). macOS has a `captive.apple.com` probe.
-
-**Where:** `crates/cli/src/connect.rs` — pre-flight check before
-calling the daemon.
-
-**Scope:** ~50 LOC.
-
-**Done when:** A quick HEAD against `connectivitycheck.gstatic.com`
-(or similar) is done; failures pop a clear "looks like you're behind
-a captive portal — sign into wifi first" message instead of letting
-openvpn fail confusingly.
+`azvpn connect` now runs a `crates/cli/src/captive.rs::warn_if_mediated`
+pre-flight before the daemon RPC: HEAD against
+`http://connectivitycheck.gstatic.com/generate_204` (Google's well-known
+hotspot endpoint, plaintext on purpose so portals can intercept). 204 →
+clean, anything else → a clear `warn!` describing the symptom (portal
+status code, or the network-level reason). Hint-only — we don't abort
+on a non-204 because corporate proxies and transient 5xx can cause
+false positives that would block legitimate connects; the warning gives
+the user context before openvpn's opaque TLS-error path.
 
 ---
 
