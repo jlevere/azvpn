@@ -41,15 +41,19 @@ impl VpnState {
     }
 }
 
-/// One route directive from the gateway's `PUSH_REPLY`.
+/// One route directive from the gateway's `PUSH_REPLY`, parsed into
+/// typed fields at the mgmt-socket boundary so downstream consumers
+/// don't re-parse strings.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct PushedRoute {
-    pub destination: String,
-    /// Dotted IPv4 netmask (`255.255.255.0`) or IPv6 prefix length (`64`),
-    /// preserved as the gateway sent it.
-    pub mask_or_prefix: String,
-    /// Optional explicit gateway. `None` means "send through the tunnel".
-    pub gateway: Option<String>,
+    pub destination: IpAddr,
+    /// CIDR prefix length. For v4 routes the gateway sends a dotted
+    /// netmask which we convert at parse time; for v6 it's already the
+    /// prefix length.
+    pub prefix: u8,
+    /// Optional explicit gateway. `None` means "send through the tunnel
+    /// using the global `route_gateway`".
+    pub gateway: Option<IpAddr>,
     pub family: AddrFamily,
 }
 
@@ -57,6 +61,15 @@ pub struct PushedRoute {
 pub enum AddrFamily {
     V4,
     V6,
+}
+
+/// `ifconfig <local> <netmask-or-peer>` from the push reply. The second
+/// value's meaning depends on `topology` (subnet → netmask, p2p → peer);
+/// it's preserved as a string because we only use `local` programmatically.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct Ifconfig {
+    pub local: IpAddr,
+    pub remote: String,
 }
 
 /// Everything the gateway pushed back to us. All fields populated by parsing
@@ -73,11 +86,11 @@ pub struct PushOptions {
     pub routes: Vec<PushedRoute>,
     /// `route-gateway <ip>` — gateway for tunneled routes that don't specify
     /// their own.
-    pub route_gateway: Option<String>,
+    pub route_gateway: Option<IpAddr>,
     /// `ifconfig <local> <peer/netmask>` — tunnel-interface assignment.
-    pub ifconfig: Option<(String, String)>,
+    pub ifconfig: Option<Ifconfig>,
     /// `ifconfig-ipv6 <local>/<prefix> <remote>`.
-    pub ifconfig_ipv6: Option<(String, String)>,
+    pub ifconfig_ipv6: Option<Ifconfig>,
     /// MTU pushed via `tun-mtu` or `link-mtu`.
     pub tun_mtu: Option<u32>,
     /// Cipher / data-channel options the gateway selected.
@@ -85,6 +98,23 @@ pub struct PushOptions {
     /// Tokens we didn't recognise — preserved verbatim so debug output shows
     /// everything the gateway told us.
     pub extras: Vec<String>,
+}
+
+/// Convert a contiguous IPv4 netmask (`255.255.255.0`) into its prefix
+/// length (`24`). Returns `None` for non-contiguous masks. Exported
+/// because callers parsing route directives from non-mgmt sources
+/// (profile XML) need the same conversion.
+#[must_use]
+pub fn ipv4_mask_to_prefix(mask: std::net::Ipv4Addr) -> Option<u8> {
+    let bits = u32::from(mask);
+    // Contiguous masks have every set bit packed at the top:
+    // `count_ones == leading_ones` works at both endpoints
+    // (0.0.0.0 and 255.255.255.255) where shift-based checks need
+    // special-casing.
+    if bits.count_ones() != bits.leading_ones() {
+        return None;
+    }
+    u8::try_from(bits.leading_ones()).ok()
 }
 
 impl PushOptions {
@@ -106,6 +136,7 @@ impl PushOptions {
     /// Try to classify a single `PUSH_REPLY` token. Returns `true` if it was
     /// recognised (regardless of whether the inner value parsed) — `false`
     /// means the caller should keep it as an `extra`.
+    #[allow(clippy::too_many_lines)]
     fn parse_token(opts: &mut Self, token: &str) -> bool {
         if let Some(rest) = token.strip_prefix("dhcp-option DNS ") {
             if let Ok(addr) = rest.parse() {
@@ -137,13 +168,18 @@ impl PushOptions {
             // `route-ipv6 <addr>/<prefix> [gateway]`
             let mut parts = rest.split_whitespace();
             if let Some(cidr) = parts.next() {
-                let (dest, prefix) = cidr.split_once('/').unwrap_or((cidr, "128"));
-                opts.routes.push(PushedRoute {
-                    destination: dest.to_owned(),
-                    mask_or_prefix: prefix.to_owned(),
-                    gateway: parts.next().map(str::to_owned),
-                    family: AddrFamily::V6,
-                });
+                let (dest_str, prefix_str) = cidr.split_once('/').unwrap_or((cidr, "128"));
+                if let (Ok(destination), Ok(prefix)) =
+                    (dest_str.parse::<IpAddr>(), prefix_str.parse::<u8>())
+                {
+                    let gateway = parts.next().and_then(|s| s.parse().ok());
+                    opts.routes.push(PushedRoute {
+                        destination,
+                        prefix,
+                        gateway,
+                        family: AddrFamily::V6,
+                    });
+                }
             }
             return true;
         }
@@ -151,28 +187,52 @@ impl PushOptions {
             // `route <dest> <mask> [gateway]`
             let mut parts = rest.split_whitespace();
             if let (Some(dest), Some(mask)) = (parts.next(), parts.next()) {
-                opts.routes.push(PushedRoute {
-                    destination: dest.to_owned(),
-                    mask_or_prefix: mask.to_owned(),
-                    gateway: parts.next().map(str::to_owned),
-                    family: AddrFamily::V4,
-                });
+                if let (Ok(destination), Some(prefix)) = (
+                    dest.parse::<IpAddr>(),
+                    mask.parse::<std::net::Ipv4Addr>()
+                        .ok()
+                        .and_then(ipv4_mask_to_prefix),
+                ) {
+                    let gateway = parts.next().and_then(|s| s.parse().ok());
+                    opts.routes.push(PushedRoute {
+                        destination,
+                        prefix,
+                        gateway,
+                        family: AddrFamily::V4,
+                    });
+                }
             }
             return true;
         }
         if let Some(rest) = token.strip_prefix("route-gateway ") {
-            opts.route_gateway = Some(rest.to_owned());
+            if let Ok(gw) = rest.parse() {
+                opts.route_gateway = Some(gw);
+            }
             return true;
         }
         if let Some(rest) = token.strip_prefix("ifconfig-ipv6 ") {
-            if let Some((local, remote)) = rest.split_once(' ') {
-                opts.ifconfig_ipv6 = Some((local.to_owned(), remote.to_owned()));
+            if let Some((local_cidr, remote)) = rest.split_once(' ') {
+                // openvpn pushes `<addr>/<prefix>` for the local side.
+                // Strip the prefix for the typed address; the prefix is
+                // recoverable from the matching route-ipv6 directive.
+                let local_str = local_cidr.split('/').next().unwrap_or(local_cidr);
+                if let Ok(local) = local_str.parse() {
+                    opts.ifconfig_ipv6 = Some(Ifconfig {
+                        local,
+                        remote: remote.to_owned(),
+                    });
+                }
             }
             return true;
         }
         if let Some(rest) = token.strip_prefix("ifconfig ") {
             if let Some((local, remote)) = rest.split_once(' ') {
-                opts.ifconfig = Some((local.to_owned(), remote.to_owned()));
+                if let Ok(local) = local.parse() {
+                    opts.ifconfig = Some(Ifconfig {
+                        local,
+                        remote: remote.to_owned(),
+                    });
+                }
             }
             return true;
         }
@@ -394,23 +454,32 @@ mod tests {
         assert_eq!(opts.wins_servers, ["10.0.0.20".parse::<IpAddr>().unwrap()]);
 
         assert_eq!(opts.routes.len(), 3);
-        assert_eq!(opts.routes[0].destination, "10.0.0.0");
-        assert_eq!(opts.routes[0].mask_or_prefix, "255.255.0.0");
+        assert_eq!(opts.routes[0].destination, "10.0.0.0".parse::<IpAddr>().unwrap());
+        assert_eq!(opts.routes[0].prefix, 16);
         assert!(opts.routes[0].gateway.is_none());
         assert_eq!(opts.routes[0].family, AddrFamily::V4);
-        assert_eq!(opts.routes[1].gateway.as_deref(), Some("10.0.8.1"));
+        assert_eq!(
+            opts.routes[1].gateway,
+            Some("10.0.8.1".parse::<IpAddr>().unwrap())
+        );
         assert_eq!(opts.routes[2].family, AddrFamily::V6);
-        assert_eq!(opts.routes[2].destination, "fd00::");
-        assert_eq!(opts.routes[2].mask_or_prefix, "64");
+        assert_eq!(opts.routes[2].destination, "fd00::".parse::<IpAddr>().unwrap());
+        assert_eq!(opts.routes[2].prefix, 64);
 
-        assert_eq!(opts.route_gateway.as_deref(), Some("10.0.8.1"));
+        assert_eq!(opts.route_gateway, Some("10.0.8.1".parse().unwrap()));
         assert_eq!(
             opts.ifconfig,
-            Some(("10.0.8.4".into(), "255.255.255.0".into()))
+            Some(Ifconfig {
+                local: "10.0.8.4".parse().unwrap(),
+                remote: "255.255.255.0".into(),
+            })
         );
         assert_eq!(
             opts.ifconfig_ipv6,
-            Some(("fd00::4/64".into(), "fd00::1".into()))
+            Some(Ifconfig {
+                local: "fd00::4".parse().unwrap(),
+                remote: "fd00::1".into(),
+            })
         );
         assert_eq!(opts.tun_mtu, Some(1400));
         assert_eq!(opts.cipher.as_deref(), Some("AES-256-GCM"));

@@ -3,7 +3,7 @@
 //! Returns the cached `PushOptions` from the running session. No live
 //! mgmt-socket query — the running connect owns the only one.
 
-pub use azvpn_openvpn::{AddrFamily, PushOptions, PushedRoute};
+pub use azvpn_openvpn::{AddrFamily, Ifconfig, PushOptions, PushedRoute};
 
 use crate::session::RunningSession;
 use crate::{Error, Result};

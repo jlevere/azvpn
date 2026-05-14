@@ -36,7 +36,7 @@ pub async fn collect() -> Result<InfoReport> {
         .as_ref()
         .and_then(|s| s.session.pushed.as_ref())
         .and_then(|p| p.ifconfig.as_ref())
-        .and_then(|(local, _)| local.parse::<IpAddr>().ok());
+        .map(|cfg| cfg.local);
 
     let all_routes = read_all_routes().await?;
     let tunnel_interface = local_tunnel_ip.and_then(|ip| identify_tunnel_iface(&all_routes, ip));

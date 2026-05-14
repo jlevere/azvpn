@@ -17,7 +17,10 @@ mod management;
 mod process;
 
 pub use config::ConfigBuilder;
-pub use management::{AddrFamily, Event, ManagementClient, PushOptions, PushedRoute, VpnState};
+pub use management::{
+    AddrFamily, Event, Ifconfig, ManagementClient, PushOptions, PushedRoute, VpnState,
+    ipv4_mask_to_prefix,
+};
 pub use process::OpenVpnProcess;
 
 use std::net::SocketAddr;
