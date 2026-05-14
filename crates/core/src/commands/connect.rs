@@ -13,8 +13,7 @@ use std::path::PathBuf;
 use azvpn_auth::{AadConfig, DeviceCodeFlow, DeviceCodePrompt, TokenCache};
 use azvpn_openvpn::{ConfigBuilder, Event, OpenVpnConfig, OpenVpnProcess, PushOptions, VpnState};
 use azvpn_profile::{AuthType, VpnProfile};
-use tokio::signal;
-use tokio::signal::unix::{SignalKind, signal as unix_signal};
+use tokio_util::sync::CancellationToken;
 use tracing::info;
 
 use crate::dns::{self, DnsManager};
@@ -40,7 +39,11 @@ pub trait DeviceCodeUi: Send {
 }
 
 #[allow(clippy::too_many_lines)]
-pub async fn run<U: DeviceCodeUi>(opts: ConnectOptions, mut ui: U) -> Result<()> {
+pub async fn run<U: DeviceCodeUi>(
+    opts: ConnectOptions,
+    mut ui: U,
+    cancel: CancellationToken,
+) -> Result<()> {
     let profile = VpnProfile::from_file(&opts.profile_path)?;
     let server = profile
         .primary_server()
@@ -83,21 +86,14 @@ pub async fn run<U: DeviceCodeUi>(opts: ConnectOptions, mut ui: U) -> Result<()>
     mgmt.hold_release().await?;
 
     let mut push_opts = PushOptions::default();
-    let mut sigterm = unix_signal(SignalKind::terminate())?;
     let mut dns_manager = dns::new_manager();
 
     loop {
         tokio::select! {
             biased;
 
-            _ = signal::ctrl_c() => {
-                info!("shutting down (SIGINT)");
-                let _ = mgmt.send("signal SIGTERM").await;
-                break;
-            }
-
-            _ = sigterm.recv() => {
-                info!("shutting down (SIGTERM)");
+            () = cancel.cancelled() => {
+                info!("shutdown requested");
                 let _ = mgmt.send("signal SIGTERM").await;
                 break;
             }

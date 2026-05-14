@@ -7,6 +7,7 @@ use std::path::Path;
 
 use azvpn_auth::DeviceCodePrompt;
 use azvpn_core::commands::connect::{self, ConnectOptions, DeviceCodeUi};
+use azvpn_core::commands::shutdown::{self, CancellationToken};
 
 use crate::Result;
 
@@ -49,6 +50,8 @@ pub async fn run(
         mgmt_addr,
         verbose,
     };
-    connect::run(opts, StderrDeviceCodeUi).await?;
+    let cancel = CancellationToken::new();
+    shutdown::listen_for_signals(cancel.clone());
+    connect::run(opts, StderrDeviceCodeUi, cancel).await?;
     Ok(())
 }
