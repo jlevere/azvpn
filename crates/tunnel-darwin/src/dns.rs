@@ -31,54 +31,42 @@ pub struct DnsGuard {
 
 impl DnsGuard {
     pub fn install(suffixes: &[&str], dns_servers: &[IpAddr]) -> Result<Self, Error> {
+        let mut guard = Self { store: None };
+        guard.update(suffixes, dns_servers)?;
+        Ok(guard)
+    }
+
+    /// Overwrite the live `SCDynamicStore` entry to match the given suffixes
+    /// and servers. Idempotent — repeated calls just rewrite the same key.
+    /// If either input is empty this tears the entry down (effectively
+    /// `remove`); if the guard was already inert it stays inert.
+    pub fn update(&mut self, suffixes: &[&str], dns_servers: &[IpAddr]) -> Result<(), Error> {
         let domains = prepare_match_domains(suffixes);
         if domains.is_empty() || dns_servers.is_empty() {
-            return Ok(Self { store: None });
+            self.remove();
+            return Ok(());
         }
 
-        let store = SCDynamicStoreBuilder::new(STORE_NAME)
-            .build()
-            .ok_or(Error::StoreCreate)?;
-
-        let addrs: Vec<CFString> = dns_servers
-            .iter()
-            .map(|ip| CFString::new(&ip.to_string()))
-            .collect();
-        let domain_strs: Vec<CFString> = domains.iter().map(|s| CFString::new(s)).collect();
-
-        let addrs_array = CFArray::from_CFTypes(&addrs);
-        let domains_array = CFArray::from_CFTypes(&domain_strs);
-        let no_search = CFNumber::from(1i32);
-
-        let dict: CFDictionary<CFString, CFType> = CFDictionary::from_CFType_pairs(&[
-            (
-                CFString::from_static_string("ServerAddresses"),
-                addrs_array.as_CFType(),
-            ),
-            (
-                CFString::from_static_string("SupplementalMatchDomains"),
-                domains_array.as_CFType(),
-            ),
-            (
-                CFString::from_static_string("SupplementalMatchDomainsNoSearch"),
-                no_search.as_CFType(),
-            ),
-        ]);
-
-        if !store.set(
-            CFString::from_static_string(SERVICE_KEY),
-            dict.into_untyped(),
-        ) {
-            return Err(Error::SetValue);
-        }
+        // Take the existing store handle (or build a fresh one). On success
+        // we put it back; on error we also put it back so Drop can still
+        // clean up any previously-written entry.
+        let store = match self.store.take() {
+            Some(s) => s,
+            None => SCDynamicStoreBuilder::new(STORE_NAME)
+                .build()
+                .ok_or(Error::StoreCreate)?,
+        };
+        let result = write_dns_dict(&store, &domains, dns_servers);
+        self.store = Some(store);
+        result?;
 
         info!(
             ?suffixes,
             ?dns_servers,
             key = SERVICE_KEY,
-            "installed DNS settings via SCDynamicStore"
+            "DNS settings written to SCDynamicStore"
         );
-        Ok(Self { store: Some(store) })
+        Ok(())
     }
 
     pub fn remove(&mut self) {
@@ -101,6 +89,45 @@ impl Drop for DnsGuard {
     fn drop(&mut self) {
         self.remove();
     }
+}
+
+fn write_dns_dict(
+    store: &SCDynamicStore,
+    domains: &[String],
+    dns_servers: &[IpAddr],
+) -> Result<(), Error> {
+    let addrs: Vec<CFString> = dns_servers
+        .iter()
+        .map(|ip| CFString::new(&ip.to_string()))
+        .collect();
+    let domain_strs: Vec<CFString> = domains.iter().map(|s| CFString::new(s)).collect();
+
+    let addrs_array = CFArray::from_CFTypes(&addrs);
+    let domains_array = CFArray::from_CFTypes(&domain_strs);
+    let no_search = CFNumber::from(1i32);
+
+    let dict: CFDictionary<CFString, CFType> = CFDictionary::from_CFType_pairs(&[
+        (
+            CFString::from_static_string("ServerAddresses"),
+            addrs_array.as_CFType(),
+        ),
+        (
+            CFString::from_static_string("SupplementalMatchDomains"),
+            domains_array.as_CFType(),
+        ),
+        (
+            CFString::from_static_string("SupplementalMatchDomainsNoSearch"),
+            no_search.as_CFType(),
+        ),
+    ]);
+
+    if !store.set(
+        CFString::from_static_string(SERVICE_KEY),
+        dict.into_untyped(),
+    ) {
+        return Err(Error::SetValue);
+    }
+    Ok(())
 }
 
 fn prepare_match_domains(suffixes: &[&str]) -> Vec<String> {
