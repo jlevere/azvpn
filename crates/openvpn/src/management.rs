@@ -101,9 +101,7 @@ pub struct PushOptions {
 }
 
 /// Convert a contiguous IPv4 netmask (`255.255.255.0`) into its prefix
-/// length (`24`). Returns `None` for non-contiguous masks. Exported
-/// because callers parsing route directives from non-mgmt sources
-/// (profile XML) need the same conversion.
+/// length (`24`). Returns `None` for non-contiguous masks.
 #[must_use]
 pub fn ipv4_mask_to_prefix(mask: std::net::Ipv4Addr) -> Option<u8> {
     let bits = u32::from(mask);
@@ -115,6 +113,19 @@ pub fn ipv4_mask_to_prefix(mask: std::net::Ipv4Addr) -> Option<u8> {
         return None;
     }
     u8::try_from(bits.leading_ones()).ok()
+}
+
+/// Inverse of [`ipv4_mask_to_prefix`] — turn a prefix length into the
+/// dotted-quad netmask openvpn config files expect. `prefix >= 32`
+/// clamps to `255.255.255.255`.
+#[must_use]
+pub fn ipv4_prefix_to_mask(prefix: u8) -> std::net::Ipv4Addr {
+    if prefix == 0 {
+        return std::net::Ipv4Addr::UNSPECIFIED;
+    }
+    let prefix = prefix.min(32);
+    let bits: u32 = 0xFFFF_FFFF_u32 << (32 - prefix);
+    std::net::Ipv4Addr::from(bits)
 }
 
 impl PushOptions {
@@ -393,6 +404,21 @@ impl ManagementClient {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn ipv4_mask_prefix_round_trip() {
+        for prefix in 0u8..=32 {
+            let mask = ipv4_prefix_to_mask(prefix);
+            assert_eq!(ipv4_mask_to_prefix(mask), Some(prefix), "prefix {prefix}");
+        }
+    }
+
+    #[test]
+    fn ipv4_mask_to_prefix_rejects_non_contiguous() {
+        // 11111111.00000000.11111111.00000000 — discontiguous.
+        let bad = std::net::Ipv4Addr::new(255, 0, 255, 0);
+        assert_eq!(ipv4_mask_to_prefix(bad), None);
+    }
 
     #[test]
     fn parse_state_with_ip() {

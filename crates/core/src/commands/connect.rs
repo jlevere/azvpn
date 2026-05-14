@@ -90,10 +90,10 @@ pub async fn run<U: DeviceCodeUi>(
     let mut push_opts = PushOptions::default();
     let mut dns_manager = dns::new_manager();
     let mut route_manager = RouteManager::new()?;
-    // openvpn can re-emit `Connected` after every hold-release cycle.
-    // Guard the DNS apply so reconnects don't keep rewriting the same
-    // SCDynamicStore key and session.json record on every emission.
-    let mut last_dns_inputs: Option<(Vec<String>, Vec<std::net::IpAddr>)> = None;
+    // Push-reply inputs are stable for the connection's lifetime; openvpn
+    // can re-emit `Connected` after each hold-release cycle, so we guard
+    // both side-effects to fire once.
+    let mut dns_installed = false;
     let mut routes_installed = false;
 
     loop {
@@ -117,13 +117,11 @@ pub async fn run<U: DeviceCodeUi>(
                         }
                         if *state == VpnState::Connected {
                             info!(server = %server.fqdn, "connected");
-                            apply_dns(
-                                dns_manager.as_mut(),
-                                &mut session,
-                                &profile,
-                                &push_opts,
-                                &mut last_dns_inputs,
-                            );
+                            if !dns_installed
+                                && apply_dns(dns_manager.as_mut(), &mut session, &profile, &push_opts)
+                            {
+                                dns_installed = true;
+                            }
                             if !routes_installed {
                                 if let Err(e) = install_routes(&mut route_manager, &push_opts).await {
                                     tracing::error!(error = %e, "route install failed");
@@ -247,27 +245,24 @@ async fn install_routes(
     Ok(())
 }
 
+/// Returns `true` when the apply ran (regardless of success), `false`
+/// when there was nothing to do — the caller uses that to decide whether
+/// to mark DNS as "installed" for this connection and skip future
+/// re-emits of `Connected`.
 fn apply_dns(
     manager: &mut dyn DnsManager,
     session: &mut RunningSession,
     profile: &VpnProfile,
     push_opts: &PushOptions,
-    last: &mut Option<(Vec<String>, Vec<std::net::IpAddr>)>,
-) {
+) -> bool {
     let (suffixes, dns_servers) = collect_dns_inputs(profile, push_opts);
     if suffixes.is_empty() {
         info!("no DNS suffixes in profile or push-reply, skipping resolver setup");
-        return;
+        return false;
     }
     if dns_servers.is_empty() {
         tracing::warn!("DNS suffixes configured but no DNS servers available");
-        return;
-    }
-
-    let owned_suffixes: Vec<String> = suffixes.iter().map(|s| (*s).to_owned()).collect();
-    if last.as_ref().is_some_and(|(s, d)| s == &owned_suffixes && d == &dns_servers) {
-        tracing::debug!("DNS inputs unchanged, skipping reapply");
-        return;
+        return false;
     }
 
     info!(?suffixes, ?dns_servers, "applying DNS resolvers");
@@ -276,10 +271,10 @@ fn apply_dns(
             if let Err(e) = session.record_dns(&suffixes, &dns_servers) {
                 tracing::warn!(error = %e, "failed to record DNS in session file");
             }
-            *last = Some((owned_suffixes, dns_servers));
         }
         Err(e) => tracing::error!(error = %e, "failed to apply DNS resolvers"),
     }
+    true
 }
 
 fn collect_dns_inputs<'p>(

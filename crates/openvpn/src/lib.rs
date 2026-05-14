@@ -19,7 +19,7 @@ mod process;
 pub use config::ConfigBuilder;
 pub use management::{
     AddrFamily, Event, Ifconfig, ManagementClient, PushOptions, PushedRoute, VpnState,
-    ipv4_mask_to_prefix,
+    ipv4_mask_to_prefix, ipv4_prefix_to_mask,
 };
 pub use process::OpenVpnProcess;
 
