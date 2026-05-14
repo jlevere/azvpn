@@ -28,9 +28,23 @@ impl TokenCache {
         }
     }
 
+    /// Per-user cache path. `dirs::state_dir()` honors `XDG_STATE_HOME`
+    /// on Linux (returns `None` on macOS/Windows, where we fall back to
+    /// `data_local_dir()` → `~/Library/Application Support` on macOS,
+    /// `%LOCALAPPDATA%` on Windows). The CLI runs as the user, so this
+    /// resolves to the invoking user's home naturally — no `SUDO_USER`
+    /// gymnastics needed since the daemon split.
+    ///
+    /// # Panics
+    /// If the platform exposes neither a state dir nor a data-local dir —
+    /// shouldn't happen on macOS, Linux, or Windows.
     #[must_use]
     pub fn default_path() -> PathBuf {
-        crate::paths::token_cache()
+        dirs::state_dir()
+            .or_else(dirs::data_local_dir)
+            .expect("platform provides a per-user state/data dir")
+            .join("azvpn")
+            .join("token-cache.json")
     }
 
     pub fn load(&self) -> Option<Token> {
@@ -85,15 +99,12 @@ impl TokenCache {
     }
 }
 
-/// Write `data` to `path` atomically with mode 0600 (Unix) and ownership
-/// matching `$SUDO_USER` when running under sudo. The file holds an AAD
-/// access + refresh token — must not be world-readable, must be owned by
-/// the user whose token it is. The temp-then-rename guards a half-written
-/// file if we crash mid-save.
+/// Write `data` to `path` atomically with mode 0600 (Unix). The file
+/// holds an AAD refresh + access token — must not be world-readable.
+/// Temp-then-rename guards a half-written file if we crash mid-save.
 fn write_private(path: &Path, data: &[u8]) -> std::io::Result<()> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
-        crate::paths::chown_to_sudo_user(parent)?;
     }
     let tmp = path.with_extension("tmp");
 
@@ -115,7 +126,6 @@ fn write_private(path: &Path, data: &[u8]) -> std::io::Result<()> {
         std::fs::write(&tmp, data)?;
     }
 
-    crate::paths::chown_to_sudo_user(&tmp)?;
     std::fs::rename(&tmp, path)
 }
 

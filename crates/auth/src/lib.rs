@@ -13,7 +13,6 @@
 
 pub mod cloud;
 mod device_code;
-mod paths;
 mod refresh;
 mod token_cache;
 
