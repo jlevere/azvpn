@@ -16,6 +16,7 @@
 
 pub mod commands;
 pub mod dns;
+pub mod reachability;
 pub mod route;
 pub mod session;
 
