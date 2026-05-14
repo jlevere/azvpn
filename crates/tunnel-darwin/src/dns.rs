@@ -6,7 +6,7 @@ use system_configuration::core_foundation::dictionary::CFDictionary;
 use system_configuration::core_foundation::number::CFNumber;
 use system_configuration::core_foundation::string::CFString;
 use system_configuration::dynamic_store::{SCDynamicStore, SCDynamicStoreBuilder};
-use tracing::{debug, info};
+use tracing::{info, warn};
 
 const STORE_NAME: &str = "com.jlevere.azvpn";
 
@@ -101,11 +101,14 @@ impl DnsGuard {
         };
         let removed = store.remove(CFString::from_static_string(SERVICE_KEY));
         if removed {
-            debug!(key = SERVICE_KEY, "removed DNS settings");
+            info!(key = SERVICE_KEY, "removed DNS settings from SCDynamicStore");
         } else {
-            debug!(
+            // Race-free: SCDynamicStore may have lost the key (system DNS
+            // service restart, manual scutil edit). Not an error — we
+            // wanted it gone and it is.
+            warn!(
                 key = SERVICE_KEY,
-                "SCDynamicStore returned false on remove (already gone)"
+                "SCDynamicStore returned false on remove (key already absent)"
             );
         }
     }
