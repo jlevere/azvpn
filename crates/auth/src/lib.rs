@@ -1,3 +1,16 @@
+//! AAD authentication and Microsoft cloud-API plumbing.
+//!
+//! - [`DeviceCodeFlow`] drives the `OAuth2` device-code flow that produces
+//!   the access token the openvpn auth-user-pass file consumes.
+//! - [`RefreshGrant`] exchanges the refresh-token side-channel for
+//!   audience-specific access tokens (Graph, ARM) without re-prompting
+//!   the user — the same trick the official Microsoft Azure VPN Client
+//!   uses to reach Graph post-auth.
+//! - [`TokenCache`] persists the device-code outcome (`~/Library/.../`
+//!   `azvpn-token.json`) so subsequent connects skip the prompt.
+//! - [`cloud`] hosts the typed Graph / ARM helpers used by the CLI's
+//!   `me` / `groups` / `manager` / `org` commands.
+
 pub mod cloud;
 mod device_code;
 mod refresh;
