@@ -16,8 +16,14 @@ azvpn-auth = { workspace = true }
 azvpn-core = { workspace = true }
 azvpn-openvpn = { workspace = true }
 azvpn-profile = { workspace = true }
+base64 = { workspace = true }
 clap = { workspace = true }
+hickory-resolver = { workspace = true }
+libc = { workspace = true }
+net-route = { workspace = true }
 open = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
 tempfile = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true }

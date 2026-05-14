@@ -6,7 +6,10 @@ use tracing_subscriber::EnvFilter;
 
 mod connect;
 mod disconnect;
+mod dns;
+mod info;
 mod status;
+mod whoami;
 
 #[derive(Parser)]
 #[command(name = "azvpn", about = "Cross-platform Azure VPN client")]
@@ -46,6 +49,26 @@ enum Command {
     },
     /// List imported profiles
     List,
+    /// Decode the cached AAD token and show user/tenant/expiry
+    Whoami,
+    /// Comprehensive status dump (session, identity, DNS, routes)
+    Info,
+    /// DNS queries: verify resolution, sweep for private endpoints
+    #[command(subcommand)]
+    Dns(DnsCommand),
+}
+
+#[derive(Subcommand)]
+enum DnsCommand {
+    /// Resolve a hostname (uses system resolver by default — verifies the
+    /// `SCDynamicStore` routing; --via forces a direct query to a server)
+    Lookup {
+        /// Hostname to resolve
+        host: String,
+        /// DNS server to query directly (e.g. the gateway-pushed nameserver)
+        #[arg(long)]
+        via: Option<String>,
+    },
 }
 
 #[tokio::main]
@@ -72,6 +95,11 @@ async fn main() {
         }
         Command::Disconnect => report(disconnect::run()),
         Command::Status => report(status::run()),
+        Command::Whoami => report(whoami::run()),
+        Command::Info => report(info::run().await),
+        Command::Dns(DnsCommand::Lookup { host, via }) => {
+            report(dns::lookup(&host, via.as_deref()).await)
+        }
         Command::Import { path } => {
             tracing::info!(?path, "importing profile");
             eprintln!("not yet implemented");

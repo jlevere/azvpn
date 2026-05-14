@@ -118,7 +118,7 @@ pub async fn run(
     let mut mgmt = process.connect_management().await?;
     info!("connected to management interface");
 
-    let session = RunningSession::new(
+    let mut session = RunningSession::new(
         mgmt_addr,
         profile_path.to_owned(),
         server.fqdn.clone(),
@@ -163,7 +163,7 @@ pub async fn run(
                         if *state == VpnState::Connected {
                             eprintln!("connected to {}", server.fqdn);
                             #[cfg(target_os = "macos")]
-                            apply_dns(&mut dns_guard, &profile, &push_opts);
+                            apply_dns(&mut dns_guard, &mut session, &profile, &push_opts);
                         }
                         if *state == VpnState::Exiting {
                             info!("openvpn exiting");
@@ -207,6 +207,7 @@ pub async fn run(
 #[cfg(target_os = "macos")]
 fn apply_dns(
     guard: &mut Option<azvpn_tunnel_darwin::DnsGuard>,
+    session: &mut RunningSession,
     profile: &VpnProfile,
     push_opts: &PushOptions,
 ) {
@@ -231,8 +232,13 @@ fn apply_dns(
             Err(e) => Err(e),
         },
     };
-    if let Err(e) = result {
-        tracing::error!(error = %e, "failed to apply DNS resolvers");
+    match result {
+        Ok(()) => {
+            if let Err(e) = session.record_dns(&suffixes, &dns_servers) {
+                tracing::warn!(error = %e, "failed to record DNS in session file");
+            }
+        }
+        Err(e) => tracing::error!(error = %e, "failed to apply DNS resolvers"),
     }
 }
 
