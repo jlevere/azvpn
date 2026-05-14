@@ -226,9 +226,26 @@ fn build_auth_file(
             info!("certificate auth — no token needed");
             Ok(None)
         }
-        (AuthType::UsernamePass | AuthType::Radius, _) => Err(Error::Other(
-            "usernamepass / radius auth is not yet supported by the daemon".into(),
-        )),
+        (AuthType::UsernamePass | AuthType::Radius, _) => {
+            let creds = profile.clientauth.usernamepass.as_ref().ok_or_else(|| {
+                Error::Other("usernamepass/radius auth requires <usernamepass> block".into())
+            })?;
+            // Both fields are <xs:string minOccurs="0"> in the XSD —
+            // populated profiles do exist (headless / CI) but Microsoft
+            // generally expects the user to fill them in. Reject empties
+            // so we don't ship an unauthenticatable openvpn auth file.
+            let username = creds.username.as_deref().filter(|s| !s.is_empty()).ok_or_else(|| {
+                Error::Other("<usernamepass><username> missing or empty".into())
+            })?;
+            let password = creds.password.as_deref().filter(|s| !s.is_empty()).ok_or_else(|| {
+                Error::Other("<usernamepass><password> missing or empty".into())
+            })?;
+            let mut f = tempfile::Builder::new().prefix("azvpn-auth-").tempfile()?;
+            writeln!(f, "{username}")?;
+            writeln!(f, "{password}")?;
+            info!(auth = ?profile.clientauth.auth_type, "wrote username/password auth file");
+            Ok(Some(f))
+        }
     }
 }
 
@@ -299,4 +316,106 @@ fn collect_dns_inputs<'p>(
     };
 
     (suffixes, dns_servers)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn parse(xml: &str) -> VpnProfile {
+        VpnProfile::from_xml(xml).expect("test fixture should parse")
+    }
+
+    /// AAD profiles produce `AzureAD\n<token>\n` — openvpn reads the
+    /// first line as username and the second as password; the Azure
+    /// gateway recognises `AzureAD` as the sentinel that "password" is
+    /// actually a bearer token.
+    #[test]
+    fn aad_auth_file_uses_azuread_sentinel() {
+        let profile = parse(
+            r"<AzVpnProfile>
+                <serverlist><ServerEntry><fqdn>gw.example.com</fqdn></ServerEntry></serverlist>
+                <clientauth>
+                    <type>aad</type>
+                    <aad>
+                        <issuer>https://sts.windows.net/abc/</issuer>
+                        <tenant>https://login.microsoftonline.com/abc/</tenant>
+                        <audience>aud-guid</audience>
+                    </aad>
+                </clientauth>
+            </AzVpnProfile>",
+        );
+        let f = build_auth_file(&profile, Some("ey.jwt.token")).unwrap().unwrap();
+        let body = std::fs::read_to_string(f.path()).unwrap();
+        assert_eq!(body, "AzureAD\ney.jwt.token\n");
+    }
+
+    /// Cert auth uses an OS keystore or inline embedded cert in the
+    /// openvpn config — no auth-user-pass file involved.
+    #[test]
+    fn cert_auth_returns_no_file() {
+        let profile = parse(
+            r"<AzVpnProfile>
+                <serverlist><ServerEntry><fqdn>gw.example.com</fqdn></ServerEntry></serverlist>
+                <clientauth><type>cert</type></clientauth>
+            </AzVpnProfile>",
+        );
+        assert!(build_auth_file(&profile, None).unwrap().is_none());
+    }
+
+    #[test]
+    fn usernamepass_writes_creds_in_order() {
+        let profile = parse(
+            r"<AzVpnProfile>
+                <serverlist><ServerEntry><fqdn>gw.example.com</fqdn></ServerEntry></serverlist>
+                <clientauth>
+                    <type>usernamepass</type>
+                    <usernamepass>
+                        <username>svc-headless</username>
+                        <password>hunter2</password>
+                    </usernamepass>
+                </clientauth>
+            </AzVpnProfile>",
+        );
+        let f = build_auth_file(&profile, None).unwrap().unwrap();
+        let body = std::fs::read_to_string(f.path()).unwrap();
+        assert_eq!(body, "svc-headless\nhunter2\n");
+    }
+
+    #[test]
+    fn radius_uses_same_file_shape() {
+        let profile = parse(
+            r"<AzVpnProfile>
+                <serverlist><ServerEntry><fqdn>gw.example.com</fqdn></ServerEntry></serverlist>
+                <clientauth>
+                    <type>radius</type>
+                    <usernamepass>
+                        <username>alice@corp</username>
+                        <password>p4ss</password>
+                    </usernamepass>
+                </clientauth>
+            </AzVpnProfile>",
+        );
+        let f = build_auth_file(&profile, None).unwrap().unwrap();
+        let body = std::fs::read_to_string(f.path()).unwrap();
+        assert_eq!(body, "alice@corp\np4ss\n");
+    }
+
+    #[test]
+    fn usernamepass_rejects_empty_password() {
+        let profile = parse(
+            r"<AzVpnProfile>
+                <serverlist><ServerEntry><fqdn>gw.example.com</fqdn></ServerEntry></serverlist>
+                <clientauth>
+                    <type>usernamepass</type>
+                    <usernamepass>
+                        <username>alice</username>
+                        <password></password>
+                    </usernamepass>
+                </clientauth>
+            </AzVpnProfile>",
+        );
+        let err = build_auth_file(&profile, None).unwrap_err().to_string();
+        assert!(err.contains("password"));
+    }
 }

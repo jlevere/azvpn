@@ -79,10 +79,20 @@ impl DeviceCodeFlow {
     pub async fn start(&self) -> Result<DeviceCodePrompt, Error> {
         let scope = format!("{}/.default offline_access", self.config.audience);
 
-        let response: StandardDeviceAuthorizationResponse = self
-            .client
-            .exchange_device_code()
-            .add_scope(Scope::new(scope))
+        let mut request = self.client.exchange_device_code().add_scope(Scope::new(scope));
+        if self.config.enable_groups {
+            // AAD's optional-claims mechanism: ask for `groups` to land
+            // in the access token so the gateway can read group
+            // membership. Tenants with >200 groups will have AAD return
+            // a `groupOverageIndicator` instead — Graph fallback would
+            // be needed to resolve those, out of scope for now.
+            request = request.add_extra_param(
+                "claims",
+                r#"{"access_token":{"groups":{"essential":true}}}"#,
+            );
+        }
+
+        let response: StandardDeviceAuthorizationResponse = request
             .request_async(&self.http)
             .await
             .map_err(|e| Error::TokenAcquisition(format!("device code request failed: {e}")))?;

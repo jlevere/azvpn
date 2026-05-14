@@ -110,6 +110,11 @@ pub struct AadConfig {
     pub audience: String,
     pub issuer: String,
     pub application_id: Option<String>,
+    /// When the profile's `<enablegrouptoken>` is set, request AAD to
+    /// emit the `groups` claim in the access token. Tenants that
+    /// configure gateway-side access policies on group membership
+    /// need this — without it, the gateway sees an empty group set.
+    pub enable_groups: bool,
 }
 
 impl AadConfig {
@@ -130,6 +135,7 @@ impl From<&azvpn_profile::AadConfig> for AadConfig {
             audience: profile.audience.clone(),
             issuer: profile.issuer.clone(),
             application_id: profile.applicationid.clone(),
+            enable_groups: profile.enablegrouptoken.unwrap_or(false),
         }
     }
 }
