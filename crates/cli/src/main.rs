@@ -70,8 +70,8 @@ async fn main() {
                 SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::LOCALHOST, mgmt_port));
             report(connect::run(&profile, &openvpn, mgmt_addr, cli.verbose).await)
         }
-        Command::Disconnect => report(disconnect::run().await),
-        Command::Status => report(status::run().await),
+        Command::Disconnect => report(disconnect::run()),
+        Command::Status => report(status::run()),
         Command::Import { path } => {
             tracing::info!(?path, "importing profile");
             eprintln!("not yet implemented");

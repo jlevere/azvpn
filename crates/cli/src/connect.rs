@@ -7,6 +7,7 @@ use azvpn_core::session::{RunningSession, SessionGuard};
 use azvpn_openvpn::{ConfigBuilder, Event, OpenVpnConfig, OpenVpnProcess, PushOptions, VpnState};
 use azvpn_profile::{AuthType, VpnProfile};
 use tokio::signal;
+use tokio::signal::unix::{SignalKind, signal as unix_signal};
 use tracing::info;
 
 #[derive(Debug, thiserror::Error)]
@@ -129,6 +130,7 @@ pub async fn run(
     mgmt.hold_release().await?;
 
     let mut push_opts = PushOptions::default();
+    let mut sigterm = unix_signal(SignalKind::terminate())?;
 
     #[cfg(target_os = "macos")]
     let mut dns_guard: Option<azvpn_tunnel_darwin::DnsGuard> = None;
@@ -138,7 +140,13 @@ pub async fn run(
             biased;
 
             _ = signal::ctrl_c() => {
-                eprintln!("\nshutting down...");
+                eprintln!("\nshutting down (SIGINT)...");
+                let _ = mgmt.send("signal SIGTERM").await;
+                break;
+            }
+
+            _ = sigterm.recv() => {
+                eprintln!("\nshutting down (SIGTERM)...");
                 let _ = mgmt.send("signal SIGTERM").await;
                 break;
             }
