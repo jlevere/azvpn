@@ -37,6 +37,10 @@ enum Command {
         /// Path to Azure VPN profile XML
         #[arg(short, long)]
         profile: PathBuf,
+        /// Interactive AAD auth flow. `auto` picks browser when
+        /// available, falls back to device-code on SSH / headless.
+        #[arg(long, value_enum, default_value_t = connect::AuthMode::Auto)]
+        auth: connect::AuthMode,
     },
     /// Disconnect the active VPN session
     Disconnect,
@@ -89,7 +93,9 @@ async fn main() {
     logging::init(cli.verbose);
 
     let exit_code = match cli.command {
-        Command::Connect { profile } => report(connect::run(&profile, cli.verbose).await),
+        Command::Connect { profile, auth } => {
+            report(connect::run(&profile, cli.verbose, auth).await)
+        }
         Command::Disconnect => report(disconnect::run().await),
         Command::Status => report(status::run().await),
         Command::Whoami => report(whoami::run()),

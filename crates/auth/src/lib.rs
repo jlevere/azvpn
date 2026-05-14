@@ -1,16 +1,21 @@
 //! AAD authentication and Microsoft cloud-API plumbing.
 //!
-//! - [`DeviceCodeFlow`] drives the `OAuth2` device-code flow that produces
-//!   the access token the openvpn auth-user-pass file consumes.
+//! - [`AuthCodeFlow`] drives the interactive `OAuth2` auth-code + PKCE
+//!   flow (RFC 8252 native-app pattern with a loopback redirect).
+//!   Daily-driver UX when a browser is available.
+//! - [`DeviceCodeFlow`] drives the `OAuth2` device-code flow —
+//!   required for headless / SSH / CI sessions.
 //! - [`RefreshGrant`] exchanges the refresh-token side-channel for
 //!   audience-specific access tokens (Graph, ARM) without re-prompting
 //!   the user — the same trick the official Microsoft Azure VPN Client
 //!   uses to reach Graph post-auth.
-//! - [`TokenCache`] persists the device-code outcome (`~/Library/.../`
-//!   `azvpn-token.json`) so subsequent connects skip the prompt.
+//! - [`TokenCache`] persists the token outcome in the OS keyring
+//!   (or a 0600 file fallback on headless systems) so subsequent
+//!   connects skip the interactive prompt entirely.
 //! - [`cloud`] hosts the typed Graph / ARM helpers used by the CLI's
 //!   `me` / `groups` / `manager` / `org` commands.
 
+mod auth_code;
 pub mod cloud;
 mod device_code;
 mod refresh;
@@ -26,6 +31,12 @@ use oauth2::{DeviceAuthorizationUrl, TokenResponse, TokenUrl};
 /// Public for now.
 const AAD_AUTHORITY: &str = "https://login.microsoftonline.com";
 
+/// `claims` parameter we pass to AAD when the profile sets
+/// `<enablegrouptoken>true`. Asks AAD to include the `groups` claim
+/// in the access token (essential so it's never silently dropped).
+pub(crate) const GROUPS_CLAIMS_JSON: &str =
+    r#"{"access_token":{"groups":{"essential":true}}}"#;
+
 /// `https://login.microsoftonline.com/{tenant}/oauth2/v2.0/token`.
 pub(crate) fn aad_token_url(tenant: &str) -> Result<TokenUrl> {
     TokenUrl::new(format!("{AAD_AUTHORITY}/{tenant}/oauth2/v2.0/token"))
@@ -36,6 +47,12 @@ pub(crate) fn aad_token_url(tenant: &str) -> Result<TokenUrl> {
 pub(crate) fn aad_device_url(tenant: &str) -> Result<DeviceAuthorizationUrl> {
     DeviceAuthorizationUrl::new(format!("{AAD_AUTHORITY}/{tenant}/oauth2/v2.0/devicecode"))
         .map_err(|e| Error::Other(format!("invalid device-code URL for tenant {tenant}: {e}")))
+}
+
+/// `https://login.microsoftonline.com/{tenant}/oauth2/v2.0/authorize`.
+pub(crate) fn aad_authorize_url(tenant: &str) -> Result<oauth2::AuthUrl> {
+    oauth2::AuthUrl::new(format!("{AAD_AUTHORITY}/{tenant}/oauth2/v2.0/authorize"))
+        .map_err(|e| Error::Other(format!("invalid authorize URL for tenant {tenant}: {e}")))
 }
 
 /// `reqwest::Client` configured for `OAuth2` token endpoints — `redirect(none)`
@@ -63,6 +80,7 @@ impl From<&BasicTokenResponse> for Token {
     }
 }
 
+pub use auth_code::AuthCodeFlow;
 pub use device_code::{DeviceCodeFlow, DeviceCodePrompt};
 pub use refresh::{ARM_RESOURCE, GRAPH_RESOURCE, RefreshGrant};
 pub use token_cache::TokenCache;
@@ -80,8 +98,12 @@ pub enum Error {
     NoCachedToken,
     #[error("no refresh token in cache — run `azvpn connect` once")]
     NoRefreshToken,
-    #[error("interactive login required")]
-    InteractiveLoginRequired,
+    /// Loopback TCP listener for the OAuth callback couldn't bind —
+    /// typically port 2023 is already in use by another process (e.g.
+    /// a concurrent `azvpn connect` or the official Azure VPN client).
+    /// Caller's choice whether to fall back to device-code.
+    #[error("OAuth loopback bind failed (port 2023 likely in use)")]
+    LoopbackBindFailed,
     #[error("malformed JWT: missing {0}")]
     MalformedJwt(&'static str),
     #[error("http: {0}")]
@@ -117,14 +139,25 @@ pub struct AadConfig {
     pub enable_groups: bool,
 }
 
+/// Microsoft's well-known **public-client** app GUID for Azure VPN.
+///
+/// Distinct from the `41b23e61-...` *audience* (the API resource the
+/// gateway checks via the token's `aud` claim). This is the
+/// `client_id` we authenticate AS — Microsoft has registered
+/// `http://localhost:2023` and `msauth://...` redirect URIs against
+/// this app, which is what makes the auth-code+PKCE flow work
+/// against the well-known Azure VPN client without a custom tenant
+/// app registration.
+///
+/// Confirmed in the macOS / Linux official clients' binaries —
+/// research/aad-flow-notes.md has the full breakdown.
+pub const DEFAULT_PUBLIC_CLIENT_ID: &str = "51bb15d4-3a4f-4ebf-9dca-40096fe32426";
+
 impl AadConfig {
     pub fn client_id(&self) -> &str {
-        // If the profile specifies an applicationid, use it.
-        // Otherwise fall back to the audience — in the legacy Azure VPN
-        // configuration the audience app doubles as the OAuth client.
         self.application_id
             .as_deref()
-            .unwrap_or(&self.audience)
+            .unwrap_or(DEFAULT_PUBLIC_CLIENT_ID)
     }
 }
 
