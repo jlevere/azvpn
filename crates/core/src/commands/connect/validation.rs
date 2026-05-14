@@ -1,11 +1,46 @@
-//! Profile validation that runs before we hand control over to openvpn.
-//! Catches issues that would otherwise surface as opaque TLS errors or
-//! silent fallbacks to system trust.
+//! Preflight + runtime validation. Two flavours:
+//!
+//! - [`bundled_root_matches`] runs once at connect-start against the
+//!   profile XML, before we spawn openvpn — catches cases where the
+//!   profile pins a different root CA than the one we bundle.
+//! - [`pushed_cipher_acceptable`] runs on every `PUSH_REPLY` and gates
+//!   the apply path on the gateway-pushed data cipher being modern.
+//!   A `cipher BF-CBC` push would otherwise be silently accepted.
+//!
+//! Both keep validation logic out of the orchestration loop so the
+//! event match arms stay focused on dispatch.
 
 use azvpn_openvpn::bundled_root_ca_sha1;
 use azvpn_profile::VpnProfile;
 
 use crate::{Error, Result};
+
+/// Ciphers we hard-refuse if the gateway pushes them. Two failure modes
+/// covered:
+///
+/// - **Cryptographically broken / vanishingly small key** — `DES-*`,
+///   `RC2-*`, `IDEA-CBC`, `NONE` (literally no encryption).
+/// - **Small 64-bit block size, SWEET32-vulnerable** in CBC mode —
+///   `BF-CBC` (Blowfish), `DES-EDE*-CBC` (3DES), `CAST5-CBC`. Practical
+///   attacks exist against long-lived encrypted streams.
+///
+/// Comparison is case-insensitive (`OpenSSL` emits uppercase, some
+/// gateways emit lowercase, mismatched casing in a push reply
+/// shouldn't bypass the check). Modern AEAD ciphers like `AES-256-GCM`,
+/// `AES-128-GCM`, and `CHACHA20-POLY1305` are out of scope here.
+const KNOWN_WEAK_CIPHERS: &[&str] = &[
+    "BF-CBC",
+    "DES-CBC",
+    "DES-EDE-CBC",
+    "DES-EDE3-CBC",
+    "RC2-CBC",
+    "RC2-40-CBC",
+    "RC2-64-CBC",
+    "RC5-CBC",
+    "IDEA-CBC",
+    "CAST5-CBC",
+    "NONE",
+];
 
 /// Reject profiles whose `<servervalidation><cert><hash>` doesn't
 /// match the root CA we bundle into the openvpn config. A mismatch
@@ -37,6 +72,27 @@ pub(super) fn bundled_root_matches(profile: &VpnProfile) -> Result<()> {
         "profile pins root CA {hash} but azvpn bundles {bundled} — gateway likely \
          uses a CA we don't trust; please file an issue with the profile"
     )))
+}
+
+/// Reject a `PUSH_REPLY` that names a known-weak data cipher. Returns
+/// `Ok(())` when no cipher was pushed (openvpn falls back to its own
+/// default, which on modern builds is `AES-256-GCM` — fine) or when
+/// the named cipher isn't in [`KNOWN_WEAK_CIPHERS`].
+pub(super) fn pushed_cipher_acceptable(cipher: Option<&str>) -> Result<()> {
+    let Some(cipher) = cipher else {
+        return Ok(());
+    };
+    if KNOWN_WEAK_CIPHERS
+        .iter()
+        .any(|weak| cipher.eq_ignore_ascii_case(weak))
+    {
+        return Err(Error::Other(format!(
+            "gateway pushed weak data cipher `{cipher}` — refusing the connection. \
+             A modern AEAD cipher (AES-256-GCM, AES-128-GCM, CHACHA20-POLY1305) \
+             must be configured at the gateway."
+        )));
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -104,6 +160,54 @@ mod tests {
         );
         let err = bundled_root_matches(&profile).unwrap_err().to_string();
         assert!(err.contains("0000"));
+    }
+
+    #[test]
+    fn cipher_validation_accepts_aes_256_gcm() {
+        pushed_cipher_acceptable(Some("AES-256-GCM")).expect("modern AEAD must pass");
+    }
+
+    #[test]
+    fn cipher_validation_accepts_chacha20_poly1305() {
+        pushed_cipher_acceptable(Some("CHACHA20-POLY1305")).expect("modern AEAD must pass");
+    }
+
+    #[test]
+    fn cipher_validation_accepts_missing_cipher() {
+        // No `cipher` in PUSH_REPLY → openvpn uses its own default.
+        // Modern openvpn defaults to AES-256-GCM, so this is fine.
+        pushed_cipher_acceptable(None).expect("no cipher pushed → openvpn default");
+    }
+
+    #[test]
+    fn cipher_validation_rejects_bf_cbc() {
+        let err = pushed_cipher_acceptable(Some("BF-CBC")).unwrap_err().to_string();
+        assert!(err.contains("BF-CBC"));
+    }
+
+    #[test]
+    fn cipher_validation_rejects_des_variants() {
+        for weak in ["DES-CBC", "DES-EDE-CBC", "DES-EDE3-CBC"] {
+            assert!(
+                pushed_cipher_acceptable(Some(weak)).is_err(),
+                "{weak} should be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn cipher_validation_rejects_none() {
+        // `cipher none` means no encryption on the data channel.
+        let err = pushed_cipher_acceptable(Some("none")).unwrap_err().to_string();
+        assert!(err.to_lowercase().contains("none"));
+    }
+
+    #[test]
+    fn cipher_validation_is_case_insensitive() {
+        // openvpn / OpenSSL normalise uppercase; some configs lowercase.
+        // A mismatched casing shouldn't bypass the check.
+        assert!(pushed_cipher_acceptable(Some("bf-cbc")).is_err());
+        assert!(pushed_cipher_acceptable(Some("Bf-Cbc")).is_err());
     }
 
     #[test]

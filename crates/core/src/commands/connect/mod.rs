@@ -228,6 +228,14 @@ pub async fn run(
                             has_auth_token = opts.auth_token.is_some(),
                             "received push options"
                         );
+                        if let Err(e) =
+                            validation::pushed_cipher_acceptable(opts.cipher.as_deref())
+                        {
+                            tracing::error!(error = %e, "refusing push reply on cipher policy");
+                            let _ = status_tx.send(ConnectionStatus::Failed(e.to_string()));
+                            let _ = mgmt.send("signal SIGTERM").await;
+                            break;
+                        }
                         reneg_creds.absorb_push(&opts);
                         push_opts = opts.clone();
                         session.record_pushed(opts.clone());
