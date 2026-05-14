@@ -13,7 +13,9 @@ base64 = { workspace = true }
 dirs = { workspace = true }
 keyring = { workspace = true }
 oauth2 = { workspace = true }
+open = { workspace = true }
 reqwest = { workspace = true }
+url = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
