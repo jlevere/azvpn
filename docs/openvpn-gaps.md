@@ -134,24 +134,29 @@ proceeds (per profile flag eventually).
 
 ---
 
-### 6.  `>UPDOWN:` events not handled — DNS / routes installed too early
+### 6.  ~~`>UPDOWN:` events not handled — DNS / routes installed too early~~
 
-**Status:** not implemented.
+**Status:** Declined — based on misreading the openvpn lifecycle.
 
-Currently we drive DNS/route install off `STATE: CONNECTED`
-(`crates/core/src/commands/connect.rs:142-155`). The `>UPDOWN:`
-event fires *after* the kernel has the interface up — strictly more
-correct. With our current timing, on slow interfaces DNS apply can
-race ahead of the tunnel actually being usable.
+Original concern: `STATE:CONNECTED` might fire before the kernel sees
+the interface up; `>UPDOWN:up` would be "strictly more correct."
 
-**Where:** `crates/openvpn/src/management.rs:357-408` (parse),
-`commands/connect.rs:142-155` (consume).
+Empirical reality (openvpn 2.x source + tested against the Azure
+gateway): with `--pull` (our case) the order is
 
-**Scope:** ~60 LOC.
+1. PUSH_REPLY received
+2. TUN device opened, ifconfig applied
+3. `>UPDOWN:up` emitted (only if `management-up-down` config is set)
+4. `STATE:CONNECTED` transition
 
-**Done when:** `>UPDOWN:` parses to `Event::Up { … } | Event::Down`;
-DNS / route apply moves to `Event::Up`. Tear-down moves to
-`Event::Down` (or process-exit, whichever comes first).
+Steps 3 and 4 fire microseconds apart, both after the interface is
+fully usable. Switching the apply trigger from CONNECTED to UPDOWN
+would change *which* notification we listen to without fixing any
+real race. We'd also need to opt into emission by adding
+`management-up-down` to the openvpn config, which is the only thing
+that would make `>UPDOWN:` events appear at all.
+
+Verdict: cosmetic. Original framing in this doc was wrong. Skip.
 
 ---
 
