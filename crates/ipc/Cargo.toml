@@ -1,0 +1,19 @@
+[package]
+name = "azvpn-ipc"
+version = "0.1.0"
+description = "Service trait + serializable wire types shared between azvpn (CLI) and azvpnd (daemon)"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+azvpn-openvpn = { workspace = true }
+azvpn-profile = { workspace = true }
+ipnet = { workspace = true }
+serde = { workspace = true }
+tarpc = { workspace = true }
+thiserror = { workspace = true }
+
+[lints]
+workspace = true

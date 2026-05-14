@@ -2,6 +2,7 @@
 members = [
     "crates/cli",
     "crates/core",
+    "crates/ipc",
     "crates/profile",
     "crates/auth",
     "crates/openvpn",
@@ -35,8 +36,12 @@ base64 = "0.22"
 hickory-resolver = { version = "0.24", default-features = false, features = ["tokio-runtime", "system-config"] }
 net-route = "0.4"
 libc = "0.2"
+tarpc = { version = "0.37", features = ["full"] }
+futures = "0.3"
+ipnet = { version = "2", features = ["serde"] }
 
 azvpn-core = { path = "crates/core" }
+azvpn-ipc = { path = "crates/ipc" }
 azvpn-profile = { path = "crates/profile" }
 azvpn-auth = { path = "crates/auth" }
 azvpn-openvpn = { path = "crates/openvpn" }
