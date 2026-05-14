@@ -7,11 +7,18 @@
 //! the refresh token for a Graph-audience access token. AAD allows this
 //! because the well-known Azure VPN client ID (`41b23e61-...`) has consent
 //! pre-configured for the relevant Graph scopes.
+//!
+//! Thin wrapper over [`oauth2::basic::BasicClient::exchange_refresh_token`];
+//! the heavy lifting is form-encoding, error mapping, and rotation handling
+//! inside that crate.
 
 use std::time::{Duration, SystemTime};
 
-use serde::Deserialize;
-use tracing::{debug, info, instrument};
+use oauth2::basic::{BasicClient, BasicTokenResponse};
+use oauth2::{
+    ClientId, EndpointNotSet, EndpointSet, RefreshToken, Scope, TokenResponse, TokenUrl,
+};
+use tracing::{info, instrument};
 
 use crate::{Error, Token};
 
@@ -23,72 +30,69 @@ pub const GRAPH_RESOURCE: &str = "https://graph.microsoft.com/.default";
 /// management-plane queries — vnet/gateway listings, etc.).
 pub const ARM_RESOURCE: &str = "https://management.azure.com/.default";
 
-#[derive(Debug, Deserialize)]
-struct TokenResponse {
-    access_token: Option<String>,
-    expires_in: Option<u64>,
-    refresh_token: Option<String>,
-    error: Option<String>,
-    error_description: Option<String>,
-}
+/// Typestate alias — refresh grant only needs the token endpoint.
+type AadRefreshClient = BasicClient<
+    EndpointNotSet, // auth_uri
+    EndpointNotSet, // device_authorization_url
+    EndpointNotSet, // introspection_url
+    EndpointNotSet, // revocation_url
+    EndpointSet,    // token_uri
+>;
 
 pub struct RefreshGrant {
-    http: reqwest::Client,
     tenant_id: String,
-    client_id: String,
+    http: reqwest::Client,
+    client: AadRefreshClient,
 }
 
 impl RefreshGrant {
-    pub fn new(tenant_id: impl Into<String>, client_id: impl Into<String>) -> Self {
-        Self {
-            http: reqwest::Client::new(),
-            tenant_id: tenant_id.into(),
-            client_id: client_id.into(),
-        }
+    pub fn new(tenant_id: impl Into<String>, client_id: impl Into<String>) -> Result<Self, Error> {
+        let tenant_id = tenant_id.into();
+        let token_url = TokenUrl::new(format!(
+            "https://login.microsoftonline.com/{tenant_id}/oauth2/v2.0/token"
+        ))
+        .map_err(|e| Error::Other(format!("invalid token URL: {e}")))?;
+
+        let client =
+            BasicClient::new(ClientId::new(client_id.into())).set_token_uri(token_url);
+
+        let http = reqwest::ClientBuilder::new()
+            .redirect(reqwest::redirect::Policy::none())
+            .build()?;
+
+        Ok(Self {
+            tenant_id,
+            http,
+            client,
+        })
     }
 
-    /// Exchange the refresh token for an access token scoped to `resource`.
-    /// `resource` should be a `/.default`-style scope (or a space-separated
+    /// Exchange the refresh token for an access token scoped to `scope`.
+    /// `scope` should be a `/.default`-style scope (or a space-separated
     /// list of explicit scopes for the same audience).
     #[instrument(skip(self, refresh_token), fields(tenant = %self.tenant_id))]
     pub async fn exchange(&self, refresh_token: &str, scope: &str) -> Result<Token, Error> {
-        let url = format!(
-            "https://login.microsoftonline.com/{}/oauth2/v2.0/token",
-            self.tenant_id
-        );
+        let token_result: BasicTokenResponse = self
+            .client
+            .exchange_refresh_token(&RefreshToken::new(refresh_token.to_owned()))
+            .add_scope(Scope::new(scope.to_owned()))
+            .request_async(&self.http)
+            .await
+            .map_err(|e| Error::TokenAcquisition(format!("refresh-token grant failed: {e}")))?;
 
-        debug!(scope, tenant = %self.tenant_id, "refresh_token grant");
-
-        let resp: TokenResponse = self
-            .http
-            .post(&url)
-            .form(&[
-                ("grant_type", "refresh_token"),
-                ("client_id", self.client_id.as_str()),
-                ("refresh_token", refresh_token),
-                ("scope", scope),
-            ])
-            .send()
-            .await?
-            .json()
-            .await?;
-
-        if let Some(err) = resp.error {
-            let desc = resp.error_description.unwrap_or_default();
-            return Err(Error::TokenAcquisition(format!("{err}: {desc}")));
-        }
-
-        let access_token = resp.access_token.ok_or_else(|| {
-            Error::TokenAcquisition("token response had no access_token and no error".into())
-        })?;
-        let expires_in = resp.expires_in.unwrap_or(3600);
+        let expires_in = token_result
+            .expires_in()
+            .unwrap_or_else(|| Duration::from_secs(3600));
         // AAD usually rotates the refresh token on each exchange — prefer
         // the new one if returned, otherwise the caller can keep the old.
-        info!(scope, expires_in, "refresh-token exchange ok");
+        let new_refresh = token_result.refresh_token().map(|r| r.secret().to_owned());
+
+        info!(scope, expires_in = expires_in.as_secs(), "refresh-token exchange ok");
         Ok(Token {
-            access_token,
-            expires_at: SystemTime::now() + Duration::from_secs(expires_in),
-            refresh_token: resp.refresh_token,
+            access_token: token_result.access_token().secret().to_owned(),
+            expires_at: SystemTime::now() + expires_in,
+            refresh_token: new_refresh,
         })
     }
 }
+
