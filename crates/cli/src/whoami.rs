@@ -2,11 +2,12 @@
 //! Pure local introspection: no network, no signature verification (the
 //! gateway already validated the token; we trust the cache file is ours).
 
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use azvpn_auth::TokenCache;
 use base64::Engine as _;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+use jiff::Timestamp;
 use serde::Deserialize;
 
 use crate::{Error, Result};
@@ -58,10 +59,16 @@ fn exp_relative(exp: u64) -> String {
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs();
-    if exp > now {
-        format!("in {}", format_duration(exp - now))
+    let (label, delta) = if exp > now {
+        ("in", exp - now)
     } else {
-        format!("{} ago", format_duration(now - exp))
+        ("ago", now - exp)
+    };
+    let formatted = humantime::format_duration(Duration::from_secs(delta));
+    if label == "in" {
+        format!("in {formatted}")
+    } else {
+        format!("{formatted} ago")
     }
 }
 
@@ -94,46 +101,13 @@ pub fn run() -> Result<()> {
     Ok(())
 }
 
+/// Epoch seconds → RFC 3339 UTC string via [`jiff`]. JWT claims are
+/// always seconds-since-1970-UTC so we don't need timezone or
+/// sub-second handling. Falls back to the raw integer on the
+/// (effectively impossible — JWT carries `u64`) overflow path.
 fn format_timestamp(epoch_secs: u64) -> String {
-    let days = epoch_secs / 86400;
-    let hour = (epoch_secs % 86400) / 3600;
-    let minute = (epoch_secs % 3600) / 60;
-    let second = epoch_secs % 60;
-    let (year, month, day) = civil_from_days(i64::try_from(days).unwrap_or(0));
-    format!("{year:04}-{month:02}-{day:02}T{hour:02}:{minute:02}:{second:02}Z")
-}
-
-/// Howard Hinnant's `civil_from_days`: days since 1970-01-01 → (Y, M, D).
-/// Public-domain algorithm; single-letter names match the published
-/// formula and would obscure the math if renamed.
-#[allow(
-    clippy::cast_possible_wrap,
-    clippy::cast_sign_loss,
-    clippy::many_single_char_names
-)]
-fn civil_from_days(z: i64) -> (i32, u32, u32) {
-    let z = z + 719_468;
-    let era = (if z >= 0 { z } else { z - 146_096 }) / 146_097;
-    let doe = (z - era * 146_097) as u64;
-    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146_096) / 365;
-    let y = yoe as i64 + era * 400;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-    let mp = (5 * doy + 2) / 153;
-    let d = (doy - (153 * mp + 2) / 5 + 1) as u32;
-    let m = if mp < 10 { mp + 3 } else { mp - 9 } as u32;
-    let y = if m <= 2 { y + 1 } else { y };
-    (y as i32, m, d)
-}
-
-fn format_duration(secs: u64) -> String {
-    let days = secs / 86400;
-    let h = (secs % 86400) / 3600;
-    let m = (secs % 3600) / 60;
-    if days > 0 {
-        format!("{days}d {h}h {m}m")
-    } else if h > 0 {
-        format!("{h}h {m}m")
-    } else {
-        format!("{m}m")
-    }
+    i64::try_from(epoch_secs)
+        .ok()
+        .and_then(|s| Timestamp::from_second(s).ok())
+        .map_or_else(|| epoch_secs.to_string(), |ts| ts.to_string())
 }
