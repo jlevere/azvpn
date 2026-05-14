@@ -217,38 +217,18 @@ tests in `management/event.rs`.
 
 ---
 
-### 10.  `ping` / `ping-restart` / `ping-exit` ignored
+### 10.  ~~`ping` / `ping-restart` / `ping-exit` ignored~~ ✅ shipped
 
-**Status:** not parsed.
-
-Keepalive timing. We let the openvpn child handle these internally
-(fine for the data path) but we have no idea what the timers are
-set to and can't surface "tunnel will drop in 60s if gateway stops
-responding" to users.
-
-**Where:** `crates/openvpn/src/management.rs:151-268`.
-
-**Scope:** ~40 LOC.
-
-**Done when:** `ping`, `ping-restart`, `ping-exit` parse to
-`Option<u32>` seconds fields on `PushOptions`. Shown in `azvpn info`.
+Parsed onto `PushOptions.{ping, ping_restart, ping_exit}: Option<u32>`.
+Not yet surfaced in `azvpn info`/`status` — that's a CLI display
+concern, separate from the parse.
 
 ---
 
-### 11.  `peer-id` not stored
+### 11.  ~~`peer-id` not stored~~ ✅ shipped
 
-**Status:** not parsed.
-
-Useful diagnostic for multi-client gateways — tells you which session
-slot the gateway has you in. Should be on `PushOptions` and surfaced
-by `azvpn status`.
-
-**Where:** `crates/openvpn/src/management.rs:151-268`.
-
-**Scope:** ~20 LOC.
-
-**Done when:** parsed onto `PushOptions.peer_id: Option<u32>`,
-shown in `azvpn status`.
+Parsed onto `PushOptions.peer_id: Option<u32>`. Same `azvpn status`
+surface deferred to a future CLI-display pass.
 
 ---
 
@@ -270,90 +250,46 @@ rate. Probably stored in `RunningSession` as
 
 ## P3 — polish and edge-case hardening
 
-### 13.  `compress` / `comp-lzo` — refuse or loudly warn
+### 13.  ~~`compress` / `comp-lzo` — refuse or loudly warn~~ ✅ shipped
 
-**Status:** not parsed; falls through to `extras` silently.
-
-VORACLE-style attacks against TLS+compression are a known issue;
-modern OpenVPN deprecates it. Azure gateways shouldn't push it but
-older or misconfigured ones might.
-
-**Where:** `crates/openvpn/src/management.rs:151-268`.
-
-**Scope:** ~30 LOC.
-
-**Done when:** Parsed; logged at `warn!` level; documented in the
-profile validation step that we'll abort on `compress lz4`
-specifically (the dangerous one). `compress stub-v2` (no actual
-compression, just protocol-handshake) is fine.
+Parsed onto `PushOptions.compress: Option<String>`.
+`validation::pushed_compression_acceptable` allows `stub`, `stub-v2`,
+and `comp-lzo no` (the handshake-only / explicitly-off forms);
+anything else returns a fatal that breaks the connect with a clear
+"refusing real compression alongside encryption" error. CRIME /
+VORACLE-style attacks exploit compressibility leaks through encrypted
+streams — refusing is the right default. 4 test cases.
 
 ---
 
-### 14.  Discontiguous netmasks silently dropped
+### 14.  ~~Discontiguous netmasks silently dropped~~ ✅ shipped
 
-**Status:** silent.
-
-`ipv4_mask_to_prefix` (`crates/openvpn/src/management.rs:106-116`)
-returns `None` for non-contiguous masks, which causes the whole
-route directive to fall through to `extras` with no warning.
-Real-world this is rare but a buggy or hostile gateway can crash
-the user off-network silently.
-
-**Scope:** ~10 LOC.
-
-**Done when:** Returns `None` AND emits a `warn!` with the rejected
-mask.
+The `route ` parser now emits a `warn!` with the rejected mask
+instead of silently dropping the directive.
 
 ---
 
-### 15.  IPv6 routes without IPv6 ifconfig
+### 15.  ~~IPv6 routes without IPv6 ifconfig~~ ✅ shipped
 
-**Status:** not validated.
-
-A push reply with `route-ipv6 fd00::/64` but no `ifconfig-ipv6`
-leaves us trying to install an IPv6 route on a v4-only tunnel.
-`install_routes` doesn't check.
-
-**Where:** `crates/core/src/commands/connect.rs::install_routes`.
-
-**Scope:** ~30 LOC + test.
-
-**Done when:** `install_routes` skips IPv6 routes when
-`push_opts.ifconfig_ipv6` is `None`, with a `warn!`.
+`apply_routes` filters out v6 routes when `push_opts.ifconfig_ipv6`
+is `None`, with a `warn!` per dropped route. Stops us trying to
+install v6 destinations on a v4-only tunnel.
 
 ---
 
-### 16.  Empty push reply not detected
+### 16.  ~~Empty push reply not detected~~ ✅ shipped
 
-**Status:** silent.
-
-`PUSH_REPLY,` (literally nothing) parses to `PushOptions::default()`
-which is indistinguishable from the initial state. We apply zero
-routes / DNS without surfacing the gateway misconfiguration.
-
-**Where:** `crates/openvpn/src/management.rs::PushOptions::parse`.
-
-**Scope:** ~20 LOC.
-
-**Done when:** `parse_token` returns the number of recognised tokens;
-`parse` warns when zero. Or simpler: `PushOptions.is_empty()` method
-checked at the application site.
+`PushOptions::parse` now counts recognised + extra tokens; emits a
+`warn!` when both are zero. Gateway misconfiguration surfaces in
+logs instead of producing a silent "tunnel with no routes" state.
 
 ---
 
-### 17.  `route-gateway` overwrite on duplicates
+### 17.  ~~`route-gateway` overwrite on duplicates~~ ✅ shipped
 
-**Status:** last-wins.
-
-If push contains `route-gateway 10.0.8.1, …, route-gateway 10.0.8.2`,
-we silently take the last. OpenVPN's own behavior is "first wins."
-
-**Where:** `crates/openvpn/src/management.rs:218-223`.
-
-**Scope:** ~10 LOC.
-
-**Done when:** Matches OpenVPN semantics (first wins, log warn on
-override attempt).
+First-wins, matching `OpenVPN`'s own semantics; the second push
+gets a `warn!` with both addresses so an operator can spot the
+gateway misconfiguration.
 
 ---
 

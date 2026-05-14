@@ -95,6 +95,34 @@ pub(super) fn pushed_cipher_acceptable(cipher: Option<&str>) -> Result<()> {
     Ok(())
 }
 
+/// Reject a `PUSH_REPLY` that turns on data-channel compression for
+/// real compression algorithms — CRIME / VORACLE-class attacks exploit
+/// the compressibility leak through encrypted streams. `stub` and
+/// `stub-v2` are fine: they're handshake-only no-ops kept for protocol
+/// compatibility. `comp-lzo no` is also fine — the keyword is present
+/// but compression is explicitly off.
+pub(super) fn pushed_compression_acceptable(compress: Option<&str>) -> Result<()> {
+    let Some(compress) = compress else {
+        return Ok(());
+    };
+    let trimmed = compress.trim();
+    let lower = trimmed.to_ascii_lowercase();
+    // Allow-list the known-safe forms; anything else is an active
+    // compression algorithm.
+    let safe = lower == "stub"
+        || lower == "stub-v2"
+        || lower == "comp-lzo no"
+        || lower.is_empty();
+    if safe {
+        return Ok(());
+    }
+    Err(Error::Other(format!(
+        "gateway pushed data-channel compression `{trimmed}` — refusing the \
+         connection. Compression alongside encryption enables CRIME/VORACLE-style \
+         leaks; turn it off at the gateway or downgrade to `compress stub-v2`."
+    )))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -200,6 +228,28 @@ mod tests {
         // `cipher none` means no encryption on the data channel.
         let err = pushed_cipher_acceptable(Some("none")).unwrap_err().to_string();
         assert!(err.to_lowercase().contains("none"));
+    }
+
+    #[test]
+    fn compression_validation_accepts_none() {
+        pushed_compression_acceptable(None).expect("no compression pushed");
+    }
+
+    #[test]
+    fn compression_validation_accepts_stub_forms() {
+        pushed_compression_acceptable(Some("stub")).expect("stub is handshake-only");
+        pushed_compression_acceptable(Some("stub-v2")).expect("stub-v2 is handshake-only");
+        pushed_compression_acceptable(Some("comp-lzo no")).expect("explicit off");
+    }
+
+    #[test]
+    fn compression_validation_rejects_active_algorithms() {
+        for algo in ["lz4", "lz4-v2", "lzo", "comp-lzo", "comp-lzo adaptive"] {
+            assert!(
+                pushed_compression_acceptable(Some(algo)).is_err(),
+                "{algo} should be rejected"
+            );
+        }
     }
 
     #[test]

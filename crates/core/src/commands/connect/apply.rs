@@ -38,19 +38,32 @@ async fn apply_routes(manager: &mut RouteManager, push_opts: &PushOptions) -> Re
     // Filter out routes the management-line parser admitted with an
     // invalid (family, prefix-length) combo. Real gateways don't do
     // this, but a bug or hostile push shouldn't crash the manager.
+    // Also drop v6 routes when no v6 ifconfig was pushed — installing
+    // them would point a v6 destination at a v4-only tunnel.
+    let has_v6_ifconfig = push_opts.ifconfig_ipv6.is_some();
     let mut desired: Vec<IpNet> = push_opts
         .routes
         .iter()
-        .filter_map(|r| match route::pushed_to_ipnet(r) {
-            Ok(net) => Some(net),
-            Err(e) => {
+        .filter_map(|r| {
+            if matches!(r.family, azvpn_openvpn::AddrFamily::V6) && !has_v6_ifconfig {
                 tracing::warn!(
                     destination = %r.destination,
                     prefix = r.prefix,
-                    error = %e,
-                    "skipping route with invalid prefix length"
+                    "skipping IPv6 pushed route — no ifconfig-ipv6 in push reply"
                 );
-                None
+                return None;
+            }
+            match route::pushed_to_ipnet(r) {
+                Ok(net) => Some(net),
+                Err(e) => {
+                    tracing::warn!(
+                        destination = %r.destination,
+                        prefix = r.prefix,
+                        error = %e,
+                        "skipping route with invalid prefix length"
+                    );
+                    None
+                }
             }
         })
         .collect();
