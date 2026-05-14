@@ -16,6 +16,7 @@
 
 pub mod commands;
 pub mod dns;
+pub mod route;
 pub mod session;
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -32,6 +33,8 @@ pub enum Error {
     Session(#[from] session::Error),
     #[error("dns: {0}")]
     Dns(#[from] dns::Error),
+    #[error("route: {0}")]
+    Route(#[from] route::Error),
     #[error("io: {0}")]
     Io(#[from] std::io::Error),
 

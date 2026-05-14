@@ -17,6 +17,7 @@ use tokio_util::sync::CancellationToken;
 use tracing::{info, instrument};
 
 use crate::dns::{self, DnsManager};
+use crate::route::{self, RouteManager, RouteSpec};
 use crate::session::{RunningSession, SessionGuard};
 use crate::{Error, Result};
 
@@ -88,10 +89,12 @@ pub async fn run<U: DeviceCodeUi>(
 
     let mut push_opts = PushOptions::default();
     let mut dns_manager = dns::new_manager();
+    let mut route_manager = RouteManager::new()?;
     // openvpn can re-emit `Connected` after every hold-release cycle.
     // Guard the DNS apply so reconnects don't keep rewriting the same
     // SCDynamicStore key and session.json record on every emission.
     let mut last_dns_inputs: Option<(Vec<String>, Vec<std::net::IpAddr>)> = None;
+    let mut routes_installed = false;
 
     loop {
         tokio::select! {
@@ -121,6 +124,13 @@ pub async fn run<U: DeviceCodeUi>(
                                 &push_opts,
                                 &mut last_dns_inputs,
                             );
+                            if !routes_installed {
+                                if let Err(e) = install_routes(&mut route_manager, &push_opts).await {
+                                    tracing::error!(error = %e, "route install failed");
+                                } else {
+                                    routes_installed = true;
+                                }
+                            }
                         }
                         if *state == VpnState::Exiting {
                             info!("openvpn exiting");
@@ -156,6 +166,9 @@ pub async fn run<U: DeviceCodeUi>(
             }
         }
     }
+
+    route_manager.clear().await;
+    drop(route_manager);
 
     dns_manager.clear();
     drop(dns_manager);
@@ -215,6 +228,43 @@ async fn obtain_auth_file<U: DeviceCodeUi>(
             Ok(None)
         }
     }
+}
+
+async fn install_routes(
+    manager: &mut RouteManager,
+    push_opts: &PushOptions,
+) -> Result<()> {
+    let Some(gw_str) = push_opts.route_gateway.as_deref() else {
+        tracing::warn!("no route-gateway in push reply — skipping route install");
+        return Ok(());
+    };
+    let gateway: std::net::IpAddr = gw_str
+        .parse()
+        .map_err(|_| Error::Other(format!("invalid route-gateway from gateway: {gw_str}")))?;
+
+    let specs: Vec<RouteSpec> = push_opts
+        .routes
+        .iter()
+        .filter_map(|r| {
+            route::parse_pushed_route(&r.destination, &r.mask_or_prefix, r.family)
+                .or_else(|| {
+                    tracing::warn!(
+                        dest = %r.destination,
+                        mask = %r.mask_or_prefix,
+                        "could not parse pushed route, skipping"
+                    );
+                    None
+                })
+        })
+        .collect();
+
+    if specs.is_empty() {
+        info!("no pushed routes to install");
+        return Ok(());
+    }
+
+    manager.apply(&specs, gateway).await?;
+    Ok(())
 }
 
 fn apply_dns(

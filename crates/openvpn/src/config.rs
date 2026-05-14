@@ -83,6 +83,10 @@ impl<'a> ConfigBuilder<'a> {
         writeln!(config, "tls-version-min 1.2").unwrap();
         writeln!(config, "tls-timeout 30").unwrap();
         writeln!(config, "auth-nocache").unwrap();
+        // Route installation is owned by `azvpn-core::route` (Rust →
+        // net-route → kernel). openvpn still parses pushed routes and
+        // emits them on the mgmt socket so we know what to install.
+        writeln!(config, "route-noexec").unwrap();
         writeln!(config, "verb {}", self.verb).unwrap();
         writeln!(config).unwrap();
 
