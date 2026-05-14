@@ -52,7 +52,10 @@ fn print(r: &InfoReport) {
     print_dns(r.status.as_ref());
 
     println!();
-    println!("=== routes via tunnel ===");
+    match &r.tunnel_interface {
+        Some(name) => println!("=== routes via tunnel ({name}) ==="),
+        None => println!("=== routes via tunnel (no live session — showing utun/tun/tap) ==="),
+    }
     if r.tunnel_routes.is_empty() {
         println!("(no tunnel routes)");
     } else {

@@ -28,13 +28,44 @@ impl DeviceCodeUi for StderrDeviceCodeUi {
     }
 }
 
+/// Open the URL in the user's default browser. Under sudo, drop
+/// privileges to `SUDO_UID` before exec so the browser launches in the
+/// real user's Aqua session instead of root's. Replacing the old
+/// `sudo -u USER open URL` shell-out: this just calls the syscall sudo
+/// would have called (`setuid`) and execs the same `open(1)` binary,
+/// without the sudo middleware in between.
 fn open_browser(url: &str) {
-    if let Ok(user) = std::env::var("SUDO_USER") {
-        let _ = std::process::Command::new("sudo")
-            .args(["-u", &user, "open", url])
-            .spawn();
-    } else {
-        let _ = open::that(url);
+    #[cfg(unix)]
+    if let Some(uid) = std::env::var("SUDO_UID")
+        .ok()
+        .and_then(|s| s.parse::<u32>().ok())
+    {
+        spawn_open_as_uid(url, uid);
+        return;
+    }
+    if let Err(e) = open::that(url) {
+        tracing::warn!(error = %e, "failed to open browser");
+    }
+}
+
+#[cfg(unix)]
+#[allow(unsafe_code, clippy::cast_possible_wrap)]
+fn spawn_open_as_uid(url: &str, uid: u32) {
+    use std::os::unix::process::CommandExt as _;
+    let mut cmd = std::process::Command::new("/usr/bin/open");
+    cmd.arg(url);
+    // SAFETY: `pre_exec` runs between fork and exec. The closure must be
+    // async-signal-safe; `libc::setuid` is on every POSIX platform.
+    unsafe {
+        cmd.pre_exec(move || {
+            if libc::setuid(uid as libc::uid_t) != 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
+    if let Err(e) = cmd.spawn() {
+        tracing::warn!(error = %e, "failed to spawn open(1) for browser");
     }
 }
 

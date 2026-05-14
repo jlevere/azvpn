@@ -115,6 +115,7 @@ dependencies = [
  "base64",
  "clap",
  "hickory-resolver",
+ "libc",
  "open",
  "reqwest",
  "serde",
