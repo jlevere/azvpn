@@ -1,13 +1,42 @@
 use std::fmt::Write;
 use std::net::{IpAddr, SocketAddr};
 use std::path::Path;
+use std::sync::OnceLock;
 
 use azvpn_profile::{Route, TransportProtocol, VpnProfile};
+use sha1::{Digest, Sha1};
 
 use crate::management::ipv4_prefix_to_mask;
 
+/// SHA-1 thumbprint of the bundled root CA, computed at runtime from
+/// the embedded PEM. Cached after first call so the cost is one-shot.
+/// Callers compare this against a profile's `<servervalidation><cert>
+/// <hash>` to fail fast on root-CA drift before openvpn returns an
+/// opaque cert-chain error.
+///
+/// # Panics
+/// Only on a corrupted PEM blob in the binary, which would mean a
+/// build-time mistake we want to catch loudly.
+pub fn bundled_root_ca_sha1() -> &'static str {
+    static CACHED: OnceLock<String> = OnceLock::new();
+    CACHED.get_or_init(|| {
+        let pem = pem::parse(DIGICERT_GLOBAL_ROOT_G2)
+            .expect("DIGICERT_GLOBAL_ROOT_G2 is a hand-checked PEM constant");
+        let mut hasher = Sha1::new();
+        hasher.update(pem.contents());
+        hex_lower(&hasher.finalize())
+    })
+}
+
+fn hex_lower(bytes: &[u8]) -> String {
+    let mut out = String::with_capacity(bytes.len() * 2);
+    for b in bytes {
+        write!(out, "{b:02x}").unwrap();
+    }
+    out
+}
+
 // DigiCert Global Root G2 — the CA used by Azure VPN P2S gateways.
-// SHA1 fingerprint: df3c24f9bfd666761b268073fe06d1cc8d4f82a4
 const DIGICERT_GLOBAL_ROOT_G2: &str = "\
 -----BEGIN CERTIFICATE-----
 MIIDjjCCAnagAwIBAgIQAzrx5qcRqaC7KGSxHQn65TANBgkqhkiG9w0BAQsFADBh
@@ -64,7 +93,8 @@ impl<'a> ConfigBuilder<'a> {
     pub fn build(&self) -> String {
         let mut config = String::with_capacity(4096);
 
-        let server = &self.profile.serverlist.entries[0];
+        let entries = &self.profile.serverlist.entries;
+        let primary = &entries[0];
         let proto = match self.profile.transport_protocol() {
             TransportProtocol::Tcp => "tcp",
             TransportProtocol::Udp => "udp",
@@ -73,11 +103,21 @@ impl<'a> ConfigBuilder<'a> {
         writeln!(config, "client").unwrap();
         writeln!(config, "dev tun").unwrap();
         writeln!(config, "proto {proto}").unwrap();
-        writeln!(config, "remote {} 443", server.fqdn).unwrap();
+        // Emit every <ServerEntry> as a `remote` line — openvpn 2.6
+        // tries them in order and falls over to the next on connect
+        // failure. Profiles with HA hubs carry multiple entries.
+        for entry in entries {
+            writeln!(config, "remote {} 443", entry.fqdn).unwrap();
+        }
         writeln!(config, "resolv-retry infinite").unwrap();
         writeln!(config, "nobind").unwrap();
         writeln!(config, "remote-cert-tls server").unwrap();
-        writeln!(config, "verify-x509-name {} name", server.fqdn).unwrap();
+        // openvpn accepts only one `verify-x509-name` directive — we
+        // pin the primary CN. If failover triggers to a secondary
+        // with a different CN, the TLS check will reject it and the
+        // user sees a clear validation error. Most Azure HA pairs
+        // share a wildcard cert so this is usually a non-issue.
+        writeln!(config, "verify-x509-name {} name", primary.fqdn).unwrap();
         writeln!(config, "auth SHA256").unwrap();
         writeln!(config, "cipher AES-256-GCM").unwrap();
         writeln!(config, "persist-key").unwrap();
@@ -270,5 +310,43 @@ mod tests {
         assert!(config.contains("management-hold"));
         assert!(config.contains("BEGIN OpenVPN Static key V1"));
         assert!(config.contains("BEGIN CERTIFICATE"));
+    }
+
+    /// Profiles with HA gateways carry multiple <ServerEntry>s. openvpn
+    /// 2.6 falls over to the next `remote` line on connect failure, so
+    /// emitting them all is the whole feature.
+    #[test]
+    fn multi_server_profile_emits_all_remotes() {
+        let xml = r"<AzVpnProfile>
+            <serverlist>
+                <ServerEntry><fqdn>primary.gw.example.com</fqdn></ServerEntry>
+                <ServerEntry><fqdn>secondary.gw.example.com</fqdn></ServerEntry>
+            </serverlist>
+            <clientauth><type>cert</type></clientauth>
+        </AzVpnProfile>";
+        let profile = VpnProfile::from_xml(xml).unwrap();
+        let addr = SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 7505));
+        let config = ConfigBuilder::new(&profile, addr).build();
+        assert!(config.contains("remote primary.gw.example.com 443"));
+        assert!(config.contains("remote secondary.gw.example.com 443"));
+        // Single verify-x509-name on the primary — secondary will fail
+        // the CN check if failover ever triggers to it, by design.
+        assert_eq!(
+            config.matches("verify-x509-name").count(),
+            1,
+            "should emit exactly one verify-x509-name directive"
+        );
+        assert!(config.contains("verify-x509-name primary.gw.example.com name"));
+    }
+
+    /// The bundled root's computed SHA-1 must equal `DigiCert` Global
+    /// Root G2's well-known thumbprint. If the PEM constant ever gets
+    /// silently swapped for a different cert this test fails loudly.
+    #[test]
+    fn bundled_root_thumbprint_is_digicert_g2() {
+        assert_eq!(
+            bundled_root_ca_sha1(),
+            "df3c24f9bfd666761b268073fe06d1cc8d4f82a4"
+        );
     }
 }

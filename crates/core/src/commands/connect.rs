@@ -11,7 +11,10 @@ use std::io::Write as _;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 
-use azvpn_openvpn::{ConfigBuilder, Event, OpenVpnConfig, OpenVpnProcess, PushOptions, VpnState};
+use azvpn_openvpn::{
+    ConfigBuilder, Event, OpenVpnConfig, OpenVpnProcess, PushOptions, VpnState,
+    bundled_root_ca_sha1,
+};
 use azvpn_profile::{AuthType, VpnProfile};
 use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
@@ -69,6 +72,7 @@ pub async fn run(
         .ok_or_else(|| Error::Other("no server in profile".into()))?;
     info!(server = %server.fqdn, "loaded profile");
 
+    verify_bundled_root_matches(&profile)?;
     let auth_file = build_auth_file(&profile, access_token.as_deref())?;
 
     let mut builder = ConfigBuilder::new(&profile, opts.mgmt_addr);
@@ -202,6 +206,38 @@ pub async fn run(
     Ok(())
 }
 
+/// Reject profiles whose `<servervalidation><cert><hash>` doesn't
+/// match the root CA we bundle into the openvpn config. A mismatch
+/// means the gateway is signed by a different root than we trust —
+/// connecting would either fail at the TLS-handshake layer with an
+/// opaque cert-chain error, or (worse) silently accept whatever the
+/// system trust store happens to have.
+///
+/// SHA-1 thumbprints are case-insensitive; openvpn / OpenSSL emit
+/// them uppercase, the .NET serializer emits them lowercase.
+fn verify_bundled_root_matches(profile: &VpnProfile) -> Result<()> {
+    let Some(hash) = profile
+        .servervalidation
+        .as_ref()
+        .and_then(|v| v.cert.as_ref())
+        .and_then(|c| c.hash.as_deref())
+    else {
+        // No pin in the profile — fall back to "trust the bundled root".
+        // Real Azure profiles always carry the pin; this branch covers
+        // hand-crafted test profiles.
+        return Ok(());
+    };
+
+    let bundled = bundled_root_ca_sha1();
+    if hash.trim().eq_ignore_ascii_case(bundled) {
+        return Ok(());
+    }
+    Err(Error::Other(format!(
+        "profile pins root CA {hash} but azvpn bundles {bundled} — gateway likely \
+         uses a CA we don't trust; please file an issue with the profile"
+    )))
+}
+
 /// Build the openvpn `auth-user-pass` file from a caller-supplied AAD
 /// access token. AAD profiles require `Some(token)`; certificate
 /// profiles pass `None`. Returns the tempfile (deleted on drop).
@@ -223,8 +259,20 @@ fn build_auth_file(
              the device-code flow before invoking connect)".into(),
         )),
         (AuthType::Certificate, _) => {
-            info!("certificate auth — no token needed");
-            Ok(None)
+            // Client cert auth needs the cert + private key wired into
+            // the openvpn config (or referenced from the OS keystore by
+            // thumbprint). Neither path is implemented; the daemon
+            // would silently spawn openvpn without credentials and
+            // hand back a confusing TLS error. Reject loud and clear.
+            //
+            // To unblock: either embed the cert+key inline by extending
+            // ConfigBuilder to emit <cert>/<key> blocks from
+            // <clientauth><cert><certificatedata>, or implement
+            // platform-specific keystore lookup by <hash>.
+            Err(Error::Other(
+                "client certificate auth is not yet implemented — \
+                 only AAD and username/password profiles can connect today".into(),
+            ))
         }
         (AuthType::UsernamePass | AuthType::Radius, _) => {
             let creds = profile.clientauth.usernamepass.as_ref().ok_or_else(|| {
@@ -350,17 +398,84 @@ mod tests {
         assert_eq!(body, "AzureAD\ney.jwt.token\n");
     }
 
-    /// Cert auth uses an OS keystore or inline embedded cert in the
-    /// openvpn config — no auth-user-pass file involved.
+    /// Cert client auth isn't wired into `ConfigBuilder` yet; reject up
+    /// front rather than spawn openvpn without credentials.
     #[test]
-    fn cert_auth_returns_no_file() {
+    fn cert_auth_errors_until_implemented() {
         let profile = parse(
             r"<AzVpnProfile>
                 <serverlist><ServerEntry><fqdn>gw.example.com</fqdn></ServerEntry></serverlist>
                 <clientauth><type>cert</type></clientauth>
             </AzVpnProfile>",
         );
-        assert!(build_auth_file(&profile, None).unwrap().is_none());
+        let err = build_auth_file(&profile, None).unwrap_err().to_string();
+        assert!(err.contains("certificate"));
+    }
+
+    /// Profile hash matches the bundled root → connect proceeds.
+    #[test]
+    fn server_validation_accepts_matching_root_hash() {
+        let profile = parse(
+            r"<AzVpnProfile>
+                <serverlist><ServerEntry><fqdn>gw.example.com</fqdn></ServerEntry></serverlist>
+                <clientauth>
+                    <type>aad</type>
+                    <aad>
+                        <issuer>i</issuer><tenant>t</tenant><audience>a</audience>
+                    </aad>
+                </clientauth>
+                <servervalidation>
+                    <cert><hash>df3c24f9bfd666761b268073fe06d1cc8d4f82a4</hash></cert>
+                </servervalidation>
+            </AzVpnProfile>",
+        );
+        verify_bundled_root_matches(&profile).unwrap();
+    }
+
+    /// Case-insensitive: .NET serialiser emits lowercase, OpenSSL upper.
+    #[test]
+    fn server_validation_matches_case_insensitively() {
+        let profile = parse(
+            r"<AzVpnProfile>
+                <serverlist><ServerEntry><fqdn>gw.example.com</fqdn></ServerEntry></serverlist>
+                <clientauth><type>cert</type></clientauth>
+                <servervalidation>
+                    <cert><hash>DF3C24F9BFD666761B268073FE06D1CC8D4F82A4</hash></cert>
+                </servervalidation>
+            </AzVpnProfile>",
+        );
+        verify_bundled_root_matches(&profile).unwrap();
+    }
+
+    /// Different root → reject with a clear error so the user knows
+    /// what's wrong instead of getting an opaque TLS-chain failure.
+    #[test]
+    fn server_validation_rejects_mismatched_root() {
+        let profile = parse(
+            r"<AzVpnProfile>
+                <serverlist><ServerEntry><fqdn>gw.example.com</fqdn></ServerEntry></serverlist>
+                <clientauth><type>cert</type></clientauth>
+                <servervalidation>
+                    <cert><hash>0000000000000000000000000000000000000000</hash></cert>
+                </servervalidation>
+            </AzVpnProfile>",
+        );
+        let err = verify_bundled_root_matches(&profile).unwrap_err().to_string();
+        assert!(err.contains("CA"));
+    }
+
+    /// Profile without a servervalidation hash falls through — old
+    /// hand-crafted test profiles and the linux export template both
+    /// fit this shape.
+    #[test]
+    fn server_validation_passes_when_no_pin() {
+        let profile = parse(
+            r"<AzVpnProfile>
+                <serverlist><ServerEntry><fqdn>gw.example.com</fqdn></ServerEntry></serverlist>
+                <clientauth><type>cert</type></clientauth>
+            </AzVpnProfile>",
+        );
+        verify_bundled_root_matches(&profile).unwrap();
     }
 
     #[test]
