@@ -10,21 +10,7 @@ use tokio::signal;
 use tokio::signal::unix::{SignalKind, signal as unix_signal};
 use tracing::info;
 
-#[derive(Debug, thiserror::Error)]
-pub enum Error {
-    #[error("profile: {0}")]
-    Profile(#[from] azvpn_profile::Error),
-    #[error("auth: {0}")]
-    Auth(#[from] azvpn_auth::Error),
-    #[error("openvpn: {0}")]
-    OpenVpn(#[from] azvpn_openvpn::Error),
-    #[error("session: {0}")]
-    Session(#[from] azvpn_core::session::Error),
-    #[error("io: {0}")]
-    Io(#[from] std::io::Error),
-    #[error("{0}")]
-    Other(String),
-}
+use crate::{Error, Result};
 
 fn open_browser(url: &str) {
     if let Ok(user) = std::env::var("SUDO_USER") {
@@ -42,7 +28,7 @@ pub async fn run(
     openvpn_binary: &Path,
     mgmt_addr: SocketAddr,
     verbose: bool,
-) -> Result<(), Error> {
+) -> Result<()> {
     let profile = VpnProfile::from_file(profile_path)?;
     let server = profile
         .primary_server()

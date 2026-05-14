@@ -8,6 +8,7 @@ mod aad;
 mod connect;
 mod disconnect;
 mod dns;
+mod error;
 mod groups;
 mod info;
 mod manager;
@@ -16,6 +17,8 @@ mod org;
 mod pushed;
 mod status;
 mod whoami;
+
+pub use error::{Error, Result};
 
 #[derive(Parser)]
 #[command(name = "azvpn", about = "Cross-platform Azure VPN client")]
@@ -139,7 +142,7 @@ async fn main() {
     }
 }
 
-fn report<E: std::fmt::Display>(result: Result<(), E>) -> i32 {
+fn report(result: Result<()>) -> i32 {
     match result {
         Ok(()) => 0,
         Err(e) => {

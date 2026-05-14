@@ -34,7 +34,6 @@ base64 = "0.22"
 hickory-resolver = { version = "0.24", default-features = false, features = ["tokio-runtime", "system-config"] }
 net-route = "0.4"
 libc = "0.2"
-graph-rs-sdk = "3"
 
 azvpn-core = { path = "crates/core" }
 azvpn-profile = { path = "crates/profile" }

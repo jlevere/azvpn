@@ -1,7 +1,6 @@
-//! Decode the cached AAD access token and surface user/tenant/expiry.
-//!
-//! Pure local introspection — no network, no signature verification (we
-//! trust the cache file is ours; the gateway already validated the token).
+//! `azvpn whoami` — decode the cached AAD JWT and print the salient claims.
+//! Pure local introspection: no network, no signature verification (the
+//! gateway already validated the token; we trust the cache file is ours).
 
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -10,19 +9,7 @@ use base64::Engine as _;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use serde::Deserialize;
 
-#[derive(Debug, thiserror::Error)]
-pub enum Error {
-    #[error("no cached token at {path}")]
-    NoCache { path: String },
-    #[error("malformed JWT: {0}")]
-    Jwt(String),
-    #[error("base64: {0}")]
-    Base64(#[from] base64::DecodeError),
-    #[error("json: {0}")]
-    Json(#[from] serde_json::Error),
-    #[error("io: {0}")]
-    Io(#[from] std::io::Error),
-}
+use crate::{Error, Result};
 
 #[derive(Deserialize)]
 struct Cached {
@@ -31,34 +18,26 @@ struct Cached {
 
 #[derive(Debug, Deserialize)]
 struct Claims {
-    /// Tenant ID.
     #[serde(default)]
     tid: Option<String>,
-    /// Object ID — stable identifier for the principal in the tenant.
     #[serde(default)]
     oid: Option<String>,
-    /// User principal name.
     #[serde(default)]
     upn: Option<String>,
-    /// Audience (the resource this token grants access to).
     #[serde(default)]
     aud: Option<String>,
-    /// Issuer.
     #[serde(default)]
     iss: Option<String>,
-    /// Application ID (the OAuth client).
     #[serde(default)]
     appid: Option<String>,
-    /// Expiry (unix epoch seconds).
     exp: u64,
-    /// Issued-at (unix epoch seconds).
     #[serde(default)]
     iat: Option<u64>,
-    /// Scopes (space-separated).
     #[serde(default)]
     scp: Option<String>,
 }
 
+#[derive(Clone)]
 pub struct Summary {
     pub user: String,
     pub tenant: String,
@@ -66,11 +45,11 @@ pub struct Summary {
     pub expiry_relative: String,
 }
 
-fn load_claims() -> Result<Claims, Error> {
+fn load_claims() -> Result<Claims> {
     let path = TokenCache::default_path();
     let raw = std::fs::read_to_string(&path).map_err(|e| {
         if e.kind() == std::io::ErrorKind::NotFound {
-            Error::NoCache {
+            Error::NoCachedToken {
                 path: path.display().to_string(),
             }
         } else {
@@ -79,6 +58,12 @@ fn load_claims() -> Result<Claims, Error> {
     })?;
     let cached: Cached = serde_json::from_str(&raw)?;
     decode_claims(&cached.access_token)
+}
+
+fn decode_claims(jwt: &str) -> Result<Claims> {
+    let payload_b64 = jwt.split('.').nth(1).ok_or(Error::MalformedJwt("payload"))?;
+    let decoded = URL_SAFE_NO_PAD.decode(payload_b64)?;
+    Ok(serde_json::from_slice(&decoded)?)
 }
 
 fn exp_relative(exp: u64) -> String {
@@ -93,7 +78,7 @@ fn exp_relative(exp: u64) -> String {
     }
 }
 
-pub fn summary() -> Result<Summary, Error> {
+pub fn summary() -> Result<Summary> {
     let claims = load_claims()?;
     Ok(Summary {
         user: claims.upn.unwrap_or_else(|| "(unknown)".to_owned()),
@@ -103,7 +88,7 @@ pub fn summary() -> Result<Summary, Error> {
     })
 }
 
-pub fn run() -> Result<(), Error> {
+pub fn run() -> Result<()> {
     let claims = load_claims()?;
     let rel = exp_relative(claims.exp);
 
@@ -122,17 +107,7 @@ pub fn run() -> Result<(), Error> {
     Ok(())
 }
 
-fn decode_claims(jwt: &str) -> Result<Claims, Error> {
-    let payload_b64 = jwt
-        .split('.')
-        .nth(1)
-        .ok_or_else(|| Error::Jwt("expected three dot-separated segments".to_owned()))?;
-    let decoded = URL_SAFE_NO_PAD.decode(payload_b64)?;
-    Ok(serde_json::from_slice(&decoded)?)
-}
-
 fn format_timestamp(epoch_secs: u64) -> String {
-    // Cheap RFC3339-ish — avoids pulling in chrono just for this.
     let days = epoch_secs / 86400;
     let hour = (epoch_secs % 86400) / 3600;
     let minute = (epoch_secs % 3600) / 60;
@@ -141,9 +116,9 @@ fn format_timestamp(epoch_secs: u64) -> String {
     format!("{year:04}-{month:02}-{day:02}T{hour:02}:{minute:02}:{second:02}Z")
 }
 
-/// Howard Hinnant's `civil_from_days`: convert days since 1970-01-01 to
-/// (year, month, day). Public domain; standard algorithm. Single-letter
-/// names match the published formula — renaming them would obscure it.
+/// Howard Hinnant's `civil_from_days`: days since 1970-01-01 → (Y, M, D).
+/// Public-domain algorithm; single-letter names match the published
+/// formula and would obscure the math if renamed.
 #[allow(
     clippy::cast_possible_wrap,
     clippy::cast_sign_loss,

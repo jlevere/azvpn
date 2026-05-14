@@ -1,24 +1,18 @@
+//! `azvpn disconnect` — read the session file, send SIGTERM to the running
+//! connect process. openvpn's management interface only accepts one client
+//! at a time (the connect process owns it), so we route through `kill(2)`
+//! instead of the mgmt socket.
+
 use azvpn_core::session::RunningSession;
 
-#[derive(Debug, thiserror::Error)]
-pub enum Error {
-    #[error("session: {0}")]
-    Session(#[from] azvpn_core::session::Error),
-    #[error("kill failed: {0}")]
-    Kill(String),
-}
+use crate::{Error, Result};
 
-pub fn run() -> Result<(), Error> {
+pub fn run() -> Result<()> {
     let Some(session) = RunningSession::load()? else {
         eprintln!("not connected");
         return Ok(());
     };
 
-    // We can't talk to openvpn's management socket — the running connect
-    // process holds it (only one client at a time). Send SIGTERM directly
-    // to that process; its handler forwards `signal SIGTERM` to openvpn
-    // over its existing management connection and exits cleanly. The
-    // SessionGuard Drop in connect removes the session file.
     if !process_alive(session.pid) {
         eprintln!(
             "session file present but pid {} is dead; clearing stale session",

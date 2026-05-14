@@ -1,14 +1,13 @@
+//! `azvpn status` — read session.json and probe the connect pid's liveness.
+//! No mgmt-socket query — the running connect owns the only one.
+
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use azvpn_core::session::RunningSession;
 
-#[derive(Debug, thiserror::Error)]
-pub enum Error {
-    #[error("session: {0}")]
-    Session(#[from] azvpn_core::session::Error),
-}
+use crate::Result;
 
-pub fn run() -> Result<(), Error> {
+pub fn run() -> Result<()> {
     let Some(session) = RunningSession::load()? else {
         println!("not connected");
         return Ok(());
@@ -18,7 +17,6 @@ pub fn run() -> Result<(), Error> {
         .duration_since(UNIX_EPOCH)
         .map_or(session.started_at, |d| d.as_secs());
     let uptime = now.saturating_sub(session.started_at);
-
     let alive = process_alive(session.pid);
 
     println!("pid:     {}", session.pid);

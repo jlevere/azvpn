@@ -1,25 +1,16 @@
-//! Comprehensive status dump: session, identity, DNS, routes.
+//! `azvpn info` — comprehensive status dump: session, identity, DNS, routes.
 //!
-//! All sources are native — session.json, the cached JWT, and the kernel
-//! routing table via `PF_ROUTE` (through the `net-route` crate). The DNS
-//! settings come from the session file (recorded by `connect` when it
-//! installed them); `scutil --dns` is still the authoritative live view if
-//! you want to verify the dynamic store directly.
+//! All sources are native — session.json, the cached JWT (via
+//! `whoami::summary`), and the kernel routing table through `net-route`.
 
 use std::net::IpAddr;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use azvpn_core::session::RunningSession;
 
-#[derive(Debug, thiserror::Error)]
-pub enum Error {
-    #[error("session: {0}")]
-    Session(#[from] azvpn_core::session::Error),
-    #[error("routing table: {0}")]
-    Routes(#[from] std::io::Error),
-}
+use crate::Result;
 
-pub async fn run() -> Result<(), Error> {
+pub async fn run() -> Result<()> {
     let session = RunningSession::load()?;
 
     println!("=== session ===");
@@ -39,11 +30,7 @@ pub async fn run() -> Result<(), Error> {
             );
             println!(
                 "state:    {}",
-                if alive {
-                    "running"
-                } else {
-                    "stale (process gone)"
-                }
+                if alive { "running" } else { "stale (process gone)" }
             );
         }
         None => println!("(not connected)"),
@@ -96,7 +83,7 @@ fn print_identity() {
     }
 }
 
-async fn print_tunnel_routes() -> Result<(), Error> {
+async fn print_tunnel_routes() -> Result<()> {
     let handle = net_route::Handle::new()?;
     let routes = handle.list().await?;
 
@@ -142,11 +129,8 @@ fn interface_name(index: u32) -> Option<String> {
     let mut buf = [0u8; libc::IF_NAMESIZE];
     // SAFETY: `buf` is a writable IF_NAMESIZE-byte buffer; `if_indextoname`
     // either writes a NUL-terminated string into it and returns the same
-    // pointer, or returns NULL on failure. We immediately check for NULL
-    // before reading and `CStr::from_ptr` requires only a NUL-terminated
-    // C string within the buffer's lifetime.
-    let ret =
-        unsafe { libc::if_indextoname(index, buf.as_mut_ptr().cast::<libc::c_char>()) };
+    // pointer, or returns NULL on failure. We check for NULL before reading.
+    let ret = unsafe { libc::if_indextoname(index, buf.as_mut_ptr().cast::<libc::c_char>()) };
     if ret.is_null() {
         return None;
     }
