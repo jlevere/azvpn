@@ -452,7 +452,7 @@ async fn apply_routes(
     // Filter out routes the management-line parser admitted with an
     // invalid (family, prefix-length) combo. Real gateways don't do
     // this, but a bug or hostile push shouldn't crash the manager.
-    let desired: Vec<ipnet::IpNet> = push_opts
+    let mut desired: Vec<ipnet::IpNet> = push_opts
         .routes
         .iter()
         .filter_map(|r| match route::pushed_to_ipnet(r) {
@@ -468,8 +468,44 @@ async fn apply_routes(
             }
         })
         .collect();
+
+    if let Some(rg) = push_opts.redirect_gateway {
+        let extra = redirect_gateway_routes(rg);
+        if !extra.is_empty() {
+            info!(
+                full_tunnel_v4 = rg.covers_ipv4(),
+                full_tunnel_v6 = rg.covers_ipv6(),
+                added = extra.len(),
+                "redirect-gateway: appending def1 split-route override"
+            );
+            desired.extend(extra);
+        }
+    }
+
     manager.apply(&desired, gateway).await?;
     Ok(())
+}
+
+/// Synthesize the `def1` split routes for a redirect-gateway push.
+///
+/// `0.0.0.0/1` + `128.0.0.0/1` together cover every IPv4 destination
+/// and bear a longer prefix than the system's `0.0.0.0/0` default
+/// route, so they take precedence in the kernel's longest-prefix-match
+/// without modifying or replacing the original default. Same idea for
+/// `::/1` + `8000::/1`. This is the openvpn `def1` idiom — strictly
+/// safer than tearing down `0.0.0.0/0` because a crashed daemon leaves
+/// the original default route intact.
+fn redirect_gateway_routes(rg: azvpn_openvpn::RedirectGateway) -> Vec<ipnet::IpNet> {
+    let mut routes = Vec::with_capacity(4);
+    if rg.covers_ipv4() {
+        routes.push("0.0.0.0/1".parse().expect("hardcoded literal is valid"));
+        routes.push("128.0.0.0/1".parse().expect("hardcoded literal is valid"));
+    }
+    if rg.covers_ipv6() {
+        routes.push("::/1".parse().expect("hardcoded literal is valid"));
+        routes.push("8000::/1".parse().expect("hardcoded literal is valid"));
+    }
+    routes
 }
 
 /// Apply DNS suffixes + servers. Idempotent in the trait impl; safe to
