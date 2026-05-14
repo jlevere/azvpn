@@ -40,6 +40,8 @@ azvpn-profile = { workspace = true }
 base64 = { workspace = true }
 clap = { workspace = true }
 hickory-resolver = { workspace = true }
+humansize = { workspace = true }
+humantime = { workspace = true }
 reqwest = { workspace = true }
 open = { workspace = true }
 serde = { workspace = true }

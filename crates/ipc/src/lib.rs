@@ -76,6 +76,18 @@ pub struct StatusReport {
     pub local_ip: Option<IpAddr>,
     pub dns_suffixes: Vec<String>,
     pub dns_servers: Vec<IpAddr>,
+    /// Cumulative bytes through the tunnel since openvpn's
+    /// `--bytecount` started reporting. `None` until the first
+    /// `>BYTECOUNT:` event arrives (typically within ~1s of CONNECTED).
+    pub bytes: Option<ByteCount>,
+}
+
+/// Cumulative byte counters from openvpn's management `>BYTECOUNT:` events.
+/// Absolute totals, not deltas — clients compute rate from successive polls.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ByteCount {
+    pub rx_bytes: u64,
+    pub tx_bytes: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

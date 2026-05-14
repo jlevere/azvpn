@@ -1,7 +1,10 @@
 //! `azvpn status` — talks to the daemon over tarpc and renders the
 //! returned `StatusReport`. No filesystem snooping.
 
+use std::time::Duration;
+
 use azvpn_ipc::StatusReport;
+use humansize::{BINARY, format_size};
 
 use crate::daemon_client::connect_to_daemon;
 use crate::Result;
@@ -28,19 +31,20 @@ fn print(r: &StatusReport) {
     if !r.dns_servers.is_empty() {
         println!("dns:     {}", join_ips(&r.dns_servers));
     }
+    if let Some(b) = r.bytes {
+        println!(
+            "traffic: rx {} / tx {}",
+            format_size(b.rx_bytes, BINARY),
+            format_size(b.tx_bytes, BINARY)
+        );
+    }
 }
 
+/// Render uptime as `1h 23m 45s` via [`humantime`]. We trim the
+/// sub-second precision (`s 137ms` style) the crate adds by default
+/// since seconds are the right granularity for an uptime line.
 pub(crate) fn format_uptime(secs: u64) -> String {
-    let h = secs / 3600;
-    let m = (secs % 3600) / 60;
-    let s = secs % 60;
-    if h > 0 {
-        format!("{h}h {m}m {s}s")
-    } else if m > 0 {
-        format!("{m}m {s}s")
-    } else {
-        format!("{s}s")
-    }
+    humantime::format_duration(Duration::from_secs(secs)).to_string()
 }
 
 fn join_ips(ips: &[std::net::IpAddr]) -> String {

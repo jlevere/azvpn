@@ -63,6 +63,13 @@ backon = { version = "1", default-features = false, features = ["std-blocking-sl
 if-watch = { version = "3", default-features = false, features = ["tokio"] }
 uzers = { version = "0.12", default-features = false }
 dirs = "5"
+# Byte-size formatting (KiB/MiB/GiB/TiB style). Saves us hand-rolling a
+# magnitude table, picks units we'd have picked anyway, and rounds
+# consistently with `ls -h` / `du -h` output people already know.
+humansize = "2"
+# Human-readable Duration formatting / parsing (`2h 5m 30s`). Used by
+# the CLI's uptime line in `azvpn status`.
+humantime = "2"
 
 azvpn-core = { path = "crates/core" }
 azvpn-ipc = { path = "crates/ipc" }
