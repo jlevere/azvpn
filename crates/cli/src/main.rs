@@ -2,6 +2,7 @@ use std::path::PathBuf;
 
 use clap::{Parser, Subcommand};
 
+mod captive;
 mod connect;
 mod daemon_client;
 mod disconnect;

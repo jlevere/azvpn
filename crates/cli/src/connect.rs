@@ -43,6 +43,12 @@ const DISCONNECT_DEADLINE: Duration = Duration::from_secs(30);
 
 pub async fn run(profile_path: &Path, verbose: bool, auth_mode: AuthMode) -> Result<()> {
     let profile = VpnProfile::from_file(profile_path)?;
+
+    // Hint-only captive-portal probe. Warns if the network looks
+    // intercepted; doesn't block — false positives (corporate proxies,
+    // transient 5xx) shouldn't stop a legitimate connect.
+    crate::captive::warn_if_mediated().await;
+
     let access_token = ensure_access_token(&profile, auth_mode).await?;
 
     let client = connect_to_daemon().await?;
