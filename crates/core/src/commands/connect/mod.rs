@@ -419,12 +419,17 @@ async fn attempt(
                         );
                         if let Err(e) =
                             validation::pushed_cipher_acceptable(opts.cipher.as_deref())
+                                .and_then(|()| {
+                                    validation::pushed_compression_acceptable(
+                                        opts.compress.as_deref(),
+                                    )
+                                })
                         {
-                            tracing::error!(error = %e, "refusing push reply on cipher policy");
+                            tracing::error!(error = %e, "refusing push reply on crypto policy");
                             let _ = status_tx.send(ConnectionStatus::Failed(e.to_string()));
                             let _ = mgmt.send("signal SIGTERM").await;
                             // Gateway-side misconfiguration — retrying
-                            // gets the same cipher, no point.
+                            // gets the same cipher / compression, no point.
                             outcome = Some(AttemptOutcome::Fatal(e));
                             break;
                         }

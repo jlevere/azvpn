@@ -199,6 +199,27 @@ pub struct PushOptions {
     /// present, used as the username on the re-auth response; without it
     /// the client keeps the original initial-auth username.
     pub auth_token_user: Option<String>,
+    /// `ping <seconds>` — keepalive interval; openvpn sends a control
+    /// packet every N seconds when the data channel is idle.
+    pub ping: Option<u32>,
+    /// `ping-restart <seconds>` — restart the tunnel if no control or
+    /// data packets have been received in N seconds. Azure default
+    /// is 60s; this is the timeout that drives the "tunnel hung"
+    /// recovery before our reachability watcher kicks in.
+    pub ping_restart: Option<u32>,
+    /// `ping-exit <seconds>` — exit (not just restart) if no traffic
+    /// for N seconds. Rarely pushed; openvpn 2.6+ behaviour.
+    pub ping_exit: Option<u32>,
+    /// `peer-id <N>` — gateway-assigned slot for this session in a
+    /// multi-client server. Useful diagnostic for "which session does
+    /// the gateway think I am?".
+    pub peer_id: Option<u32>,
+    /// `compress <algo>` / legacy `comp-lzo` — data-channel compression.
+    /// Captured here so the apply path can refuse known-dangerous
+    /// algorithms (CRIME/VORACLE-style attacks against compressed
+    /// encrypted streams). `stub-v2` is the OK case: no actual
+    /// compression, just protocol-handshake bytes.
+    pub compress: Option<String>,
     /// Tokens we didn't recognise — preserved verbatim so debug output shows
     /// everything the gateway told us.
     pub extras: Vec<String>,
@@ -210,15 +231,24 @@ impl PushOptions {
     /// stripping the surrounding `PUSH_REPLY,…'` framing first.
     pub(crate) fn parse(options_line: &str) -> Self {
         let mut opts = Self::default();
+        let mut recognised = 0usize;
         for token in options_line.split(',') {
             let token = token.trim();
             if token.is_empty() {
                 continue;
             }
             if Self::parse_token(&mut opts, token) {
+                recognised += 1;
                 continue;
             }
             opts.extras.push(token.to_owned());
+        }
+        if recognised == 0 && opts.extras.is_empty() {
+            tracing::warn!(
+                "PUSH_REPLY arrived with no recognisable or unknown directives — \
+                 gateway likely misconfigured; the tunnel will come up with no \
+                 routes or DNS"
+            );
         }
         opts
     }
@@ -277,26 +307,46 @@ impl PushOptions {
             // `route <dest> <mask> [gateway]`
             let mut parts = rest.split_whitespace();
             if let (Some(dest), Some(mask)) = (parts.next(), parts.next())
-                && let (Ok(destination), Some(prefix)) = (
-                    dest.parse::<IpAddr>(),
-                    mask.parse::<std::net::Ipv4Addr>()
-                        .ok()
-                        .and_then(ipv4_mask_to_prefix),
-                )
+                && let Ok(destination) = dest.parse::<IpAddr>()
+                && let Ok(mask_addr) = mask.parse::<std::net::Ipv4Addr>()
             {
                 let gateway = parts.next().and_then(|s| s.parse().ok());
-                opts.routes.push(PushedRoute {
-                    destination,
-                    prefix,
-                    gateway,
-                    family: AddrFamily::V4,
-                });
+                match ipv4_mask_to_prefix(mask_addr) {
+                    Some(prefix) => opts.routes.push(PushedRoute {
+                        destination,
+                        prefix,
+                        gateway,
+                        family: AddrFamily::V4,
+                    }),
+                    None => {
+                        // Discontiguous masks (e.g. 255.0.255.0) — not
+                        // representable as a prefix-length CIDR. Real
+                        // gateways don't push these; a buggy or hostile
+                        // one shouldn't silently drop the route.
+                        tracing::warn!(
+                            destination = %destination,
+                            mask = %mask_addr,
+                            "skipping pushed route with discontiguous netmask"
+                        );
+                    }
+                }
             }
             return true;
         }
         if let Some(rest) = token.strip_prefix("route-gateway ") {
             if let Ok(gw) = rest.parse() {
-                opts.route_gateway = Some(gw);
+                // First-wins matches OpenVPN's own behaviour for
+                // duplicate route-gateway directives. Subsequent ones
+                // are surprising in real pushes — warn so we notice.
+                if let Some(existing) = opts.route_gateway {
+                    tracing::warn!(
+                        existing = %existing,
+                        ignored = %gw,
+                        "duplicate route-gateway in PUSH_REPLY; keeping first"
+                    );
+                } else {
+                    opts.route_gateway = Some(gw);
+                }
             }
             return true;
         }
@@ -334,6 +384,41 @@ impl PushOptions {
         }
         if let Some(rest) = token.strip_prefix("cipher ") {
             opts.cipher = Some(rest.to_owned());
+            return true;
+        }
+        if let Some(rest) = token.strip_prefix("ping-restart ") {
+            if let Ok(secs) = rest.parse() {
+                opts.ping_restart = Some(secs);
+            }
+            return true;
+        }
+        if let Some(rest) = token.strip_prefix("ping-exit ") {
+            if let Ok(secs) = rest.parse() {
+                opts.ping_exit = Some(secs);
+            }
+            return true;
+        }
+        if let Some(rest) = token.strip_prefix("ping ") {
+            if let Ok(secs) = rest.parse() {
+                opts.ping = Some(secs);
+            }
+            return true;
+        }
+        if let Some(rest) = token.strip_prefix("peer-id ") {
+            if let Ok(id) = rest.parse() {
+                opts.peer_id = Some(id);
+            }
+            return true;
+        }
+        // `compress <algo>` (OpenVPN 2.4+) and legacy `comp-lzo [adaptive]`
+        // both end up here. Stash the algo; the apply layer is the one
+        // that refuses dangerous values.
+        if let Some(rest) = token.strip_prefix("compress ") {
+            opts.compress = Some(rest.to_owned());
+            return true;
+        }
+        if token == "comp-lzo" || token.starts_with("comp-lzo ") {
+            opts.compress = Some(token.to_owned());
             return true;
         }
         // `redirect-gateway-ipv6` is the older form (pre-OpenVPN 2.5);
@@ -538,6 +623,42 @@ mod tests {
         let opts = PushOptions::parse("redirect-gateway,topology subnet");
         let rg = opts.redirect_gateway.unwrap();
         assert!(!rg.is_full_tunnel());
+    }
+
+    #[test]
+    fn ping_peer_id_compress_parse_onto_typed_fields() {
+        let opts = PushOptions::parse(
+            "ping 10,ping-restart 60,ping-exit 120,peer-id 7,compress stub-v2,topology subnet",
+        );
+        assert_eq!(opts.ping, Some(10));
+        assert_eq!(opts.ping_restart, Some(60));
+        assert_eq!(opts.ping_exit, Some(120));
+        assert_eq!(opts.peer_id, Some(7));
+        assert_eq!(opts.compress.as_deref(), Some("stub-v2"));
+        assert!(opts.extras.is_empty(), "extras: {:?}", opts.extras);
+    }
+
+    #[test]
+    fn comp_lzo_legacy_form_captured() {
+        let opts = PushOptions::parse("comp-lzo,topology subnet");
+        assert_eq!(opts.compress.as_deref(), Some("comp-lzo"));
+        let opts2 = PushOptions::parse("comp-lzo no,topology subnet");
+        assert_eq!(opts2.compress.as_deref(), Some("comp-lzo no"));
+    }
+
+    #[test]
+    fn duplicate_route_gateway_keeps_first() {
+        let opts = PushOptions::parse(
+            "route-gateway 10.0.8.1,route-gateway 10.0.9.1,topology subnet",
+        );
+        assert_eq!(opts.route_gateway, Some("10.0.8.1".parse().unwrap()));
+    }
+
+    #[test]
+    fn discontiguous_mask_skips_route_without_panic() {
+        // 255.0.255.0 isn't representable as a prefix-length CIDR.
+        let opts = PushOptions::parse("route 10.0.0.0 255.0.255.0,topology subnet");
+        assert!(opts.routes.is_empty(), "discontiguous mask should drop the route");
     }
 
     #[test]
