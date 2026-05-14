@@ -165,6 +165,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "azvpn-daemon"
+version = "0.1.0"
+dependencies = [
+ "azvpn-core",
+ "azvpn-ipc",
+ "futures",
+ "libc",
+ "tarpc",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+ "uzers",
+]
+
+[[package]]
 name = "azvpn-ipc"
 version = "0.1.0"
 dependencies = [
@@ -174,6 +190,7 @@ dependencies = [
  "serde",
  "tarpc",
  "thiserror 2.0.18",
+ "tokio",
 ]
 
 [[package]]

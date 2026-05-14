@@ -15,5 +15,8 @@ serde = { workspace = true }
 tarpc = { workspace = true }
 thiserror = { workspace = true }
 
+[dev-dependencies]
+tokio = { workspace = true }
+
 [lints]
 workspace = true
