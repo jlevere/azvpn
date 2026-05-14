@@ -2,6 +2,7 @@
 members = [
     "crates/cli",
     "crates/core",
+    "crates/daemon",
     "crates/ipc",
     "crates/profile",
     "crates/auth",
@@ -39,6 +40,7 @@ libc = "0.2"
 tarpc = { version = "0.37", features = ["full"] }
 futures = "0.3"
 ipnet = { version = "2", features = ["serde"] }
+uzers = { version = "0.12", default-features = false }
 
 azvpn-core = { path = "crates/core" }
 azvpn-ipc = { path = "crates/ipc" }
