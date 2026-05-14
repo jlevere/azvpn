@@ -8,24 +8,15 @@
 use azvpn_core::session::RunningSession;
 use azvpn_openvpn::{AddrFamily, PushOptions, PushedRoute};
 
-#[derive(Debug, thiserror::Error)]
-pub enum Error {
-    #[error("session: {0}")]
-    Session(#[from] azvpn_core::session::Error),
-    #[error("not connected (no session file)")]
-    NotConnected,
-    #[error("no pushed options recorded — gateway hasn't sent PUSH_REPLY yet")]
-    NoPushed,
-}
+use crate::{Error, Result};
 
-pub fn run() -> Result<(), Error> {
+pub fn run() -> Result<()> {
     let Some(session) = RunningSession::load()? else {
         return Err(Error::NotConnected);
     };
     let Some(pushed) = session.pushed else {
-        return Err(Error::NoPushed);
+        return Err(Error::NoPushedOptions);
     };
-
     print(&pushed);
     Ok(())
 }
@@ -81,18 +72,23 @@ fn print(p: &PushOptions) {
     if !p.routes.is_empty() {
         println!();
         println!("Routes ({})", p.routes.len());
-        // Group by family for readability.
-        let mut v4: Vec<&PushedRoute> =
-            p.routes.iter().filter(|r| r.family == AddrFamily::V4).collect();
-        let mut v6: Vec<&PushedRoute> =
-            p.routes.iter().filter(|r| r.family == AddrFamily::V6).collect();
+        let mut v4: Vec<&PushedRoute> = p
+            .routes
+            .iter()
+            .filter(|r| r.family == AddrFamily::V4)
+            .collect();
+        let mut v6: Vec<&PushedRoute> = p
+            .routes
+            .iter()
+            .filter(|r| r.family == AddrFamily::V6)
+            .collect();
         v4.sort_by(|a, b| a.destination.cmp(&b.destination));
         v6.sort_by(|a, b| a.destination.cmp(&b.destination));
         for r in v4 {
-            print_route(r, "  ");
+            print_route(r);
         }
         for r in v6 {
-            print_route(r, "  ");
+            print_route(r);
         }
     }
 
@@ -105,14 +101,14 @@ fn print(p: &PushOptions) {
     }
 }
 
-fn print_route(r: &PushedRoute, indent: &str) {
+fn print_route(r: &PushedRoute) {
     let sep = match r.family {
         AddrFamily::V4 => " ",
         AddrFamily::V6 => "/",
     };
     let dest = format!("{}{sep}{}", r.destination, r.mask_or_prefix);
     match &r.gateway {
-        Some(gw) => println!("{indent}{dest:<30} via {gw}"),
-        None => println!("{indent}{dest}"),
+        Some(gw) => println!("  {dest:<30} via {gw}"),
+        None => println!("  {dest}"),
     }
 }

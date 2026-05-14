@@ -3,13 +3,7 @@
 
 use serde::Deserialize;
 
-use crate::aad;
-
-#[derive(Debug, thiserror::Error)]
-pub enum Error {
-    #[error("{0}")]
-    Aad(#[from] aad::Error),
-}
+use crate::{Error, Result, aad};
 
 #[derive(Deserialize, Debug)]
 #[serde(rename_all = "camelCase")]
@@ -22,7 +16,7 @@ struct GraphUser {
     id: Option<String>,
 }
 
-pub async fn run() -> Result<(), Error> {
+pub async fn run() -> Result<()> {
     match aad::graph_get::<GraphUser>("/me/manager").await {
         Ok(mgr) => {
             println!("graph: GET /v1.0/me/manager");
@@ -30,13 +24,11 @@ pub async fn run() -> Result<(), Error> {
             print_manager(&mgr);
             Ok(())
         }
-        Err(aad::Error::HttpStatus { status, .. })
-            if status == reqwest::StatusCode::NOT_FOUND =>
-        {
+        Err(Error::HttpStatus { status, .. }) if status == reqwest::StatusCode::NOT_FOUND => {
             println!("(no manager configured in Entra ID for this user)");
             Ok(())
         }
-        Err(e) => Err(e.into()),
+        Err(e) => Err(e),
     }
 }
 

@@ -4,13 +4,7 @@
 
 use serde::Deserialize;
 
-use crate::aad;
-
-#[derive(Debug, thiserror::Error)]
-pub enum Error {
-    #[error("{0}")]
-    Aad(#[from] aad::Error),
-}
+use crate::{Result, aad};
 
 #[derive(Deserialize)]
 struct ListResponse {
@@ -52,9 +46,8 @@ struct PrivacyProfile {
     statement_url: Option<String>,
 }
 
-pub async fn run() -> Result<(), Error> {
+pub async fn run() -> Result<()> {
     let list: ListResponse = aad::graph_get("/organization").await?;
-
     println!("graph: GET /v1.0/organization");
     for org in &list.value {
         println!();

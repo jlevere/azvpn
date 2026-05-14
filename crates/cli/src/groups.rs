@@ -12,13 +12,7 @@
 
 use serde::Deserialize;
 
-use crate::aad;
-
-#[derive(Debug, thiserror::Error)]
-pub enum Error {
-    #[error("{0}")]
-    Aad(#[from] aad::Error),
-}
+use crate::{Result, aad};
 
 #[derive(Deserialize)]
 struct ListResponse {
@@ -38,7 +32,7 @@ struct DirectoryObject {
     mail_enabled: Option<bool>,
 }
 
-pub async fn run() -> Result<(), Error> {
+pub async fn run() -> Result<()> {
     let list: ListResponse = aad::graph_get("/me/memberOf?$top=999").await?;
 
     println!("graph: GET /v1.0/me/memberOf");
@@ -62,12 +56,8 @@ pub async fn run() -> Result<(), Error> {
         .all(|o| o.display_name.is_none());
     if all_names_hidden && !(groups.is_empty() && roles.is_empty()) {
         println!();
-        println!(
-            "note: every property returned null — the Azure VPN client token is"
-        );
-        println!(
-            "      scoped to User.Read; group names need Group.Read.All. The IDs"
-        );
+        println!("note: every property returned null — the Azure VPN client token is");
+        println!("      scoped to User.Read; group names need Group.Read.All. The IDs");
         println!("      below are valid memberships, just unlabeled.");
     }
 
