@@ -1,39 +1,92 @@
-//! `azvpn connect` — thin wrapper. All orchestration lives in
-//! `azvpn_core::commands::connect`; the CLI's job is parsing arguments
-//! and surfacing the device-code prompt to the user.
+//! `azvpn connect` — drives the AAD device-code flow, then hands a fresh
+//! access token to `core::commands::connect`.
+//!
+//! Auth is the CLI's responsibility (we have $HOME, a terminal, and the
+//! user's browser; the daemon has none of those). For AAD profiles we
+//! either reuse a cached token or run the device-code flow; for
+//! certificate profiles we pass `None` through.
 
 use std::net::SocketAddr;
 use std::path::Path;
 
-use azvpn_auth::DeviceCodePrompt;
-use azvpn_core::commands::connect::{self, ConnectOptions, DeviceCodeUi};
+use azvpn_auth::{AadConfig, DeviceCodeFlow, DeviceCodePrompt, Token, TokenCache};
+use azvpn_core::commands::connect::{self, ConnectOptions};
 use azvpn_core::commands::shutdown::{self, CancellationToken};
+use azvpn_profile::{AuthType, VpnProfile};
 
 use crate::Result;
 
-/// Print the device-code prompt to stderr and try to open the verification
-/// URL in the user's browser. Runs as the `SUDO_USER` when invoked under
-/// sudo so the URL opens in the user's session, not root's.
-struct StderrDeviceCodeUi;
+pub async fn run(
+    profile_path: &Path,
+    openvpn_binary: &Path,
+    mgmt_addr: SocketAddr,
+    verbose: bool,
+) -> Result<()> {
+    let profile = VpnProfile::from_file(profile_path)?;
+    let access_token = ensure_access_token(&profile).await?;
 
-impl DeviceCodeUi for StderrDeviceCodeUi {
-    fn prompt(&mut self, p: &DeviceCodePrompt) {
-        eprintln!();
-        eprintln!("  Open:  {}", p.verification_uri);
-        eprintln!("  Code:  {}", p.user_code);
-        eprintln!();
-        eprintln!("{}", p.message);
-        eprintln!();
-        open_browser(&p.verification_uri);
+    let opts = ConnectOptions {
+        profile_path: profile_path.to_owned(),
+        openvpn_binary: openvpn_binary.to_owned(),
+        mgmt_addr,
+        verbose,
+    };
+    let cancel = CancellationToken::new();
+    shutdown::listen_for_signals(cancel.clone());
+    connect::run(opts, access_token, cancel).await?;
+    Ok(())
+}
+
+/// Resolve a usable AAD access token for the profile. Returns `None`
+/// for certificate profiles. Uses a valid cached token if one exists;
+/// otherwise runs the device-code flow and caches the result.
+async fn ensure_access_token(profile: &VpnProfile) -> Result<Option<String>> {
+    match profile.clientauth.auth_type {
+        AuthType::Certificate => Ok(None),
+        AuthType::Aad => {
+            let aad_profile = profile.clientauth.aad.as_ref().ok_or_else(|| {
+                azvpn_core::Error::Other("AAD auth requires <aad> config block".into())
+            })?;
+            let aad_config = AadConfig::from(aad_profile);
+            let cache = TokenCache::new(&TokenCache::default_path());
+
+            // A cache hit *must* include a refresh_token — without one
+            // we can't drive the post-connect Graph/ARM helpers.
+            // Older caches that pre-date refresh-token persistence are
+            // treated as misses so the next device-code flow rebuilds.
+            let token = match cache.load().filter(|t| t.refresh_token.is_some()) {
+                Some(cached) => cached,
+                None => run_device_code(aad_config, &cache).await?,
+            };
+            Ok(Some(token.access_token))
+        }
     }
+}
+
+async fn run_device_code(config: AadConfig, cache: &TokenCache) -> Result<Token> {
+    let flow = DeviceCodeFlow::new(config);
+    let prompt = flow.start().await?;
+    print_prompt(&prompt);
+    open_browser(&prompt.verification_uri);
+    let token = flow.poll_for_token(&prompt).await?;
+    cache.save(&token);
+    Ok(token)
+}
+
+fn print_prompt(p: &DeviceCodePrompt) {
+    eprintln!();
+    eprintln!("  Open:  {}", p.verification_uri);
+    eprintln!("  Code:  {}", p.user_code);
+    eprintln!();
+    eprintln!("{}", p.message);
+    eprintln!();
 }
 
 /// Open the URL in the user's default browser. Under sudo, drop
 /// privileges to `SUDO_UID` before exec so the browser launches in the
-/// real user's Aqua session instead of root's. Replacing the old
-/// `sudo -u USER open URL` shell-out: this just calls the syscall sudo
-/// would have called (`setuid`) and execs the same `open(1)` binary,
-/// without the sudo middleware in between.
+/// real user's Aqua session instead of root's. This becomes obsolete
+/// once the daemon split lands — the CLI will run as the user
+/// natively.
 fn open_browser(url: &str) {
     #[cfg(unix)]
     if let Some(uid) = std::env::var("SUDO_UID")
@@ -67,22 +120,4 @@ fn spawn_open_as_uid(url: &str, uid: u32) {
     if let Err(e) = cmd.spawn() {
         tracing::warn!(error = %e, "failed to spawn open(1) for browser");
     }
-}
-
-pub async fn run(
-    profile_path: &Path,
-    openvpn_binary: &Path,
-    mgmt_addr: SocketAddr,
-    verbose: bool,
-) -> Result<()> {
-    let opts = ConnectOptions {
-        profile_path: profile_path.to_owned(),
-        openvpn_binary: openvpn_binary.to_owned(),
-        mgmt_addr,
-        verbose,
-    };
-    let cancel = CancellationToken::new();
-    shutdown::listen_for_signals(cancel.clone());
-    connect::run(opts, StderrDeviceCodeUi, cancel).await?;
-    Ok(())
 }

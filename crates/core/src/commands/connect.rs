@@ -1,16 +1,16 @@
-//! Connect lifecycle — loads the profile, drives AAD device-code if needed,
-//! spawns openvpn, watches the management interface, and applies DNS.
+//! Connect lifecycle — loads the profile, spawns openvpn, watches the
+//! management interface, applies DNS and routes.
 //!
-//! The only piece a caller has to supply is `DeviceCodeUi` — the device-code
-//! prompt has to surface somewhere the user can see it, but how (eprintln,
-//! GUI dialog, IPC to a frontend) is a presentation choice. Everything else
-//! is self-contained.
+//! Auth is **not** this layer's job. The caller (CLI today, daemon
+//! eventually) hands in a pre-acquired AAD access token — running the
+//! device-code flow, prompting the user, opening a browser, and
+//! managing the token cache are all user-session concerns. Certificate
+//! profiles pass `None` for the token; AAD profiles must supply one.
 
 use std::io::Write as _;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 
-use azvpn_auth::{AadConfig, DeviceCodeFlow, DeviceCodePrompt, TokenCache};
 use azvpn_openvpn::{ConfigBuilder, Event, OpenVpnConfig, OpenVpnProcess, PushOptions, VpnState};
 use azvpn_profile::{AuthType, VpnProfile};
 use tokio_util::sync::CancellationToken;
@@ -32,18 +32,11 @@ pub struct ConnectOptions {
     pub verbose: bool,
 }
 
-/// Surface the device-code prompt to the user. Implementations are
-/// presentation-only: print to stderr, pop a dialog, emit an IPC message,
-/// whatever fits the frontend.
-pub trait DeviceCodeUi: Send {
-    fn prompt(&mut self, prompt: &DeviceCodePrompt);
-}
-
 #[allow(clippy::too_many_lines)]
 #[instrument(skip_all, name = "connect", fields(profile = %opts.profile_path.display()))]
-pub async fn run<U: DeviceCodeUi>(
+pub async fn run(
     opts: ConnectOptions,
-    mut ui: U,
+    access_token: Option<String>,
     cancel: CancellationToken,
 ) -> Result<()> {
     let profile = VpnProfile::from_file(&opts.profile_path)?;
@@ -52,7 +45,7 @@ pub async fn run<U: DeviceCodeUi>(
         .ok_or_else(|| Error::Other("no server in profile".into()))?;
     info!(server = %server.fqdn, "loaded profile");
 
-    let auth_file = obtain_auth_file(&profile, &mut ui).await?;
+    let auth_file = build_auth_file(&profile, access_token.as_deref())?;
 
     let mut builder = ConfigBuilder::new(&profile, opts.mgmt_addr);
     if let Some(ref af) = auth_file {
@@ -182,46 +175,27 @@ pub async fn run<U: DeviceCodeUi>(
     Ok(())
 }
 
+/// Build the openvpn `auth-user-pass` file from a caller-supplied AAD
+/// access token. AAD profiles require `Some(token)`; certificate
+/// profiles pass `None`. Returns the tempfile (deleted on drop).
 #[instrument(skip_all, name = "auth")]
-async fn obtain_auth_file<U: DeviceCodeUi>(
+fn build_auth_file(
     profile: &VpnProfile,
-    ui: &mut U,
+    access_token: Option<&str>,
 ) -> Result<Option<tempfile::NamedTempFile>> {
-    match profile.clientauth.auth_type {
-        AuthType::Aad => {
-            let aad_profile = profile
-                .clientauth
-                .aad
-                .as_ref()
-                .ok_or_else(|| Error::Other("AAD auth requires <aad> config block".into()))?;
-
-            let aad_config = AadConfig::from(aad_profile);
-            let cache = TokenCache::new(&TokenCache::default_path());
-
-            // Require a refresh token in the cache — without one we can't
-            // drive any of the post-connect canonical APIs. A cached token
-            // from an older version that never persisted the refresh side
-            // is treated as a cache miss so the next device-code flow
-            // rebuilds it correctly.
-            let token = if let Some(cached) = cache.load().filter(|t| t.refresh_token.is_some()) {
-                cached
-            } else {
-                let flow = DeviceCodeFlow::new(aad_config);
-                let prompt = flow.start().await?;
-                ui.prompt(&prompt);
-                let token = flow.poll_for_token(&prompt).await?;
-                cache.save(&token);
-                token
-            };
-
-            info!("AAD token ready");
-
+    match (&profile.clientauth.auth_type, access_token) {
+        (AuthType::Aad, Some(token)) => {
             let mut f = tempfile::Builder::new().prefix("azvpn-auth-").tempfile()?;
             writeln!(f, "AzureAD")?;
-            writeln!(f, "{}", token.access_token)?;
+            writeln!(f, "{token}")?;
+            info!("wrote AAD auth-user-pass file");
             Ok(Some(f))
         }
-        AuthType::Certificate => {
+        (AuthType::Aad, None) => Err(Error::Other(
+            "AAD profile requires an access token (caller must run \
+             the device-code flow before invoking connect)".into(),
+        )),
+        (AuthType::Certificate, _) => {
             info!("certificate auth — no token needed");
             Ok(None)
         }

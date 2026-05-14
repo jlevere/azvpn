@@ -112,6 +112,7 @@ version = "0.1.0"
 dependencies = [
  "azvpn-auth",
  "azvpn-core",
+ "azvpn-profile",
  "base64",
  "clap",
  "hickory-resolver",
