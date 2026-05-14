@@ -24,6 +24,7 @@ struct DeviceCodeResponse {
 struct TokenResponse {
     access_token: Option<String>,
     expires_in: Option<u64>,
+    refresh_token: Option<String>,
     error: Option<String>,
     error_description: Option<String>,
 }
@@ -109,10 +110,15 @@ impl DeviceCodeFlow {
 
             if let Some(token) = resp.access_token {
                 let expires_in = resp.expires_in.unwrap_or(3600);
-                info!("token acquired, expires in {expires_in}s");
+                let has_refresh = resp.refresh_token.is_some();
+                info!(
+                    expires_in,
+                    has_refresh, "token acquired"
+                );
                 return Ok(Token {
                     access_token: token,
                     expires_at: SystemTime::now() + Duration::from_secs(expires_in),
+                    refresh_token: resp.refresh_token,
                 });
             }
 

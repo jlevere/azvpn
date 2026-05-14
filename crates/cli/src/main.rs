@@ -8,6 +8,7 @@ mod connect;
 mod disconnect;
 mod dns;
 mod info;
+mod me;
 mod status;
 mod whoami;
 
@@ -53,7 +54,10 @@ enum Command {
     Whoami,
     /// Comprehensive status dump (session, identity, DNS, routes)
     Info,
-    /// DNS queries: verify resolution, sweep for private endpoints
+    /// Call Microsoft Graph /v1.0/me using a refreshed token — the same
+    /// query the official Microsoft Azure VPN Client makes post-auth
+    Me,
+    /// DNS queries — verify split-horizon resolution against the gateway
     #[command(subcommand)]
     Dns(DnsCommand),
 }
@@ -97,6 +101,7 @@ async fn main() {
         Command::Status => report(status::run()),
         Command::Whoami => report(whoami::run()),
         Command::Info => report(info::run().await),
+        Command::Me => report(me::run().await),
         Command::Dns(DnsCommand::Lookup { host, via }) => {
             report(dns::lookup(&host, via.as_deref()).await)
         }

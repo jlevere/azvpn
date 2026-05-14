@@ -10,6 +10,11 @@ use crate::Token;
 struct CachedToken {
     access_token: String,
     expires_at_epoch: u64,
+    /// Refresh token for acquiring tokens with different audiences
+    /// (Graph, ARM, etc.). Optional for backward compatibility with
+    /// cache files written by earlier versions.
+    #[serde(default)]
+    refresh_token: Option<String>,
 }
 
 pub struct TokenCache {
@@ -38,11 +43,21 @@ impl TokenCache {
             return None;
         }
 
-        info!("using cached token");
+        info!(has_refresh = cached.refresh_token.is_some(), "using cached token");
         Some(Token {
             access_token: cached.access_token,
             expires_at,
+            refresh_token: cached.refresh_token,
         })
+    }
+
+    /// Read just the `refresh_token` from cache without expiry-checking the
+    /// access token. Refresh tokens have a separate (much longer) lifetime
+    /// than access tokens — they outlive the access token by design.
+    pub fn load_refresh_token(&self) -> Option<String> {
+        let data = std::fs::read_to_string(&self.path).ok()?;
+        let cached: CachedToken = serde_json::from_str(&data).ok()?;
+        cached.refresh_token
     }
 
     pub fn save(&self, token: &Token) {
@@ -55,6 +70,7 @@ impl TokenCache {
         let cached = CachedToken {
             access_token: token.access_token.clone(),
             expires_at_epoch,
+            refresh_token: token.refresh_token.clone(),
         };
 
         if let Ok(data) = serde_json::to_string(&cached) {

@@ -18,6 +18,7 @@ azvpn-openvpn = { workspace = true }
 azvpn-profile = { workspace = true }
 base64 = { workspace = true }
 clap = { workspace = true }
+graph-rs-sdk = { workspace = true }
 hickory-resolver = { workspace = true }
 libc = { workspace = true }
 net-route = { workspace = true }

@@ -1,7 +1,9 @@
 mod device_code;
+mod refresh;
 mod token_cache;
 
 pub use device_code::DeviceCodeFlow;
+pub use refresh::{ARM_RESOURCE, GRAPH_RESOURCE, RefreshGrant};
 pub use token_cache::TokenCache;
 
 #[derive(Debug, thiserror::Error)]
@@ -54,6 +56,10 @@ impl From<&azvpn_profile::AadConfig> for AadConfig {
 pub struct Token {
     pub access_token: String,
     pub expires_at: std::time::SystemTime,
+    /// Long-lived refresh token returned when the original scope included
+    /// `offline_access`. Used to acquire access tokens for other audiences
+    /// (Microsoft Graph, ARM, etc.) without re-prompting the user.
+    pub refresh_token: Option<String>,
 }
 
 impl Token {
