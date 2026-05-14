@@ -21,7 +21,7 @@ use tokio_util::sync::CancellationToken;
 use tracing::{info, instrument};
 
 use crate::dns::{self, DnsManager};
-use crate::route::{RouteManager, RouteSpec};
+use crate::route::{self, RouteManager};
 use crate::session::RunningSession;
 use crate::{Error, Result};
 
@@ -117,11 +117,14 @@ pub async fn run(
     let mut push_opts = PushOptions::default();
     let mut dns_manager = dns::new_manager();
     let mut route_manager = RouteManager::new()?;
-    // Push-reply inputs are stable for the connection's lifetime; openvpn
-    // can re-emit `Connected` after each hold-release cycle, so we guard
-    // both side-effects to fire once.
-    let mut dns_installed = false;
-    let mut routes_installed = false;
+    // DNS apply replaces; route apply diffs. Both are safe to call
+    // repeatedly, so we gate only on "has the kernel-visible interface
+    // been up at least once" — the first apply waits for CONNECTED so
+    // DNS / routes don't land before the tunnel is reachable; subsequent
+    // PUSH_REPLYs (TLS renegotiation, gateway-side reconfig) re-apply
+    // immediately so the live state tracks the gateway's authoritative
+    // view.
+    let mut have_connected = false;
     let mut reneg_creds = RenegCreds::for_profile(&profile);
 
     loop {
@@ -147,20 +150,17 @@ pub async fn run(
                             state: state.clone(),
                             local_ip,
                         });
-                        if *state == VpnState::Connected {
+                        if *state == VpnState::Connected && !have_connected {
                             info!(server = %server.fqdn, "connected");
-                            if !dns_installed
-                                && apply_dns(dns_manager.as_mut(), &mut session, &profile, &push_opts)
-                            {
-                                dns_installed = true;
-                            }
-                            if !routes_installed {
-                                if let Err(e) = install_routes(&mut route_manager, &push_opts).await {
-                                    tracing::error!(error = %e, "route install failed");
-                                } else {
-                                    routes_installed = true;
-                                }
-                            }
+                            have_connected = true;
+                            apply_tunnel_state(
+                                dns_manager.as_mut(),
+                                &mut route_manager,
+                                &mut session,
+                                &profile,
+                                &push_opts,
+                            )
+                            .await;
                         }
                         if *state == VpnState::Exiting {
                             info!("openvpn exiting");
@@ -225,6 +225,20 @@ pub async fn run(
                         push_opts = opts.clone();
                         session.record_pushed(opts.clone());
                         let _ = pushed_tx.send(Some(opts));
+                        if have_connected {
+                            // Reneg path — gateway has re-pushed config
+                            // for an already-up tunnel. Re-diff and
+                            // apply so the kernel state tracks the
+                            // gateway's authoritative view.
+                            apply_tunnel_state(
+                                dns_manager.as_mut(),
+                                &mut route_manager,
+                                &mut session,
+                                &profile,
+                                &push_opts,
+                            )
+                            .await;
+                        }
                     }
                     Event::Info(msg) | Event::Log(msg) => {
                         info!("{msg}");
@@ -409,7 +423,25 @@ fn build_auth_file(
     }
 }
 
-async fn install_routes(
+/// Drive both DNS and route apply from the current `push_opts`. Used
+/// for the first apply (gated on `STATE: CONNECTED`) and for every
+/// subsequent push-reply on the same tunnel (TLS renegotiation,
+/// gateway-side reconfig). Both subsystems are set-replace internally,
+/// so the second call diffs and only changes what actually moved.
+async fn apply_tunnel_state(
+    dns_manager: &mut dyn DnsManager,
+    route_manager: &mut RouteManager,
+    session: &mut RunningSession,
+    profile: &VpnProfile,
+    push_opts: &PushOptions,
+) {
+    apply_dns(dns_manager, session, profile, push_opts);
+    if let Err(e) = apply_routes(route_manager, push_opts).await {
+        tracing::error!(error = %e, "route apply failed");
+    }
+}
+
+async fn apply_routes(
     manager: &mut RouteManager,
     push_opts: &PushOptions,
 ) -> Result<()> {
@@ -417,33 +449,45 @@ async fn install_routes(
         tracing::warn!("no route-gateway in push reply — skipping route install");
         return Ok(());
     };
-    if push_opts.routes.is_empty() {
-        info!("no pushed routes to install");
-        return Ok(());
-    }
-    let specs: Vec<RouteSpec> = push_opts.routes.iter().map(RouteSpec::from).collect();
-    manager.apply(&specs, gateway).await?;
+    // Filter out routes the management-line parser admitted with an
+    // invalid (family, prefix-length) combo. Real gateways don't do
+    // this, but a bug or hostile push shouldn't crash the manager.
+    let desired: Vec<ipnet::IpNet> = push_opts
+        .routes
+        .iter()
+        .filter_map(|r| match route::pushed_to_ipnet(r) {
+            Ok(net) => Some(net),
+            Err(e) => {
+                tracing::warn!(
+                    destination = %r.destination,
+                    prefix = r.prefix,
+                    error = %e,
+                    "skipping route with invalid prefix length"
+                );
+                None
+            }
+        })
+        .collect();
+    manager.apply(&desired, gateway).await?;
     Ok(())
 }
 
-/// Returns `true` when the apply ran (regardless of success), `false`
-/// when there was nothing to do — the caller uses that to decide whether
-/// to mark DNS as "installed" for this connection and skip future
-/// re-emits of `Connected`.
+/// Apply DNS suffixes + servers. Idempotent in the trait impl; safe to
+/// call on every push-reply.
 fn apply_dns(
     manager: &mut dyn DnsManager,
     session: &mut RunningSession,
     profile: &VpnProfile,
     push_opts: &PushOptions,
-) -> bool {
+) {
     let (suffixes, dns_servers) = collect_dns_inputs(profile, push_opts);
     if suffixes.is_empty() {
         info!("no DNS suffixes in profile or push-reply, skipping resolver setup");
-        return false;
+        return;
     }
     if dns_servers.is_empty() {
         tracing::warn!("DNS suffixes configured but no DNS servers available");
-        return false;
+        return;
     }
 
     info!(?suffixes, ?dns_servers, "applying DNS resolvers");
@@ -451,7 +495,6 @@ fn apply_dns(
         Ok(()) => session.record_dns(&suffixes, &dns_servers),
         Err(e) => tracing::error!(error = %e, "failed to apply DNS resolvers"),
     }
-    true
 }
 
 fn collect_dns_inputs<'p>(

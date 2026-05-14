@@ -6,54 +6,78 @@
 //! the `net-route` crate eliminates 20-ish fork+execs per connect and
 //! mirrors Mullvad's "Rust owns the network state" pattern.
 //!
+//! [`RouteManager::apply`] is **set-replace** semantics: pass the
+//! desired route set + gateway, and the manager diffs against what's
+//! already installed, deleting routes you no longer want and adding
+//! the new ones. That makes mid-connection re-pushes (TLS reneg with a
+//! changed route set, HA failover) idempotent and minimal-impact —
+//! the only kernel changes are the actual deltas.
+//!
 //! [`RouteManager::clear`] is `async` (the underlying delete is), so
 //! callers must `.await` it on the connect happy path. The `Drop` impl
 //! is a best-effort fallback that warns if routes leak; it can't run
 //! async work cleanly so for a non-panicking shutdown the explicit
 //! `clear().await` is the right path.
 
+use std::collections::HashMap;
 use std::net::IpAddr;
 
 use azvpn_openvpn::PushedRoute;
+use ipnet::{IpNet, Ipv4Net, Ipv6Net};
 use net_route::{Handle, Route};
 use tracing::{debug, info, warn};
-
-/// One route to install. Constructed by the caller from any source
-/// (push-reply, profile XML, manual entry); the manager doesn't care
-/// where they came from.
-#[derive(Debug, Clone)]
-pub struct RouteSpec {
-    pub destination: IpAddr,
-    pub prefix: u8,
-}
-
-impl From<&PushedRoute> for RouteSpec {
-    fn from(r: &PushedRoute) -> Self {
-        Self {
-            destination: r.destination,
-            prefix: r.prefix,
-        }
-    }
-}
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
     #[error("route handle: {0}")]
     Handle(std::io::Error),
-    #[error("route add: {dest}/{prefix}: {source}")]
+    #[error("route add: {dest}: {source}")]
     Add {
-        dest: IpAddr,
-        prefix: u8,
+        dest: IpNet,
         #[source]
         source: std::io::Error,
     },
-    #[error("route delete: {dest}/{prefix}: {source}")]
+    #[error("route delete: {dest}: {source}")]
     Delete {
-        dest: IpAddr,
-        prefix: u8,
+        dest: IpNet,
         #[source]
         source: std::io::Error,
     },
+}
+
+/// Lossless conversion of a parsed-from-PUSH_REPLY route into the typed
+/// CIDR form used everywhere downstream. Returns `Err` for an invalid
+/// (address-family, prefix-length) pairing — shouldn't normally happen
+/// because the management-line parser bounds prefixes at parse time,
+/// but we'd rather skip a bad route with a warn than panic.
+pub fn pushed_to_ipnet(r: &PushedRoute) -> Result<IpNet, ipnet::PrefixLenError> {
+    match r.destination {
+        IpAddr::V4(a) => Ipv4Net::new(a, r.prefix).map(IpNet::V4),
+        IpAddr::V6(a) => Ipv6Net::new(a, r.prefix).map(IpNet::V6),
+    }
+}
+
+/// Compute the (`to_add`, `to_remove`) split between `current` and `desired`
+/// route sets, where each route is keyed by destination CIDR and carries
+/// its gateway. A CIDR present in both with a different gateway counts
+/// as both add and remove (gateway change → re-install). Pure function
+/// — exists so the diff is unit-testable without touching the kernel.
+#[must_use]
+fn diff(
+    current: &HashMap<IpNet, IpAddr>,
+    desired: &HashMap<IpNet, IpAddr>,
+) -> (Vec<IpNet>, Vec<IpNet>) {
+    let to_remove: Vec<IpNet> = current
+        .iter()
+        .filter(|(net, gw)| desired.get(*net).is_none_or(|new_gw| new_gw != *gw))
+        .map(|(net, _)| *net)
+        .collect();
+    let to_add: Vec<IpNet> = desired
+        .iter()
+        .filter(|(net, gw)| current.get(*net).is_none_or(|old_gw| old_gw != *gw))
+        .map(|(net, _)| *net)
+        .collect();
+    (to_add, to_remove)
 }
 
 /// Owns the set of routes we've installed for the live tunnel. Holds an
@@ -61,7 +85,7 @@ pub enum Error {
 /// the same kernel session.
 pub struct RouteManager {
     handle: Handle,
-    installed: Vec<Route>,
+    installed: HashMap<IpNet, IpAddr>,
 }
 
 impl RouteManager {
@@ -69,36 +93,61 @@ impl RouteManager {
         let handle = Handle::new().map_err(Error::Handle)?;
         Ok(Self {
             handle,
-            installed: Vec::new(),
+            installed: HashMap::new(),
         })
     }
 
-    /// Install every spec via `gateway`. Idempotent in the sense that
-    /// re-calling with the same inputs re-adds: the kernel will return
-    /// EEXIST which we treat as success (gateway re-emits Connected on
-    /// every hold-release; we don't want to log errors on each cycle).
-    pub async fn apply(&mut self, specs: &[RouteSpec], gateway: IpAddr) -> Result<(), Error> {
-        for spec in specs {
-            let route = Route::new(spec.destination, spec.prefix).with_gateway(gateway);
+    /// Replace the live route set with `desired`, all going via `gateway`.
+    /// Computes the diff against currently-installed routes, deletes
+    /// removed entries, adds new ones — first call from an empty state
+    /// adds everything, subsequent calls only touch what changed.
+    /// `EEXIST` on add is treated as success (the kernel already has it).
+    pub async fn apply(&mut self, desired: &[IpNet], gateway: IpAddr) -> Result<(), Error> {
+        let desired_map: HashMap<IpNet, IpAddr> =
+            desired.iter().map(|net| (*net, gateway)).collect();
+        let (to_add, to_remove) = diff(&self.installed, &desired_map);
+
+        for net in &to_remove {
+            let route = Route::new(net.network(), net.prefix_len()).with_gateway(gateway);
+            match self.handle.delete(&route).await {
+                Ok(()) => {
+                    debug!(dest = %net, "route removed");
+                }
+                Err(e) => {
+                    // Non-fatal during reapply — the route may already
+                    // be gone (race with manual `route delete`, kernel
+                    // reachability cleanup). Log and continue so we
+                    // don't get stuck holding stale state.
+                    warn!(dest = %net, error = %e, "route delete during apply failed");
+                }
+            }
+            self.installed.remove(net);
+        }
+
+        for net in &to_add {
+            let route = Route::new(net.network(), net.prefix_len()).with_gateway(gateway);
             match self.handle.add(&route).await {
                 Ok(()) => {
-                    debug!(dest = %spec.destination, prefix = spec.prefix, %gateway, "route added");
-                    self.installed.push(route);
+                    debug!(dest = %net, %gateway, "route added");
+                    self.installed.insert(*net, gateway);
                 }
                 Err(e) if e.raw_os_error() == Some(libc::EEXIST) => {
-                    debug!(dest = %spec.destination, prefix = spec.prefix, "route already present");
-                    self.installed.push(route);
+                    debug!(dest = %net, "route already present in kernel");
+                    self.installed.insert(*net, gateway);
                 }
                 Err(source) => {
-                    return Err(Error::Add {
-                        dest: spec.destination,
-                        prefix: spec.prefix,
-                        source,
-                    });
+                    return Err(Error::Add { dest: *net, source });
                 }
             }
         }
-        info!(installed = self.installed.len(), %gateway, "routes installed");
+
+        info!(
+            installed = self.installed.len(),
+            added = to_add.len(),
+            removed = to_remove.len(),
+            %gateway,
+            "route apply complete"
+        );
         Ok(())
     }
 
@@ -106,16 +155,12 @@ impl RouteManager {
     /// logged but don't abort — leftover routes are recoverable on next
     /// connect, partial cleanup is better than no cleanup.
     pub async fn clear(&mut self) {
-        let routes = std::mem::take(&mut self.installed);
-        let count = routes.len();
-        for route in routes {
+        let installed = std::mem::take(&mut self.installed);
+        let count = installed.len();
+        for (net, gateway) in installed {
+            let route = Route::new(net.network(), net.prefix_len()).with_gateway(gateway);
             if let Err(e) = self.handle.delete(&route).await {
-                warn!(
-                    dest = %route.destination,
-                    prefix = route.prefix,
-                    error = %e,
-                    "route delete failed"
-                );
+                warn!(dest = %net, error = %e, "route delete failed");
             }
         }
         info!(removed = count, "routes removed");
@@ -142,28 +187,107 @@ mod tests {
     use super::*;
     use azvpn_openvpn::AddrFamily;
 
+    fn net(s: &str) -> IpNet {
+        s.parse().unwrap()
+    }
+
+    fn gw(s: &str) -> IpAddr {
+        s.parse().unwrap()
+    }
+
     #[test]
-    fn from_pushed_v4() {
+    fn pushed_to_ipnet_v4() {
         let r = PushedRoute {
             destination: "10.0.0.0".parse().unwrap(),
             prefix: 24,
             gateway: None,
             family: AddrFamily::V4,
         };
-        let spec = RouteSpec::from(&r);
-        assert_eq!(spec.destination, "10.0.0.0".parse::<IpAddr>().unwrap());
-        assert_eq!(spec.prefix, 24);
+        let n = pushed_to_ipnet(&r).unwrap();
+        assert_eq!(n, net("10.0.0.0/24"));
     }
 
     #[test]
-    fn from_pushed_v6() {
+    fn pushed_to_ipnet_v6() {
         let r = PushedRoute {
             destination: "fd00::".parse().unwrap(),
             prefix: 64,
             gateway: None,
             family: AddrFamily::V6,
         };
-        let spec = RouteSpec::from(&r);
-        assert_eq!(spec.prefix, 64);
+        let n = pushed_to_ipnet(&r).unwrap();
+        assert_eq!(n, net("fd00::/64"));
+    }
+
+    #[test]
+    fn pushed_to_ipnet_rejects_oversized_prefix() {
+        let r = PushedRoute {
+            // u8 max for prefix → invalid for IPv4 (>32)
+            destination: "10.0.0.0".parse().unwrap(),
+            prefix: 200,
+            gateway: None,
+            family: AddrFamily::V4,
+        };
+        assert!(pushed_to_ipnet(&r).is_err());
+    }
+
+    #[test]
+    fn diff_first_install_adds_everything() {
+        let current = HashMap::new();
+        let mut desired = HashMap::new();
+        desired.insert(net("10.0.0.0/24"), gw("10.0.8.1"));
+        desired.insert(net("10.1.0.0/16"), gw("10.0.8.1"));
+
+        let (to_add, to_remove) = diff(&current, &desired);
+        assert_eq!(to_add.len(), 2);
+        assert!(to_remove.is_empty());
+    }
+
+    #[test]
+    fn diff_unchanged_state_is_noop() {
+        let mut current = HashMap::new();
+        current.insert(net("10.0.0.0/24"), gw("10.0.8.1"));
+        let desired = current.clone();
+
+        let (to_add, to_remove) = diff(&current, &desired);
+        assert!(to_add.is_empty());
+        assert!(to_remove.is_empty());
+    }
+
+    #[test]
+    fn diff_route_removed_from_desired_set() {
+        let mut current = HashMap::new();
+        current.insert(net("10.0.0.0/24"), gw("10.0.8.1"));
+        current.insert(net("10.1.0.0/16"), gw("10.0.8.1"));
+        let mut desired = HashMap::new();
+        desired.insert(net("10.0.0.0/24"), gw("10.0.8.1"));
+
+        let (to_add, to_remove) = diff(&current, &desired);
+        assert!(to_add.is_empty());
+        assert_eq!(to_remove, vec![net("10.1.0.0/16")]);
+    }
+
+    #[test]
+    fn diff_route_added_to_desired_set() {
+        let mut current = HashMap::new();
+        current.insert(net("10.0.0.0/24"), gw("10.0.8.1"));
+        let mut desired = current.clone();
+        desired.insert(net("10.1.0.0/16"), gw("10.0.8.1"));
+
+        let (to_add, to_remove) = diff(&current, &desired);
+        assert_eq!(to_add, vec![net("10.1.0.0/16")]);
+        assert!(to_remove.is_empty());
+    }
+
+    #[test]
+    fn diff_gateway_change_triggers_reinstall() {
+        let mut current = HashMap::new();
+        current.insert(net("10.0.0.0/24"), gw("10.0.8.1"));
+        let mut desired = HashMap::new();
+        desired.insert(net("10.0.0.0/24"), gw("10.0.9.1"));
+
+        let (to_add, to_remove) = diff(&current, &desired);
+        assert_eq!(to_add, vec![net("10.0.0.0/24")]);
+        assert_eq!(to_remove, vec![net("10.0.0.0/24")]);
     }
 }

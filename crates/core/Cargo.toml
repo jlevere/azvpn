@@ -11,6 +11,7 @@ repository.workspace = true
 azvpn-auth = { workspace = true }
 azvpn-openvpn = { workspace = true }
 azvpn-profile = { workspace = true }
+ipnet = { workspace = true }
 libc = { workspace = true }
 net-route = { workspace = true }
 serde = { workspace = true }
