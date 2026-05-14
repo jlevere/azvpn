@@ -60,7 +60,14 @@ pub async fn run(
             let aad_config = AadConfig::from(aad_profile);
             let cache = TokenCache::new(&TokenCache::default_path());
 
-            let token = if let Some(cached) = cache.load() {
+            // Require a refresh token in the cache as well — without one we
+            // can't drive any of the post-connect canonical APIs (`azvpn me`,
+            // future ARM calls). A cached token from an older version that
+            // never persisted the refresh side is treated as a cache miss
+            // so the next device-code flow rebuilds it correctly.
+            let token = if let Some(cached) =
+                cache.load().filter(|t| t.refresh_token.is_some())
+            {
                 cached
             } else {
                 let flow = DeviceCodeFlow::new(aad_config);
