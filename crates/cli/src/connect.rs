@@ -198,9 +198,14 @@ fn install_dns(
     profile: &VpnProfile,
     push_opts: &PushOptions,
 ) -> Option<azvpn_tunnel_darwin::DnsGuard> {
-    let suffixes = profile.dns_suffixes();
+    let mut suffixes = profile.dns_suffixes();
+    if let Some(pushed) = push_opts.domain.as_deref() {
+        if !suffixes.iter().any(|s| s.trim_start_matches('.') == pushed) {
+            suffixes.push(pushed);
+        }
+    }
     if suffixes.is_empty() {
-        info!("no DNS suffixes in profile, skipping resolver setup");
+        info!("no DNS suffixes in profile or push-reply, skipping resolver setup");
         return None;
     }
 
