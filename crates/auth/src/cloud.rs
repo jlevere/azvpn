@@ -29,8 +29,8 @@ struct JwtContext {
 }
 
 pub fn read_context() -> Result<AadContext> {
-    let access = TokenCache::auto()
-        .load_access_token()
+    let access = TokenCache::last_used()
+        .and_then(|c| c.load_access_token())
         .ok_or(Error::NoCachedToken)?;
     extract_context(&access)
 }
@@ -51,7 +51,7 @@ fn extract_context(access_token: &str) -> Result<AadContext> {
 /// Exchange the cached refresh token for an access token scoped to
 /// `resource`. The CLI cache layout is assumed (see [`TokenCache`]).
 async fn exchange_for(scope: &str) -> Result<String> {
-    let cache = TokenCache::auto();
+    let cache = TokenCache::last_used().ok_or(Error::NoCachedToken)?;
     let access = cache.load_access_token().ok_or(Error::NoCachedToken)?;
     let refresh = cache.load_refresh_token().ok_or(Error::NoRefreshToken)?;
     let ctx = extract_context(&access)?;

@@ -8,7 +8,10 @@
 use std::path::Path;
 use std::time::{Duration, Instant};
 
-use azvpn_auth::{AadConfig, AuthCodeFlow, DeviceCodeFlow, DeviceCodePrompt, Token, TokenCache};
+use azvpn_auth::{
+    AadConfig, AuthCodeFlow, CacheKey, DeviceCodeFlow, DeviceCodePrompt, RefreshGrant, Token,
+    TokenCache,
+};
 use azvpn_ipc::ConnectRequest;
 use azvpn_profile::{AuthType, VpnProfile};
 
@@ -70,8 +73,14 @@ pub async fn run(profile_path: &Path, verbose: bool, auth_mode: AuthMode) -> Res
 /// Resolve a usable AAD access token for the profile. Returns `None`
 /// for certificate / usernamepass / radius profiles (those don't use
 /// AAD — the daemon writes a different auth-user-pass file shape).
-/// Uses a valid cached token if one exists; otherwise runs the
-/// requested interactive flow and caches the result.
+///
+/// Cache strategy, in order:
+/// 1. Valid cached access token (with RT for future refreshes) → use it.
+/// 2. Expired AT but cached RT → silent refresh-token grant.
+/// 3. Otherwise → interactive flow.
+///
+/// Only step (3) requires the user to do anything; (2) keeps the daily-
+/// driver session-resume path off the browser.
 async fn ensure_access_token(
     profile: &VpnProfile,
     auth_mode: AuthMode,
@@ -83,13 +92,50 @@ async fn ensure_access_token(
                 azvpn_core::Error::Other("AAD auth requires <aad> config block".into())
             })?;
             let aad_config = AadConfig::from(aad_profile);
-            let cache = TokenCache::auto();
+            let cache = TokenCache::for_profile(CacheKey::from(&aad_config));
 
-            let token = match cache.load().filter(|t| t.refresh_token.is_some()) {
-                Some(cached) => cached,
-                None => acquire_interactively(aad_config, &cache, auth_mode).await?,
-            };
+            if let Some(cached) = cache.load().filter(|t| t.refresh_token.is_some()) {
+                return Ok(Some(cached.access_token));
+            }
+
+            if let Some(rt) = cache.load_refresh_token()
+                && let Some(refreshed) = try_silent_refresh(&aad_config, &cache, &rt).await
+            {
+                return Ok(Some(refreshed.access_token));
+            }
+
+            let token = acquire_interactively(aad_config, &cache, auth_mode).await?;
             Ok(Some(token.access_token))
+        }
+    }
+}
+
+/// Exchange a cached refresh token for a fresh access token bound to the
+/// gateway audience, with the same scope shape device-code uses. Returns
+/// `None` on any AAD-side failure (RT past rotation grace, conditional-
+/// access change, revocation, network hiccup) so the caller falls
+/// through to interactive sign-in — never silently fails the connect.
+async fn try_silent_refresh(
+    config: &AadConfig,
+    cache: &TokenCache,
+    refresh_token: &str,
+) -> Option<Token> {
+    let grant = match RefreshGrant::new(&config.tenant_id, config.client_id()) {
+        Ok(g) => g,
+        Err(e) => {
+            tracing::warn!(error = %e, "refresh-grant init failed");
+            return None;
+        }
+    };
+    let scope = format!("{}/.default offline_access", config.audience);
+    match grant.exchange(refresh_token, &scope).await {
+        Ok(t) => {
+            eprintln!("refreshed cached session silently — no sign-in needed");
+            Some(cache.save_refresh_result(t, refresh_token))
+        }
+        Err(e) => {
+            tracing::info!(error = %e, "refresh-token grant failed; falling through to interactive");
+            None
         }
     }
 }

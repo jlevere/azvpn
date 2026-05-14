@@ -41,8 +41,8 @@ pub struct Summary {
 }
 
 fn load_claims() -> Result<Claims> {
-    let access = TokenCache::auto()
-        .load_access_token()
+    let access = TokenCache::last_used()
+        .and_then(|c| c.load_access_token())
         .ok_or(Error::NoCachedToken)?;
     decode_claims(&access)
 }

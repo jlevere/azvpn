@@ -12,13 +12,19 @@ fn main() {
         )
         .init();
 
-    let cache = TokenCache::auto();
-    match cache.load() {
-        Some(token) => println!(
-            "loaded token: access_len={} has_refresh={}",
-            token.access_token.len(),
-            token.refresh_token.is_some()
-        ),
-        None => println!("no token loaded (cache empty or all-expired)"),
+    match TokenCache::last_used() {
+        Some(cache) => match cache.load() {
+            Some(token) => println!(
+                "loaded token for tenant {}: access_len={} has_refresh={}",
+                cache.key().tenant_id,
+                token.access_token.len(),
+                token.refresh_token.is_some()
+            ),
+            None => println!(
+                "cache for tenant {} present but token is expired",
+                cache.key().tenant_id
+            ),
+        },
+        None => println!("no last-used profile (cache empty / fresh install)"),
     }
 }
