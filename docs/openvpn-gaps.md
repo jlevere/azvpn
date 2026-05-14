@@ -330,23 +330,26 @@ gateway misconfiguration.
 
 ---
 
-### 18.  Unclean-exit cleanup
+### 18.  ~~Unclean-exit cleanup~~ ✅ shipped
 
-**Status:** partial — only normal-exit path tears down.
+Implemented as a JSON manifest at `/var/run/azvpn/cleanup-manifest.json`
+(env-override-able via `AZVPN_CLEANUP_MANIFEST`):
 
-`crates/core/src/commands/connect.rs:191-195` calls
-`route_manager.clear()` + `dns_manager.clear()` only on
-normal-exit. SIGKILL / panic / OOM → routes and DNS keys leak.
+- The connect loop atomically writes the manifest (route destinations
+  + gateways) after every `apply::tunnel_state` success and removes it
+  on a clean disconnect. Writes are temp-then-rename, so a crash
+  mid-write leaves either the previous manifest or none, never torn.
+- The daemon's `main` calls `azvpn_core::cleanup::run_at_startup`
+  before binding the IPC socket. It opens a `net_route::Handle`,
+  deletes every route in the manifest (ESRCH treated as "already
+  gone"), and unconditionally removes the macOS supplemental DNS key
+  — the latter is fixed at compile time so even a process killed
+  before its first manifest write gets its DNS state caught.
 
-**Where:** `crates/daemon/src/` — launchd respawn + cleanup-on-startup
-is one path. Other options: persisted "things to clean up next boot"
-file with PID stamps, or OS-managed ownership.
-
-**Scope:** ~150 LOC plus an on-disk cleanup-manifest format.
-
-**Done when:** A killed-mid-tunnel daemon, on next start, scans for
-its own previously-installed state and tears it down before
-proceeding. Tested by `kill -9` followed by `launchctl kickstart`.
+**Where:** `crates/core/src/cleanup.rs`,
+`crates/core/src/commands/connect/{apply.rs,mod.rs}`,
+`crates/tunnel-darwin/src/dns.rs::cleanup_orphan_dns`,
+`crates/daemon/src/main.rs`.
 
 ---
 

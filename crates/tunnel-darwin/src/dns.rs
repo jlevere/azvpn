@@ -120,6 +120,24 @@ impl Drop for DnsGuard {
     }
 }
 
+/// Tear down the daemon's well-known supplemental-DNS key without
+/// needing a live [`DnsGuard`]. Called from the daemon's startup
+/// orphan-cleanup pass: a crashed predecessor leaves the
+/// `SCDynamicStore` key live, and the only thing standing between a
+/// clean fresh tunnel and a "why are my queries going to a dead IP"
+/// support ticket is removing it before we accept new connections.
+///
+/// Returns `true` if the key was actually present and got removed,
+/// `false` if it was already gone — either is fine for callers; this
+/// is best-effort cleanup.
+#[must_use]
+pub fn cleanup_orphan_dns() -> bool {
+    let Some(store) = SCDynamicStoreBuilder::new(STORE_NAME).build() else {
+        return false;
+    };
+    store.remove(CFString::from_static_string(SERVICE_KEY))
+}
+
 fn write_dns_dict(
     store: &SCDynamicStore,
     domains: &[String],

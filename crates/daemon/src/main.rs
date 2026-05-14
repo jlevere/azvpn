@@ -47,6 +47,13 @@ async fn main() -> ExitCode {
         "azvpnd starting"
     );
 
+    // Sweep up anything a prior daemon left in the kernel before
+    // accepting new connections — kernel routes and the SCDynamicStore
+    // DNS supplemental key don't auto-revert on SIGKILL / panic /
+    // launchd force-kill, and a fresh tunnel apply against a stale
+    // install set has surprising failure modes. Best-effort.
+    azvpn_core::cleanup::run_at_startup(&azvpn_core::cleanup::default_path()).await;
+
     let listener = match socket::bind(&config) {
         Ok(l) => l,
         Err(e) => {

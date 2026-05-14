@@ -14,4 +14,4 @@
 
 mod dns;
 
-pub use dns::{DnsGuard, Error};
+pub use dns::{DnsGuard, Error, cleanup_orphan_dns};

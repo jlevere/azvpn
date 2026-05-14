@@ -505,6 +505,19 @@ async fn attempt(
     dns_manager.clear();
     drop(dns_manager);
 
+    // Clean exit — drop the cleanup manifest so the next daemon start
+    // doesn't see our state as orphaned and re-issue route deletes
+    // we've already done. Best-effort; a stale manifest on disk would
+    // just trigger no-op deletes on next startup.
+    let manifest_path = crate::cleanup::default_path();
+    if let Err(e) = crate::cleanup::Manifest::remove(&manifest_path) {
+        tracing::warn!(
+            path = %manifest_path.display(),
+            error = %e,
+            "cleanup manifest remove on clean exit failed"
+        );
+    }
+
     let code = match process.wait().await {
         Ok(c) => c,
         Err(e) => return AttemptOutcome::Transient(e.into()),

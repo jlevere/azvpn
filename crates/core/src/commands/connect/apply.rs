@@ -8,6 +8,7 @@ use azvpn_profile::VpnProfile;
 use ipnet::IpNet;
 use tracing::info;
 
+use crate::cleanup;
 use crate::dns::DnsManager;
 use crate::route::{self, RouteManager};
 use crate::session::RunningSession;
@@ -27,6 +28,25 @@ pub(super) async fn tunnel_state(
     apply_dns(dns_manager, session, profile, push_opts);
     if let Err(e) = apply_routes(route_manager, push_opts).await {
         tracing::error!(error = %e, "route apply failed");
+    }
+    record_cleanup_manifest(route_manager);
+}
+
+/// Persist the current install set so a crashed-then-restarted daemon
+/// can find and tear it down. Failure is non-fatal — the worst case is
+/// orphan routes on the next startup, which the new tunnel's apply
+/// path already handles defensively. Logging warns on the way out.
+fn record_cleanup_manifest(route_manager: &RouteManager) {
+    let manifest = cleanup::Manifest {
+        routes: route_manager
+            .installed_routes()
+            .into_iter()
+            .map(|(destination, gateway)| cleanup::RouteEntry { destination, gateway })
+            .collect(),
+    };
+    let path = cleanup::default_path();
+    if let Err(e) = manifest.save(&path) {
+        tracing::warn!(path = %path.display(), error = %e, "cleanup manifest write failed");
     }
 }
 

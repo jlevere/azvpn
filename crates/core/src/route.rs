@@ -138,6 +138,16 @@ impl RouteManager {
         })
     }
 
+    /// Snapshot of `(destination, gateway)` pairs currently believed to
+    /// be live in the kernel. The connect loop serializes this into the
+    /// cleanup manifest after each apply so a crashed-then-restarted
+    /// daemon can find and tear down the routes its predecessor left
+    /// behind. Cheap clone — the inner map is small (handful to a few
+    /// dozen entries) and only grabbed at the apply/clear boundaries.
+    pub fn installed_routes(&self) -> Vec<(IpNet, IpAddr)> {
+        self.installed.iter().map(|(net, gw)| (*net, *gw)).collect()
+    }
+
     /// Replace the live route set with `desired`, all going via `gateway`.
     /// Computes the diff against currently-installed routes, deletes
     /// removed entries, adds new ones — first call from an empty state
