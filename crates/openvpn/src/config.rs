@@ -34,6 +34,7 @@ pub struct ConfigBuilder<'a> {
     profile: &'a VpnProfile,
     management_addr: SocketAddr,
     auth_user_pass_file: Option<&'a Path>,
+    verb: u8,
 }
 
 impl<'a> ConfigBuilder<'a> {
@@ -42,12 +43,19 @@ impl<'a> ConfigBuilder<'a> {
             profile,
             management_addr,
             auth_user_pass_file: None,
+            verb: 3,
         }
     }
 
     #[must_use]
     pub fn auth_user_pass_file(mut self, path: &'a Path) -> Self {
         self.auth_user_pass_file = Some(path);
+        self
+    }
+
+    #[must_use]
+    pub fn verb(mut self, level: u8) -> Self {
+        self.verb = level;
         self
     }
 
@@ -75,7 +83,7 @@ impl<'a> ConfigBuilder<'a> {
         writeln!(config, "tls-version-min 1.2").unwrap();
         writeln!(config, "tls-timeout 30").unwrap();
         writeln!(config, "auth-nocache").unwrap();
-        writeln!(config, "verb 5").unwrap();
+        writeln!(config, "verb {}", self.verb).unwrap();
         writeln!(config).unwrap();
 
         writeln!(

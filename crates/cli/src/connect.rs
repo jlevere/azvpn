@@ -3,8 +3,9 @@ use std::net::SocketAddr;
 use std::path::Path;
 
 use azvpn_auth::{AadConfig, DeviceCodeFlow, TokenCache};
-use azvpn_openvpn::{ConfigBuilder, Event, OpenVpnConfig, OpenVpnProcess, VpnState};
+use azvpn_openvpn::{ConfigBuilder, Event, OpenVpnConfig, OpenVpnProcess, PushOptions, VpnState};
 use azvpn_profile::{AuthType, VpnProfile};
+use tokio::signal;
 use tracing::info;
 
 #[derive(Debug, thiserror::Error)]
@@ -31,10 +32,12 @@ fn open_browser(url: &str) {
     }
 }
 
+#[allow(clippy::too_many_lines)]
 pub async fn run(
     profile_path: &Path,
     openvpn_binary: &Path,
     mgmt_addr: SocketAddr,
+    verbose: bool,
 ) -> Result<(), Error> {
     let profile = VpnProfile::from_file(profile_path)?;
     let server = profile
@@ -91,6 +94,9 @@ pub async fn run(
     if let Some(ref af) = auth_file {
         builder = builder.auth_user_pass_file(af.path());
     }
+    if verbose {
+        builder = builder.verb(5);
+    }
     let ovpn_config_content = builder.build();
 
     let mut config_file = tempfile::Builder::new()
@@ -109,38 +115,116 @@ pub async fn run(
     info!("connected to management interface");
 
     mgmt.send("state on").await?;
+    mgmt.send("log on").await?;
     mgmt.hold_release().await?;
 
+    let mut push_opts = PushOptions::default();
+
+    #[cfg(target_os = "macos")]
+    let mut dns_guard: Option<azvpn_tunnel_darwin::DnsGuard> = None;
+
     loop {
-        let event = mgmt.read_event().await?;
-        match event {
-            Event::State(ref state) => {
-                eprintln!("state: {state:?}");
-                if *state == VpnState::Connected {
-                    eprintln!("connected to {}", server.fqdn);
+        tokio::select! {
+            biased;
+
+            _ = signal::ctrl_c() => {
+                eprintln!("\nshutting down...");
+                let _ = mgmt.send("signal SIGTERM").await;
+                break;
+            }
+
+            event = mgmt.read_event() => {
+                let event = event?;
+                match event {
+                    Event::State { ref state, local_ip } => {
+                        if let Some(ip) = local_ip {
+                            eprintln!("state: {state:?} (ip: {ip})");
+                        } else {
+                            eprintln!("state: {state:?}");
+                        }
+                        if *state == VpnState::Connected {
+                            eprintln!("connected to {}", server.fqdn);
+                            #[cfg(target_os = "macos")]
+                            if dns_guard.is_none() {
+                                // Installed once on first Connected. A reconnect would re-enter
+                                // this state with possibly-fresh push_opts; refresh-on-reconnect
+                                // is deferred until DnsGuard grows an in-place update method
+                                // (dropping the old guard before the new one would wipe the
+                                // shared singleton key).
+                                dns_guard = install_dns(&profile, &push_opts);
+                            }
+                        }
+                        if *state == VpnState::Exiting {
+                            info!("openvpn exiting");
+                            break;
+                        }
+                    }
+                    Event::Hold => {
+                        mgmt.hold_release().await?;
+                    }
+                    Event::PasswordNeeded(ref msg) => {
+                        tracing::warn!("unexpected password request: {msg}");
+                    }
+                    Event::PushReply(opts) => {
+                        info!(
+                            dns_servers = ?opts.dns_servers,
+                            domain = ?opts.domain,
+                            "received push options"
+                        );
+                        push_opts = opts;
+                    }
+                    Event::Info(msg) | Event::Log(msg) => {
+                        info!("{msg}");
+                    }
+                    Event::ByteCount { rx, tx } => {
+                        tracing::debug!(rx, tx, "byte count");
+                    }
                 }
-                if *state == VpnState::Exiting {
-                    info!("openvpn exiting");
-                    break;
-                }
-            }
-            Event::Hold => {
-                mgmt.hold_release().await?;
-            }
-            Event::PasswordNeeded(ref msg) => {
-                tracing::warn!("unexpected password request: {msg}");
-            }
-            Event::Info(msg) | Event::Log(msg) => {
-                info!("{msg}");
-            }
-            Event::ByteCount { rx, tx } => {
-                tracing::debug!(rx, tx, "byte count");
             }
         }
     }
+
+    #[cfg(target_os = "macos")]
+    drop(dns_guard.take());
 
     let code = process.wait().await?;
     info!(?code, "openvpn process exited");
 
     Ok(())
+}
+
+#[cfg(target_os = "macos")]
+fn install_dns(
+    profile: &VpnProfile,
+    push_opts: &PushOptions,
+) -> Option<azvpn_tunnel_darwin::DnsGuard> {
+    let suffixes = profile.dns_suffixes();
+    if suffixes.is_empty() {
+        info!("no DNS suffixes in profile, skipping resolver setup");
+        return None;
+    }
+
+    let dns_servers: Vec<std::net::IpAddr> = if push_opts.dns_servers.is_empty() {
+        profile
+            .dns_servers()
+            .iter()
+            .filter_map(|s| s.parse().ok())
+            .collect()
+    } else {
+        push_opts.dns_servers.clone()
+    };
+
+    if dns_servers.is_empty() {
+        tracing::warn!("DNS suffixes configured but no DNS servers available");
+        return None;
+    }
+
+    info!(?suffixes, ?dns_servers, "installing DNS resolvers");
+    match azvpn_tunnel_darwin::DnsGuard::install(&suffixes, &dns_servers) {
+        Ok(guard) => Some(guard),
+        Err(e) => {
+            tracing::error!(error = %e, "failed to install DNS resolvers");
+            None
+        }
+    }
 }
