@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Entitlements for the codesigned .app bundle.
+
+  Intentionally empty. We don't use `NetworkExtension` — the project
+  exists *because* Microsoft's NEDNSSettings.matchDomains path is broken
+  in their own client. We wrap the openvpn binary, which talks to utun
+  through a PF_SYSTEM socket; that doesn't require any NEKit
+  entitlement.
+
+  Codesigning still requires this file present so the build profile is
+  reproducible; add entries here only when a future signed-and-notarized
+  release needs them.
+-->
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+</dict>
+</plist>

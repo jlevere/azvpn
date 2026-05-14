@@ -1,0 +1,52 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  launchd unit for an `azvpn` system daemon.
+
+  This file is a placeholder. The daemon binary it references
+  (/usr/local/libexec/azvpn-daemon) does NOT yet exist — the daemon is
+  scheduled for a later milestone, after Linux / Windows ship. Phase 8 of
+  the refactor lays this scaffolding so that the daemon, when it lands,
+  just plugs into existing packaging without re-doing service-manager
+  glue.
+
+  Install path when the daemon ships:
+    /Library/LaunchDaemons/com.jlevere.azvpn.daemon.plist
+  Load:
+    sudo launchctl bootstrap system /Library/LaunchDaemons/com.jlevere.azvpn.daemon.plist
+  Inspect:
+    sudo launchctl print system/com.jlevere.azvpn.daemon
+
+  The daemon will need to run as root (TUN device + DNS settings); no
+  `UserName` override.
+-->
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.jlevere.azvpn.daemon</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/usr/local/libexec/azvpn-daemon</string>
+    </array>
+
+    <key>RunAtLoad</key>
+    <true/>
+
+    <key>KeepAlive</key>
+    <true/>
+
+    <key>StandardOutPath</key>
+    <string>/var/log/azvpn-daemon.log</string>
+    <key>StandardErrorPath</key>
+    <string>/var/log/azvpn-daemon.log</string>
+
+    <!-- Soft limit; tunnel pumps occasional bursts of small allocations. -->
+    <key>SoftResourceLimits</key>
+    <dict>
+        <key>NumberOfFiles</key>
+        <integer>1024</integer>
+    </dict>
+</dict>
+</plist>

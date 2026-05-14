@@ -5,3 +5,4 @@ result
 *.swo
 *~
 .DS_Store
+output.txt
