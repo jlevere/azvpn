@@ -14,6 +14,7 @@
 //! All cross-crate errors funnel into one [`Error`] enum so callers can
 //! write a single handler.
 
+pub mod cleanup;
 pub mod commands;
 pub mod dns;
 pub mod reachability;
