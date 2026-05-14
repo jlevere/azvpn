@@ -139,25 +139,24 @@ pub struct AadConfig {
     pub enable_groups: bool,
 }
 
-/// Microsoft's well-known **public-client** app GUID for Azure VPN.
-///
-/// Distinct from the `41b23e61-...` *audience* (the API resource the
-/// gateway checks via the token's `aud` claim). This is the
-/// `client_id` we authenticate AS — Microsoft has registered
-/// `http://localhost:2023` and `msauth://...` redirect URIs against
-/// this app, which is what makes the auth-code+PKCE flow work
-/// against the well-known Azure VPN client without a custom tenant
-/// app registration.
-///
-/// Confirmed in the macOS / Linux official clients' binaries —
-/// research/aad-flow-notes.md has the full breakdown.
-pub const DEFAULT_PUBLIC_CLIENT_ID: &str = "51bb15d4-3a4f-4ebf-9dca-40096fe32426";
-
 impl AadConfig {
+    /// OAuth `client_id` for the public-cloud Azure VPN flow.
+    ///
+    /// Profile's `<applicationid>` wins (custom AAD app registration);
+    /// otherwise we use the audience GUID itself. This is the pattern
+    /// the gateway expects in commercial AAD — the audience app is
+    /// also configured as its own public client.
+    ///
+    /// (Aside: `51bb15d4-3a4f-4ebf-9dca-40096fe32426` appears in the
+    /// official clients' binaries, but real-world testing shows it
+    /// triggers `AADSTS900383: Please login to your National Cloud
+    /// dedicated portal` on commercial tenants — that GUID is the
+    /// USGov/sovereign-cloud variant, not commercial. Audience-as-
+    /// client is what works in commercial.)
     pub fn client_id(&self) -> &str {
         self.application_id
             .as_deref()
-            .unwrap_or(DEFAULT_PUBLIC_CLIENT_ID)
+            .unwrap_or(&self.audience)
     }
 }
 
