@@ -43,12 +43,16 @@ jobs:
           targets: ${{ matrix.target }}
       - uses: Swatinem/rust-cache@v2
         with:
-          key: release-${{ matrix.target }}
+          # Include matrix.os in the cache key — the default key keys
+          # on target + rustc + lockfile, NOT the runner OS, so a
+          # cache built on ubuntu-latest (24.04 / glibc 2.39) gets
+          # reused on ubuntu-22.04 (glibc 2.35), then fails to link.
+          key: release-${{ matrix.os }}-${{ matrix.target }}
       # libdbus-1-dev: the keyring crate's sync-secret-service feature
       # links to system libdbus on Linux (not pure-Rust like zbus). The
       # macOS / Windows runners pick a native backend and don't need it.
       - name: Install Linux system deps
-        if: matrix.os == 'ubuntu-latest'
+        if: startsWith(matrix.os, 'ubuntu')
         run: sudo apt-get update && sudo apt-get install -y libdbus-1-dev pkg-config
       - run: cargo build --release --target ${{ matrix.target }}
       - name: Rename binary
@@ -110,7 +114,9 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
         with:
-          key: build-deb
+          # Pin to runner OS so a previous ubuntu-latest cache doesn't
+          # carry glibc-2.39-linked artifacts into a 22.04 build.
+          key: build-deb-ubuntu-22.04
       - name: Install Linux system deps
         run: sudo apt-get update && sudo apt-get install -y libdbus-1-dev pkg-config
       - name: Install cargo-deb
