@@ -1,24 +1,17 @@
-//! `azvpn install-daemon` / `uninstall-daemon` — manage the launchd
-//! unit so users don't have to copy plists by hand.
+//! macOS launchd backend for `azvpn install-daemon`.
 //!
-//! Tailscale ships the same pattern (`tailscaled install-system-daemon`)
-//! and Mullvad runs the equivalent steps inside their `.pkg` postinstall
-//! script. We expose it as a real subcommand so the Homebrew formula
-//! doesn't have to dump a multi-step `caveats` block on every user —
-//! `brew install` lays down the binaries; one `sudo azvpn install-daemon`
-//! invocation does the rest.
-//!
-//! macOS-only — Linux will get a systemd-resolved equivalent when
-//! `tunnel-linux` lands.
-
-#![cfg(target_os = "macos")]
+//! Mullvad runs the equivalent steps inside their `.pkg` postinstall
+//! script; we expose it as a real subcommand so the Homebrew formula
+//! doesn't have to dump a multi-step `caveats` block. `brew install`
+//! lays down the binaries, `sudo azvpn install-daemon` writes the
+//! plist and bootstraps launchd. The Linux sibling lives next door
+//! and uses the systemd1 D-Bus manager.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use azvpn_core::Error as CoreError;
-
-use crate::{Error, Result};
+use super::{check_executable, other, require_root};
+use crate::Result;
 
 const LAUNCHD_LABEL: &str = "com.jlevere.azvpn.daemon";
 const LAUNCHD_PLIST: &str = "/Library/LaunchDaemons/com.jlevere.azvpn.daemon.plist";
@@ -26,7 +19,13 @@ const RUNTIME_DIR: &str = "/var/run/azvpn";
 
 /// Install + bootstrap. Idempotent: a previously-bootstrapped daemon
 /// gets booted out first so the new plist takes effect.
-pub fn install(daemon: Option<PathBuf>, openvpn: Option<PathBuf>) -> Result<()> {
+///
+/// `async` to share signature with the Linux variant; no awaits since
+/// launchctl is synchronous, but the dispatcher in [`super`] is async
+/// and treating both platforms uniformly there beats branching on
+/// `.await` vs not at every call site.
+#[allow(clippy::unused_async)]
+pub async fn install(daemon: Option<PathBuf>, openvpn: Option<PathBuf>) -> Result<()> {
     require_root("install-daemon")?;
 
     let (daemon_path, openvpn_path) = resolve_paths(daemon, openvpn)?;
@@ -56,7 +55,8 @@ pub fn install(daemon: Option<PathBuf>, openvpn: Option<PathBuf>) -> Result<()> 
 /// notices if something's wrong with the install location. Intentionally
 /// leaves `/var/run/azvpn/` + `/var/log/azvpnd.log` so a re-install
 /// resumes cleanly; `rm -rf` is the operator's call.
-pub fn uninstall() -> Result<()> {
+#[allow(clippy::unused_async)]
+pub async fn uninstall() -> Result<()> {
     require_root("uninstall-daemon")?;
 
     let _ = launchctl(&["bootout", &format!("system/{LAUNCHD_LABEL}")], Quiet::Yes);
@@ -70,17 +70,6 @@ pub fn uninstall() -> Result<()> {
         Err(e) => return Err(e.into()),
     }
     Ok(())
-}
-
-fn require_root(subcommand: &str) -> Result<()> {
-    if uzers::get_effective_uid() == 0 {
-        Ok(())
-    } else {
-        Err(other(format!(
-            "`azvpn {subcommand}` writes to /Library/LaunchDaemons/ and \
-             talks to system launchd — run with `sudo`"
-        )))
-    }
 }
 
 /// Resolve daemon + openvpn paths. Caller-supplied flags win; otherwise
@@ -111,17 +100,6 @@ fn default_prefix() -> Result<PathBuf> {
         .ok_or_else(|| other("can't derive install prefix from current_exe"))?
         .to_path_buf();
     Ok(prefix)
-}
-
-fn check_executable(label: &str, path: &Path) -> Result<()> {
-    if path.is_file() {
-        Ok(())
-    } else {
-        Err(other(format!(
-            "{label} binary not found at {} — pass `--{label} <path>` to override",
-            path.display()
-        )))
-    }
 }
 
 /// Format the launchd plist with absolute binary paths substituted in.
@@ -204,6 +182,3 @@ fn launchctl(args: &[&str], quiet: Quiet) -> Result<()> {
     }
 }
 
-fn other(msg: impl Into<String>) -> Error {
-    Error::Core(CoreError::Other(msg.into()))
-}

@@ -262,6 +262,7 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "uzers",
+ "zbus 5.15.0",
 ]
 
 [[package]]
