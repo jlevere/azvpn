@@ -48,6 +48,16 @@ pub enum Error {
     Dbus(#[from] zbus::Error),
 
     // ---------- daemon IPC ----------
+    /// Couldn't open the daemon socket — typically the daemon isn't
+    /// running yet, or the user is using the wrong socket path. Has
+    /// its own variant (vs. wrapping the raw `io::Error`) so the CLI
+    /// can render an actionable suggestion instead of "No such file
+    /// or directory (os error 2)".
+    #[error(
+        "daemon socket at {path} isn't accepting connections — start the daemon with \
+         `sudo azvpn install-daemon`, or set AZVPND_SOCKET if it's listening elsewhere"
+    )]
+    DaemonNotRunning { path: std::path::PathBuf },
     /// Transport-level RPC error (socket disconnected, deadline, …).
     #[error("daemon rpc: {0}")]
     Rpc(#[from] tarpc::client::RpcError),
