@@ -1,0 +1,26 @@
+#!/bin/sh
+# postrm — runs after the .deb's files are removed. cargo-deb's
+# systemd-units integration handles stop + disable at `#DEBHELPER#`.
+#
+# Convention: `remove` leaves user data alone (operator may reinstall);
+# `purge` removes everything we own, including the dedicated group.
+
+set -e
+
+case "$1" in
+    purge)
+        # Empty dirs only — anything else might be the operator's
+        # session state, profiles they want to keep, etc. apt's
+        # behavior is "purge deletes operator-owned config files",
+        # so we honor that by removing the dirs but not raw rm -rf
+        # of arbitrary contents.
+        rmdir /var/run/azvpn /var/lib/azvpn 2>/dev/null || true
+        if getent group azvpn >/dev/null; then
+            groupdel azvpn || true
+        fi
+        ;;
+esac
+
+#DEBHELPER#
+
+exit 0
