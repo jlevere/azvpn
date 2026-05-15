@@ -29,5 +29,9 @@ tracing-subscriber = { workspace = true }
 uzers = { workspace = true }
 libc = { workspace = true }
 
+[target.'cfg(target_os = "linux")'.dependencies]
+tracing-journald = { workspace = true }
+sd-notify = { workspace = true }
+
 [lints]
 workspace = true

@@ -33,7 +33,11 @@ After=network-online.target systemd-resolved.service
 Wants=network-online.target
 
 [Service]
-Type=simple
+# Type=notify — the daemon sends sd_notify(READY=1) once its socket is
+# bound. Without notify systemd treats the service as "started" the
+# moment fork returns, racing CLI connect attempts against socket
+# bind. The daemon code path that emits READY is no-op outside Linux.
+Type=notify
 ExecStart=/usr/lib/azvpn/azvpnd
 Restart=on-failure
 RestartSec=5
@@ -51,14 +55,27 @@ Environment=AZVPND_OPENVPN=/usr/sbin/openvpn
 Environment=AZVPND_GROUP=adm
 Environment=RUST_LOG=info
 
-# Hardening — adjust once the Linux DNS impl (systemd-resolved
-# D-Bus) lands, since that needs CAP_NET_BIND_SERVICE or D-Bus
-# access. Network namespace isolation is intentionally NOT set: we
-# *are* the host's tunnel.
+# Hardening — the openvpn child needs CAP_NET_ADMIN (manage the tun
+# device, set MTU, bring it up) and we need it for the netlink route
+# apply. CAP_CHOWN is needed to chown the listener socket to the
+# admin group at bind time. Drop everything else.
+CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_RAW CAP_CHOWN
+AmbientCapabilities=CAP_NET_ADMIN CAP_NET_RAW CAP_CHOWN
 NoNewPrivileges=true
 ProtectSystem=strict
 ProtectHome=true
-ReadWritePaths=/var/run/azvpn
+PrivateTmp=true
+# /dev/net/tun is the only device node we open. Everything else is
+# unnecessary attack surface for a network daemon.
+DeviceAllow=/dev/net/tun rw
+# Daemon owns its socket dir, the cleanup-manifest dir, and (when
+# the direct-file DNS backend is active) /etc/resolv.conf. The
+# atomic-write helper creates the tempfile in the same directory as
+# the target before rename(2), so /etc itself needs write access —
+# not just /etc/resolv.conf. The hosts where the direct-file backend
+# activates are the same hosts where /etc has no other writer, so
+# the broader scope is operationally fine.
+ReadWritePaths=/var/run/azvpn /var/lib/azvpn /etc
 
 [Install]
 WantedBy=multi-user.target
