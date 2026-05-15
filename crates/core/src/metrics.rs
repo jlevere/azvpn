@@ -10,6 +10,7 @@
 //! loop's event handler — so consistency is "whatever the loop last
 //! sent."
 
+use std::net::IpAddr;
 use std::time::Instant;
 
 use azvpn_ipc::{ByteCount, Throughput};
@@ -37,6 +38,16 @@ pub struct ConnectionMetrics {
     /// transition so a recovered tunnel doesn't carry stale fault
     /// state.
     pub last_error: Option<String>,
+    /// DNS suffixes the apply path actually installed — the merged
+    /// profile + push.domain set, not the raw push reply. Empty until
+    /// `apply_dns` succeeds at least once. Sourced from the apply
+    /// path rather than the push reply so the status RPC reports
+    /// what's in `SCDynamicStore` / `systemd-resolved`, not what the
+    /// gateway wanted.
+    pub dns_suffixes: Vec<String>,
+    /// DNS servers the apply path actually installed. Empty until
+    /// `apply_dns` succeeds. Same rationale as `dns_suffixes`.
+    pub dns_servers: Vec<IpAddr>,
 }
 
 /// One sample of openvpn's BYTECOUNT stream timestamped at receive
