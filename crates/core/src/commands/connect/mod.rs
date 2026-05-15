@@ -348,6 +348,19 @@ async fn attempt(
                                 info!(server = %server.fqdn, "connected");
                                 have_connected = true;
                             }
+                            // Register the tun-local IP with the watcher
+                            // so the upcoming Up event for our own
+                            // interface doesn't tip us into an instant
+                            // SIGUSR1 (which would then re-resolve the
+                            // gateway hostname through the now-VPN DNS
+                            // and spin forever). Refreshed on every
+                            // CONNECTED because the assigned IP can move
+                            // across soft restarts.
+                            if let (Some(w), Some(ip)) =
+                                (reachability.as_mut(), local_ip)
+                            {
+                                w.set_self_ips([ip]);
+                            }
                             // Clear-then-apply on every CONNECTED. openvpn's
                             // options-import / SIGUSR1 reconnect tears down
                             // the old tun under us; macOS doesn't always
