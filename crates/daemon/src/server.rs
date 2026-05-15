@@ -12,7 +12,6 @@ use azvpn_ipc::{
     AzvpnApi, ConnectRequest, DisconnectOutcome, InfoReport, IpcError, PushOptions, StatusReport,
 };
 use azvpn_openvpn::VpnState;
-use azvpn_profile::VpnProfile;
 use tarpc::context::Context;
 use tokio::sync::{Mutex, watch};
 use tokio_util::sync::CancellationToken;
@@ -34,7 +33,7 @@ struct ActiveConnection {
     pushed_rx: watch::Receiver<Option<PushOptions>>,
     metrics_rx: watch::Receiver<ConnectionMetrics>,
     server_fqdn: String,
-    profile_path: PathBuf,
+    profile_label: String,
     mgmt_addr: SocketAddr,
     started_at: u64,
 }
@@ -91,11 +90,10 @@ impl AzvpnApi for AzvpndServer {
             return Err(IpcError::AlreadyConnected);
         }
 
-        // Parse the profile up front so we have server_fqdn and can
-        // surface validation errors before spawning openvpn.
-        let profile = VpnProfile::from_file(&req.profile_path)
-            .map_err(|e| IpcError::Profile(e.to_string()))?;
-        let server_fqdn = profile
+        // Pre-pull server_fqdn so `status` can answer "what gateway?"
+        // immediately, before the connect task has spawned openvpn.
+        let server_fqdn = req
+            .profile
             .primary_server()
             .ok_or_else(|| IpcError::Profile("no server in profile".into()))?
             .fqdn
@@ -104,7 +102,8 @@ impl AzvpnApi for AzvpndServer {
         // Static mgmt port — the daemon owns the only openvpn child.
         let mgmt_addr = SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 7505));
         let opts = ConnectOptions {
-            profile_path: req.profile_path.clone(),
+            profile: req.profile,
+            profile_label: req.profile_label.clone(),
             openvpn_binary: self.state.openvpn_binary.clone(),
             mgmt_addr,
             verbose: req.verbose,
@@ -126,7 +125,7 @@ impl AzvpnApi for AzvpndServer {
             pushed_rx: pushed_tx.subscribe(),
             metrics_rx: metrics_tx.subscribe(),
             server_fqdn,
-            profile_path: req.profile_path,
+            profile_label: req.profile_label,
             mgmt_addr,
             started_at,
         });
@@ -239,7 +238,7 @@ fn build_status(conn: &ActiveConnection) -> StatusReport {
     let metrics = conn.metrics_rx.borrow().clone();
     StatusReport {
         server_fqdn: conn.server_fqdn.clone(),
-        profile_path: conn.profile_path.clone(),
+        profile_label: conn.profile_label.clone(),
         mgmt_addr: conn.mgmt_addr,
         started_at: conn.started_at,
         uptime_secs,

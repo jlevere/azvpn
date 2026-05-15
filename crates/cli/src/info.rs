@@ -55,7 +55,7 @@ fn print(r: &InfoReport) {
 
 fn print_status(s: &StatusReport) {
     println!("server:   {}", s.server_fqdn);
-    println!("profile:  {}", s.profile_path.display());
+    println!("profile:  {}", s.profile_label);
     println!("mgmt:     {}", s.mgmt_addr);
     println!("uptime:   {}", format_uptime(s.uptime_secs));
     if let Some(ip) = s.local_ip {

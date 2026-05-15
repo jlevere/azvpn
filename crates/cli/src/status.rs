@@ -22,7 +22,7 @@ pub async fn run() -> Result<()> {
 
 fn print(r: &StatusReport) {
     println!("server:  {}", r.server_fqdn);
-    println!("profile: {}", r.profile_path.display());
+    println!("profile: {}", r.profile_label);
     println!("mgmt:    {}", r.mgmt_addr);
     println!("uptime:  {}", format_uptime(r.uptime_secs));
     if let Some(ip) = r.local_ip {

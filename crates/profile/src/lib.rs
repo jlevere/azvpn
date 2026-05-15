@@ -11,7 +11,7 @@
 
 use std::net::IpAddr;
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
@@ -23,7 +23,7 @@ pub enum Error {
     Io(#[from] std::io::Error),
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename = "AzVpnProfile")]
 pub struct VpnProfile {
     pub any: Option<bool>,
@@ -41,19 +41,19 @@ pub struct VpnProfile {
     pub servervalidation: Option<ServerValidation>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ServerList {
     #[serde(rename = "ServerEntry", default)]
     pub entries: Vec<ServerEntry>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ServerEntry {
     pub fqdn: String,
     pub displayname: Option<String>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ClientAuth {
     #[serde(rename = "type")]
     pub auth_type: AuthType,
@@ -66,7 +66,7 @@ pub struct ClientAuth {
 /// wire enumeration is `aad | cert | usernamepass | radius` (per the
 /// reconstructed XSD); `certificate` is accepted as an alias because our
 /// historical test fixtures use that spelling.
-#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum AuthType {
     Aad,
@@ -81,7 +81,7 @@ pub enum AuthType {
 /// Client-certificate auth config. All three fields are optional in the
 /// wire format — a populated profile has at least `hash` (thumbprint of a
 /// cert in the OS store) or `certificatedata` (inline PEM/PFX).
-#[derive(Debug, Clone, Deserialize, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct ClientCert {
     pub hash: Option<String>,
     pub issuer: Option<String>,
@@ -91,13 +91,13 @@ pub struct ClientCert {
 /// Username + password credentials. Gateways generally don't ship these
 /// in the profile (the user enters them at connect time), so both fields
 /// are optional. Populated profiles do exist for headless / CI use.
-#[derive(Debug, Clone, Deserialize, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct UsernamePass {
     pub username: Option<String>,
     pub password: Option<String>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AadConfig {
     pub issuer: String,
     pub tenant: String,
@@ -126,13 +126,13 @@ impl AadConfig {
     }
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProtocolConfig {
     #[serde(rename = "sslprotocolConfig")]
     pub ssl_protocol_config: Option<SslProtocolConfig>,
 }
 
-#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "lowercase")]
 pub enum TransportProtocol {
     #[default]
@@ -140,12 +140,12 @@ pub enum TransportProtocol {
     Udp,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SslProtocolConfig {
     pub transportprotocol: Option<TransportProtocol>,
 }
 
-#[derive(Debug, Clone, Deserialize, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct ClientConfig {
     pub dnsservers: Option<DnsServers>,
     pub dnssuffixes: Option<DnsSuffixes>,
@@ -153,31 +153,31 @@ pub struct ClientConfig {
     pub excluderoutes: Option<RouteList>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DnsServers {
     #[serde(rename = "dnsserver", default)]
     pub servers: Vec<String>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DnsSuffixes {
     #[serde(rename = "dnssuffix", default)]
     pub suffixes: Vec<String>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RouteList {
     #[serde(rename = "route", default)]
     pub routes: Vec<Route>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Route {
     pub destination: IpAddr,
     pub mask: u8,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ServerValidation {
     /// `cert` → validate by pinning hash + EKU; `secret` → validate the
     /// `serversecret` blob the gateway emits. Optional in the wire
@@ -188,14 +188,14 @@ pub struct ServerValidation {
     pub cert: Option<ServerCert>,
 }
 
-#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum ServerValidationKind {
     Cert,
     Secret,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ServerCert {
     pub hash: Option<String>,
     pub ekulist: Option<String>,
