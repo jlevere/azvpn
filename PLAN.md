@@ -1,198 +1,569 @@
-# azvpn — project plan
+# azvpn — plan
 
-## 1. Problem statement
+Single source of truth for "where are we, what's next, what's
+deliberately not next." Replaces the old PLAN.md (inception-era
+milestone doc) and `docs/backlog.md` (deferred-work register), which
+both drifted out of sync with the code.
 
-Microsoft's Azure VPN Client is the only client that can authenticate against
-Azure Virtual WAN P2S gateways configured with Microsoft Entra ID (AAD) auth.
-On the team's primary platform (macOS), it has a documented bug where DNS
-suffixes from the profile XML never propagate to system resolver state
-(`NEDNSSettings.matchDomains`), making split-DNS routing silently fail for
-private endpoints. The bug has not been fixed in 2+ years of releases.
+Deep-dive companions, kept separate so this doc stays read-in-one-sitting:
+- [`docs/openvpn-gaps.md`](docs/openvpn-gaps.md) — per-directive
+  OpenVPN coverage list. Most P0/P1 items are now shipped; treat as
+  the working record for the long tail.
+- [`docs/graph-and-arm-notes.md`](docs/graph-and-arm-notes.md) — Graph
+  scope-ceiling investigation and the open ARM-query thread.
+- [`docs/refactor-plan.md`](docs/refactor-plan.md) — historical record
+  of the POC→base refactor. The refactor shipped; doc is preserved as
+  the postmortem.
 
-On Linux, the client only ships as a `.deb` for specific Ubuntu LTS releases,
-GUI-only, with no headless or scriptable mode. Anyone on Nix, Arch, Fedora,
-RHEL, Debian, or a CI runner is locked out entirely.
+---
 
-This project replaces that client with a portable Rust CLI/library that works
-the same way across macOS, Linux, and Windows, supports AAD and certificate
-auth, handles DNS suffixes correctly on every platform, and ships as a
-static binary plus nix flake.
+## 1. Why this exists
 
-## 2. Architecture
+Microsoft's Azure VPN Client is the only client that authenticates against
+Azure Virtual WAN P2S gateways with Microsoft Entra ID (AAD) auth, and on
+the platforms we care about it's broken or unavailable:
+
+1. **macOS DNS-suffix bug.** `<dnssuffixes>` in the profile XML are
+   parsed through the official client's Swift / Obj-C / C++ stack, but
+   `configureDNSSettings` never reads them back when populating
+   `NEDNSSettings.matchDomains`. Microsoft has not shipped a fix in any
+   release between 2.4.0 (Nov 2023) and 2.8.100 (Oct 2025). Split-DNS
+   to private endpoints silently fails.
+2. **No headless / CLI mode anywhere.** GUI-only; no scripting, no CI,
+   no daemon.
+3. **Linux is Ubuntu Desktop only.** No RPM, no AUR, no Nix, no
+   Debian stable, no Fedora, no headless. The official `.deb` has FHS
+   assumptions that fight Nix.
+
+We replace it with a portable Rust CLI + daemon that targets Azure
+P2S OpenVPN gateways specifically, owns the platform integration the
+official client gets wrong, and ships as a static binary on each
+platform's native package manager.
+
+---
+
+## 2. Current status (truth, not aspiration)
+
+| Capability | macOS | Linux | Windows |
+|---|---|---|---|
+| AAD device-code auth | shipped | shipped | n/a (auth crate is platform-agnostic) |
+| Refresh-token cache | shipped (file, mode 0600) | shipped | shipped |
+| Graph queries (`me`/`groups`/`org`/`manager`) | shipped | shipped | shipped |
+| Profile XML parse | shipped | shipped | shipped |
+| OpenVPN child wrap + mgmt iface | shipped | shipped | shipped (logic; not exercised) |
+| TUN device | via openvpn `utun` | via openvpn `tun` | not started (no `wintun`) |
+| Split-horizon DNS | shipped via `SCDynamicStore` | shipped via systemd-resolved + `/etc/resolv.conf` fallback | not started (NRPT) |
+| Route apply | shipped via `net-route` netlink/PF_ROUTE | shipped | not started |
+| Captive-portal pre-flight | shipped | shipped | shipped |
+| Reachability / sleep-wake watcher | shipped (`SCDynamicStore`) | shipped (rtnetlink + time-jump detector) | not started |
+| Daemon (`azvpnd`) + tarpc IPC | shipped (launchd) | shipped (systemd) | not started (no SCM service) |
+| `install-daemon` self-installer | shipped | shipped | not started |
+| Static `openvpn` 2.6.x in our flake | yes | yes (`pkgsStatic`) | not yet |
+| Cleanup-on-crash manifest | shipped | shipped | shipped |
+| Cert-auth (`AuthType::Certificate`) | **not started** | **not started** | **not started** |
+| HA failover (`secondaryProfileName`) | **blocked on test data** | blocked | blocked |
+| Broker auth (CompanyPortal / WAM) | not started | n/a | not started |
+| Packaging | Homebrew tap (tarball) | `.deb` via cargo-deb | not started |
+| Code-signed binaries | not done (unsigned tarball) | not applicable | not started |
+| CI matrix | macOS + Linux green | green | not in matrix |
+
+Distribution targets per existing memory: aarch64-apple-darwin and
+x86_64/aarch64-linux. No macOS Intel.
+
+---
+
+## 3. Architecture (current, not original)
 
 ```
-┌────────────────────────────────────────────────────────────────┐
-│ crates/cli — clap-driven binary                                │
-│   azvpn connect | disconnect | status | import | list          │
-└────────────────────────────────────────────────────────────────┘
-        │
-┌────────────────────────────────────────────────────────────────┐
-│ crates/core — state machine, lifecycle                         │
-│   connect/disconnect orchestration, retry, status reporting    │
-└────────────────────────────────────────────────────────────────┘
-        │
-┌──────────┐  ┌──────────┐  ┌──────────┐  ┌──────────────────┐
-│ profile  │  │  auth    │  │ openvpn  │  │   tunnel-<os>    │
-│ XML→     │  │ MSAL +   │  │ wraps    │  │ utun/tun/wintun  │
-│ Config   │  │ token    │  │ openvpn  │  │ + routing        │
-│          │  │ bridge   │  │ binary   │  │ + DNS settings   │
-└──────────┘  └──────────┘  └──────────┘  └──────────────────┘
+┌────────────────── azvpn (CLI, user) ──────────────────┐
+│  clap → tarpc client → unix socket /run/azvpn.sock    │
+└───────────────────────────┬───────────────────────────┘
+                            │ tarpc/bincode over length-delimited
+┌───────────────────────────▼───────────────────────────┐
+│  azvpnd (daemon, root) — launchd/systemd-managed      │
+│    ├── orchestration: core::commands::connect         │
+│    ├── retry/backoff:  connect/retry.rs (backon)      │
+│    ├── reachability:   core::reachability             │
+│    ├── route apply:    core::route (net-route)        │
+│    ├── cleanup:        core::cleanup (manifest)       │
+│    └── openvpn child:  openvpn::process + mgmt iface  │
+└────┬───────┬───────────────┬──────────────────────────┘
+     │       │               │
+┌────▼──┐ ┌──▼────┐  ┌───────▼────────┐  ┌──────────────┐
+│ auth  │ │ openvpn  │ tunnel-{darwin │  │ tunnel-windows│
+│ MSAL  │ │ wrap +   │  ,linux}      │  │   (stub)      │
+│device │ │ mgmt iface│ DNS per-OS    │  │               │
+└───────┘ └──────────┘└────────────────┘  └──────────────┘
 ```
 
-**Key decision: wrap reference `openvpn` 2.x via its management interface
-(TCP localhost socket).** This is the Mullvad model. The OpenVPN binary
-handles all packet I/O, TLS, cipher negotiation, and protocol state. The
-Rust side handles auth, lifecycle, platform integration. Skips months of
-protocol reimplementation work for a battle-tested data plane.
+Architectural decisions that aren't up for debate:
+- **Wrap upstream `openvpn` 2.x via its management socket** (Mullvad
+  model). We don't reimplement the OpenVPN data plane.
+- **Daemon + CLI split.** `azvpnd` owns root-side state (utun, routes,
+  DNS, openvpn child); `azvpn` is unprivileged and talks to it over a
+  unix socket. The patched static `openvpn` lives at
+  `<prefix>/libexec/openvpn` next to the daemon.
+- **No shelling out.** D-Bus via `zbus`, netlink via `rtnetlink` /
+  `net-route`, raw syscalls where needed. Only exception: macOS
+  launchd, which has no public non-CLI API.
+- **No userspace netstack.** Packets traverse the host kernel. This
+  is why platform DNS/routing integration is load-bearing for us —
+  contrast with tailscale-rs, which dodges system DNS by being a
+  userspace embedded library.
+- **Per-crate error enums, single CLI handler.** Shipped via the
+  refactor; see `docs/refactor-plan.md`.
 
-DNS suffix handling per platform:
+DNS-per-platform: `SCDynamicStore` supplemental match domains on
+macOS, systemd-resolved D-Bus (`SetLinkDomains` + `SetLinkDNS`) on
+Linux with a `/etc/resolv.conf` fallback for distros without it,
+NRPT (Name Resolution Policy Table) on Windows once it exists.
 
-- **macOS**: write `/etc/resolver/<suffix>` files dynamically when the
-  tunnel comes up, remove on disconnect. Each file: `nameserver <ip>`,
-  `options timeout:1 attempts:1` (the timeout option matters — without it,
-  off-VPN lookups stall ~5s before failing over).
-- **Linux**: `systemd-resolved` D-Bus calls to set per-link match domains;
-  fall back to direct `/etc/resolv.conf` rewrite if not present.
-- **Windows**: NRPT (Name Resolution Policy Table) via `windows-rs` Win32
-  calls or `Add-DnsClientNrptRule` shell-out. This is the same mechanism
-  the official client uses successfully on Windows.
+---
 
-## 3. Milestones
+## 4. Roadmap
 
-Each has a concrete deliverable and an acceptance test. Designed so the
-project ships value at every milestone and can be paused/stopped at any
-point with the current cut still useful.
+Six tracks. Within each track, items are roughly ordered by next-up.
+Track F (set-and-forget UX) is the product-defining one — without it,
+users still have to type `connect` after every reboot. Letter ordering
+is alphabetical, not priority; A–D fix correctness, E packages, F
+makes it disappear.
 
-### M0 — Spike: AAD wire format *(1 week)*
+### A. OpenVPN coverage tail
 
-The only genuinely unknown part of the project. Everything else is
-engineering against documented or observable behavior; this one requires
-reverse-engineering of Microsoft's proprietary AAD-OpenVPN auth extension.
+Most P0/P1 directives from `docs/openvpn-gaps.md` are shipped
+(`auth-token`, `>FATAL:`, `redirect-gateway`, cipher allow/deny,
+reconnect-with-backoff, byte counters, captive-portal probe,
+discontiguous-mask warn, IPv6-without-ifconfig drop, empty-reply
+warn, `route-gateway` first-wins, cleanup manifest, route rescue on
+stale-interface). What's still open:
 
-- **Deliverable**: a markdown doc (`docs/aad-wire-format.md`) describing
-  exactly how an MSAL-acquired Entra access token is presented to the
-  Azure gateway, including the OpenVPN protocol options sent, the
-  `auth-user-pass` shape, any `peer-info` fields, any custom static-
-  challenge behavior, and any push-reply-side specifics.
-- **Method**: read decompiled `acquireTokenAndConnect`, `connectWithToken`,
-  and `MMAVPNBuilder::authAAD` in `/tmp/azurevpn-ghidra/output/`.
-  Supplement with `tcpdump` of the official client connecting if the
-  decompilation leaves ambiguity.
-- **Acceptance**: a Rust spike of ~200 lines that opens TLS to
-  `wan.2zobhmuc3ev8dfvaqhcxez0n8.vpn.azure.com`, performs the OpenVPN
-  control-channel handshake, presents an Entra access token via the
-  observed auth mechanism, and reaches authenticated + push-reply state.
-  Tunnel doesn't need to carry traffic; just needs to authenticate.
+- **A.1** `block-outside-dns` push directive — Windows-only.
+  Implement alongside C.
+- **A.2** `dhcp-option ADAPTER_DOMAIN_SUFFIX` — Windows primary
+  suffix, distinct from search list. Implement alongside C.
+- **A.3** `data-ciphers` / `data-ciphers-fallback` (OpenVPN 2.5+
+  negotiation) — Azure uses this. Verify our cipher validation
+  catches the *negotiated* cipher, not just the static one.
+- **A.4** Confirm push-reply diff/re-apply (gaps #3) is fully wired
+  beyond the route-rescue case (#3a, shipped). Audit, then mark
+  shipped or open the gap.
+- **A.5** `explicit-exit-notify`, `inactive N` — lifecycle polish.
+  Low priority.
+- **A.6** Captive-portal probe: upgrade to multi-endpoint concurrent
+  probing per `/tmp/tailscale/net/captivedetection/captivedetection.go`.
+  Today we HEAD a single URL (`connectivitycheck.gstatic.com/generate_204`)
+  and warn on non-204. Tailscale fires 5 endpoints concurrently with
+  context cancel-on-first-positive, uses raw IPs to skip DNS, and
+  sends an `X-Tailscale-Challenge` header verified in the response
+  to catch tampering. Their false-positive guard: skip tunneling /
+  virtual interface names (`tailscale`, `tun`, `docker`, `kube`,
+  `wg`, `ipsec`, `utun`). Worth ~150 LOC for a much higher-signal
+  probe — but check our captive code first; we may have already done
+  some of this in `crates/cli/src/captive.rs`.
 
-### M1 — Cert-auth tunnel on macOS *(2 weeks)*
+### B. Microsoft Azure VPN Client feature parity
 
-Get the boring path working end-to-end before tackling AAD.
+What the official client does that we don't yet:
 
-- **Deliverable**: `azvpn connect --profile profile.xml` brings up a
-  working OpenVPN tunnel to the Azure gateway using a certificate auth
-  profile.
-- **Stack**: `openvpn` 2.x wrapped via management interface, `utun` via
-  `PF_SYSTEM`, manual routing via `route add`.
-- **Acceptance**: ping a host inside the VNet from a macOS laptop with
-  the tunnel up.
+- **B.1 Client-certificate auth** (`AuthType::Certificate`). Two
+  tiers, can ship independently:
+  - *Tier A* — embedded PEM (`<certificatedata>`). Write inline blob
+    to tempfile, pass openvpn `--cert`/`--key`. ~50–100 LOC. Real
+    Azure profiles rarely use this; the schema-harvest template has
+    `<hash i:nil="true"/>` and no `certificatedata`.
+  - *Tier B* — keystore by thumbprint (`<hash>`). The realistic
+    case. macOS `security-framework` (`SecItemCopyMatching` keyed on
+    `kSecAttrCertificateThumbprint`); Linux `cryptoki` or NSS;
+    Windows `Crypt32` (`CertFindCertificateInStore` with
+    `CERT_FIND_HASH`). ~500–1000 LOC per platform. Realistically
+    blocks on the Windows milestone since Crypt32 work overlaps.
+  - Connect path error fires at `crates/core/src/commands/connect.rs`
+    today: *"client certificate auth is not yet implemented."*
+  - **Blocker:** acquire a real cert-auth profile to test against.
+- **B.2 HA failover** (`<secondaryProfileName>` /
+  `<highavailability>`). Parser already covers both fields. Blocked
+  on (a) a real HA-paired profile (user's only profile has
+  `<secondaryProfileName>None</secondaryProfileName>`) and (b) an
+  RE'd failover mechanism — the macOS tunnel extension references
+  `secondaryProfileName` exactly once, in the XML parser, with zero
+  connection-logic refs. Microsoft probably does failover at the UI
+  layer, not the tunnel layer. Pickup trigger: a real paired
+  profile, or Windows `AzVpnAppBg.dll` decomp showing the logic.
+- **B.3 Brokered auth** — WAM (Web Account Manager) on Windows /
+  CompanyPortal on managed macOS. Lowest-friction sign-in in MDM
+  environments; picks up device-bound primary refresh tokens; can
+  use Windows Hello / TouchID. Cost: `windows-rs` WinRT bindings or
+  `MSAL.framework` Obj-C FFI. Defer to the relevant platform
+  milestone. Workaround today: system browser via `open::that()` —
+  strictly worse but a long way from broken.
+- **B.4 Real commercial-cloud public-client GUID.** Open empirical
+  question, low impact. We default to audience-as-client_id
+  (`41b23e61-…`); the USGov FOCI variant (`51bb15d4-…`) was tried
+  and reverted (commit `40aa460`). Pickup trigger: a live OAuth
+  mitm capture against the official client; not blocking anything.
 
-### M2 — Linux parity for cert-auth *(1 week)*
+### C. Windows tunnel
 
-- **Deliverable**: same cert-auth flow on Linux.
-- **Stack**: `tun-tap` crate, `ip route` shell-outs.
-- **Acceptance**: tunnel works from a NixOS box.
+The largest single chunk of remaining work. Everything Windows-shaped
+lives here. Items annotated with concrete prior-art file pointers we
+should read before writing our own version.
 
-### M3 — AAD/Entra auth flow *(2 weeks)*
+- **C.1** `wintun` crate for the TUN driver. Drop-in;
+  Microsoft-signed kernel side. *Reference:* Mullvad's
+  `talpid-tunnel/src/tun_provider/` wraps the third-party `tun` crate
+  on Windows — they don't publish their own, so the upstream `wintun`
+  or `tun` crate is the right starting point.
+- **C.2** NRPT (Name Resolution Policy Table) for split-horizon DNS
+  — the macOS `<dnssuffix>` bug fix translated to Windows.
+  *Reference:* `/tmp/tailscale/net/dns/nrpt_windows.go`. They write
+  registry directly via `golang.org/x/sys/windows/registry` (no WMI,
+  no PowerShell) to two paths:
+  `HKLM\SYSTEM\CurrentControlSet\Services\Dnscache\Parameters\DnsPolicyConfig`
+  (local) and `SOFTWARE\Policies\Microsoft\Windows NT\DNSClient\DnsPolicyConfig`
+  (Group Policy). They auto-detect which path to use, generate one
+  GUID per rule, track rule IDs in a custom `NRPTRuleIDs` value for
+  clean removal, and chunk at 50 domains per rule
+  (`nrptMaxDomainsPerRule`). Refresh via `gp.RefreshMachinePolicy(true)`
+  with an `isGPRefreshPending` flag to suppress re-detection feedback.
+  GP-change watch via `gp.NewChangeWatcher()`. *Alternate approach
+  worth noting:* Mullvad's `talpid-dns/src/windows/` does **not** use
+  NRPT — they set primary-interface DNS via three strategies
+  (`iphlpapi::SetInterfaceDnsSettings`, netsh CLI, TCP/IP registry)
+  with an `auto.rs` selector. Different design choice; if NRPT
+  bites us, falling to per-interface DNS is the documented retreat.
+- **C.3** Cert-by-thumbprint via `windows-sys` Crypt32
+  (`CertFindCertificateInStore` with `CERT_FIND_HASH`). Reuses B.1
+  Tier B work. No tailscale prior art — they're WireGuard-only.
+- **C.4** SCM service registration. **Use Mullvad's
+  `windows-service-rs` crate** (0.8.x on crates.io, dual MIT/Apache-2.0).
+  Saves ~200 lines of `windows-sys::Services` boilerplate per app.
+  Surface: `service_dispatcher::start(name, ffi_main)`,
+  `define_windows_service!` macro, `service_control_handler::register`
+  with closure handlers for
+  `ServiceControl::{Stop, Preshutdown, PowerEvent, SessionChange, Interrogate}`,
+  and `ServiceManager`/`Service` for install/uninstall via SCM.
+  *Reference pattern:* Mullvad's own `mullvad-daemon/src/system_service.rs`
+  — they treat `Preshutdown` (OS shutting down) and `Stop`
+  (user/recovery) differently for restart-recovery semantics; spawn
+  a `HibernationDetector` for `PowerEvent::{Suspend, Resume}` to
+  reset state across sleep. We should mirror that distinction in
+  `azvpnd`. *Also:* Tailscale's `cmd/tailscaled/install_windows.go`
+  has a nice recovery-actions setup — escalating delays (1s, 4s, 9s
+  …) via `mgr.RecoveryAction`, worth copying.
+- **C.5** `install-daemon` Windows path. Built on C.4. The
+  `tailscale`-style "CLI subcommand writes the service registration"
+  pattern we already use for launchd/systemd just needs a Windows
+  arm. Idempotent rerun for upgrades.
+- **C.6** Reachability / sleep-wake on Windows. *Reference:*
+  `/tmp/tailscale/net/netmon/netmon_windows.go` — subscribe via
+  `winipcfg.RegisterUnicastAddressChangeCallback` and
+  `RegisterRouteChangeCallback`; each callback hands off to a
+  goroutine over a buffered channel to avoid deadlocks (Rust
+  translation: callback `send`s to a `tokio::sync::mpsc`). They
+  carry a dummy `noDeadlockTicker` (5000h interval) just so the
+  runtime sees scheduled work — Rust's tokio doesn't need that, but
+  the callback-hand-off discipline does translate. *Mullvad
+  alternative:* `talpid-routing/src/windows/default_route_monitor.rs`
+  uses the same `Notify*Change` family plus `NotifyIpInterfaceChange`.
+  Both are good references; pick whichever maps cleaner to our
+  reachability-watcher shape.
+- **C.7** WiX (MSI) or NSIS installer. *Reference:* Tailscale's open
+  tree doesn't include their MSI build (closed-source); their
+  `clientupdate_windows.go` invokes `msiexec` with
+  `TS_UPDATE_WIN_MSI` and verifies Authenticode via
+  `authenticode.Verify()` checking subject `"Tailscale Inc."`. We
+  follow the same shape: WiX `.wxs`, embedded Authenticode manifest
+  (`cmd/tailscaled/windows-manifest.xml` is a good shape
+  reference), signed with our own cert.
+- **C.8** Static openvpn for Windows. The flake currently builds
+  static openvpn 2.6.x for Linux via `pkgsStatic`; Windows likely
+  needs a native MinGW path. Defer until the rest of C is in flight
+  — fall back to a system `openvpn.exe` on `$PATH` until then.
 
-- **Deliverable**: `azvpn connect` works against AAD-auth profiles. First
-  connect opens a browser for interactive auth; token cached in OS
-  keychain (`security` cmd on macOS, `secret-service` on Linux).
-- **Stack**: `microsoft-authentication` Rust crate if maintained;
-  otherwise raw OAuth device-code flow against `login.microsoftonline.com`.
-  Token then handed to OpenVPN via the wire format documented in M0.
-- **Acceptance**: `azvpn connect` from a clean machine: prompts Entra
-  login in browser, completes auth, tunnel comes up.
+Acceptance: tunnel works from a Windows VM,
+`Get-DnsClientNrptPolicy` shows expected entries, `sc.exe stop azvpnd`
+cleans up routes + NRPT entries, suspend/resume keeps the tunnel
+healthy (or reconnects deterministically).
 
-### M4 — DNS suffix push (the bug fix) *(1 week)*
+### D. Hygiene & test discipline (cribbed from tailscale-rs survey)
 
-This is the moment we're no longer blocked on Linear ticket ITN-121.
+Worth doing now before the surface grows further:
 
-- **Deliverable**: profile XML `<dnssuffixes>` actually drive system DNS
-  routing on macOS and Linux.
-- **Stack**: `/etc/resolver/` file management on macOS, `systemd-resolved`
-  D-Bus on Linux.
-- **Acceptance**: from a macOS dev machine with no pre-existing
-  `/etc/resolver/` files, default browser DoH on, tunnel connected:
-  `dscacheutil -q host -a name intdocs.remotethreatarsenal.com` returns
-  the private IP and `curl -I` returns 200.
+- **D.1** Network-gated integration tests behind
+  `AZVPN_TEST_NET=1` / `AZVPN_TEST_AAD=1`, mirroring
+  tailscale-rs's `TS_RS_TEST_NET` pattern. Convention prevents
+  accidental live-gateway hits from `cargo test`. Live tests against
+  the real vWAN gateway and the AAD device-code flow go behind these
+  gates. (Read-only against the user's Azure per the existing
+  no-Azure-writes memory.)
+- **D.2** `bin/check` script + `crates/checks` binary that mirrors
+  CI exactly (fmt → clippy lib → clippy non-lib → doc → deny →
+  machete → vet → nextest → doctests → build). Run locally before
+  pushing; no more CI surprises.
+- **D.3** `cargo-machete` (unused deps) and `cargo-vet` (supply-chain
+  attestation) added to the flake's devShell and to `bin/check`.
+  Run `vet` informational at first (`|| true`), harden later.
+- **D.4** Split clippy enforcement: lib targets get `-D missing_docs`,
+  bins/tests/examples/benches don't. Tailscale-rs does this via two
+  clippy invocations in their nix flake.
+- **D.5** Audit `azvpnd`'s shutdown for the
+  graceful-shutdown-with-timeout-then-kill pattern (tailscale-rs's
+  `Runtime::graceful_shutdown` + `Drop` escalation is a clean
+  reference). Already mostly there via `CancellationToken` — verify
+  the timeout path exists and openvpn always dies. Once C.4 lands,
+  extend to distinguish SCM `Stop` vs `Preshutdown` per Mullvad's
+  `mullvad-daemon/src/system_service.rs` pattern: `Preshutdown`
+  (system going down) should not try to leave routes/DNS clean for
+  next-boot recovery; `Stop` should. Add a `HibernationDetector`
+  equivalent for `PowerEvent::{Suspend, Resume}` so the tunnel resets
+  cleanly across sleep on Windows (the macOS/Linux reachability
+  watcher already covers this on their respective platforms).
+- **D.6** Tracing init helper centralized (already done in the
+  refactor) — add `AZVPN_LOG_PRETTY=1` toggle matching the
+  tailscale-rs convention.
 
-### M5 — Windows support *(1.5 weeks)*
+### E. Distribution & packaging completion
 
-- **Stack**: Wintun for the TUN driver (drop-in, kernel side already
-  Microsoft-signed), NRPT via `windows-rs`, `openvpn.exe` wrap.
-- **Acceptance**: tunnel works from a Windows VM, NRPT entries set
-  correctly per `Get-DnsClientNrptPolicy`.
+- **E.1** `.rpm` via `cargo-generate-rpm`. Reuse the `.deb`'s
+  patched-openvpn + systemd unit setup.
+- **E.2** AUR PKGBUILD. Same shape; Arch's static openvpn package
+  may save us building one.
+- **E.3** Windows installer (WiX or NSIS) — depends on C.7.
+- **E.4** macOS code-signing + notarization for the Homebrew tarball
+  binaries. Currently unsigned; brew works but Gatekeeper grumbles
+  on first run.
+- **E.5** GitHub Actions release pipeline end-to-end check
+  (`release.yml` exists, 147 lines — verify on a tag push).
+- **E.6** Comparison matrix in the README: this client vs.
+  Microsoft's, feature-by-feature.
 
-### M6 — Polish, packaging, distribution *(1-2 weeks)*
+---
 
-- nix flake with `packages.default` for each platform.
-- Homebrew tap with `azvpn.rb`.
-- `.deb` (debhelper or `cargo-deb`).
-- `.rpm` (`cargo-generate-rpm`).
-- AUR PKGBUILD.
-- GitHub Actions release pipeline → tagged builds → static binaries.
-- README with quickstart, profile import, troubleshooting, comparison
-  matrix vs. Microsoft's client.
+### F. Set-and-forget UX (cribbed from tailscale + mullvad)
 
-**Total**: roughly 8-11 weeks of focused effort. Part-time pace over a
-quarter; faster if dedicated.
+The product goal: install once, type one command, never think about it
+again. The current model is session-scoped — `azvpn connect` brings
+the tunnel up *now*; after a reboot or daemon restart, the user has
+to do it again. Both Tailscale (`WantRunning` in `ipn.Prefs`) and
+Mullvad (`target-start-state.json` in `mullvad-daemon/src/target_state.rs`)
+solved this by separating *target state* (what the user wants) from
+*actual state* (what's currently true) and having the daemon
+auto-converge on every startup. This is the central addition.
 
-## 4. Risk register
+- **F.1 Declarative target state.** New verbs:
+  - `azvpn up [--profile PATH]` — writes a persistent target file
+    (`/var/lib/azvpn/target.json` on Linux, `/Library/Application
+    Support/com.azvpn/target.json` on macOS, atomic temp+rename).
+    Contents: `{ state: "Connected", profile, auth_mode }`. On
+    first `up`, the profile path is required; subsequent `up` uses
+    the stored one.
+  - `azvpn down` — writes `{ state: "Disconnected" }`.
+  - `azvpnd` on every cold start reads the target file. If
+    `state == Connected`, it kicks off a connect via the existing
+    `core::commands::connect::run` pipeline. If `Disconnected`, it
+    sits idle waiting for RPCs.
+  - `connect` / `disconnect` stay as transient one-off verbs (don't
+    touch the target file). Useful for CI, scripted single-shot
+    sessions, debugging.
+  - *References:* Tailscale `ipn/ipnlocal/local.go:2616–2742`
+    (`LocalBackend.Start` reading prefs, line 2742
+    `wantRunning := prefs.WantRunning()`); Mullvad
+    `mullvad-daemon/src/target_state.rs` (file-backed JSON,
+    "default to safe" on corrupt or missing — for us, default is
+    `Disconnected`, opposite of Mullvad's killswitch-default).
 
-Ordered by how badly each one would derail the project.
+- **F.2 Streaming state over IPC.** Today our tarpc surface is all
+  one-shot (`connect`, `status`, `info`, `pushed`). Add a
+  server-streaming RPC `watch() -> Stream<StateUpdate>` so a CLI
+  (or future GUI) can subscribe to state changes instead of polling
+  `status`. tarpc supports streaming via futures-streams over the
+  same length-delimited channel we already use. New CLI: `azvpn
+  watch` prints state transitions as they happen. *References:*
+  Tailscale's IPN bus; Mullvad
+  `mullvad-management-interface/proto/management_interface.proto`
+  `EventsListen() returns (stream DaemonEvent)`.
+
+- **F.3 Daemon-level auto-reconnect (not just retry-per-attempt).**
+  Today `crates/core/src/commands/connect/retry.rs` retries a single
+  failing connection attempt with backoff via `backon`. Tailscale
+  goes a step further: a `reconnectTimer`
+  (`ipn/ipnlocal/local.go:4744`) re-sets `WantRunning` after a delay
+  even when a top-level connect has fully bailed. For us: when the
+  daemon's connect loop exhausts `retry.rs` and exits with `Fatal`,
+  if the target file still says `Connected`, schedule a
+  longer-interval retry (e.g., 30 s → 5 min cap) instead of waiting
+  for human intervention. Fatal-during-converge differs from
+  fatal-during-explicit-`connect`; the latter bubbles up to the
+  user, the former keeps trying quietly.
+
+- **F.4 Health / warnings subsystem.** Replace ad-hoc `warn!`s with
+  a typed health surface. *Reference:* Tailscale
+  `/tmp/tailscale/health/health.go:80–140` and
+  `health/healthmsg/healthmsg.go`. Each subsystem registers
+  `Warnable`s; the tracker filters down to user-actionable ones
+  (e.g., the `upWorthyWarning` filter in `cmd/tailscale/cli/up.go:845`).
+  `azvpn status` would render these as `#` comments, matching
+  Tailscale's convention. Examples we want surfaced:
+  - "AAD refresh token expires in 3 days — run `azvpn login` to
+    refresh interactively"
+  - "Gateway has been pushing the same routes for 14 days; profile
+    XML may be stale"
+  - "Captive portal detected at last connect attempt"
+  Things we should *not* surface (background noise): "openvpn
+  restarted once and recovered," "reachability event debounced,"
+  "DNS server temporarily 5xx but recovered." Those stay in the
+  daemon log.
+
+- **F.5 `azvpn status` polish.** Already shipped throughput, last
+  error, reconnects — add:
+  - `--json` flag for scripted callers (Tailscale's `status.go:88`
+    pattern; pure passthrough of the daemon's `StatusReport`
+    serde-Serialize).
+  - `tabwriter` for the human format (already pretty good; minor
+    polish).
+  - When not connected, show the target state cleanly: "Target:
+    Connected to profile X; daemon is currently reconnecting (next
+    attempt in 14 s)." Today we show "no active connection"
+    regardless of intent.
+
+- **F.6 Self-update.** `azvpn update` that delegates to the native
+  package manager. *Reference:* Tailscale
+  `/tmp/tailscale/cmd/tailscale/cli/update.go:33–104` (per-platform
+  dispatcher) + `clientupdate/clientupdate.go:140–200` (the
+  per-distro logic — `apt-get install --only-upgrade tailscale` on
+  Debian, `dnf upgrade tailscale` on Fedora, `pacman -Sy tailscale`
+  on Arch, `brew upgrade jlevere/tap/azvpn` on macOS,
+  `msiexec` on Windows). Pre-flight check: refuse to update if
+  target state is Connected unless `--force` (avoid breaking a live
+  session). Auto-update *off* by default; Mullvad's posture for
+  root-owning daemons is the right default.
+
+- **F.7 Shell completion.** `clap_complete` (Mullvad uses this in
+  `mullvad-cli/Cargo.toml`, depends on `clap_complete ^4.4`).
+  Add an `azvpn completion <shell>` subcommand that prints to
+  stdout. Packaging-time install:
+  - Homebrew formula: `generate_completions_from_executable(bin/"azvpn", "completion")`
+  - `.deb`: ship `/usr/share/bash-completion/completions/azvpn`,
+    `/usr/share/zsh/vendor-completions/_azvpn`,
+    `/usr/share/fish/vendor_completions.d/azvpn.fish`
+
+- **F.8 DNS restore-from-backup audit.** Mullvad's
+  `talpid-dns/src/linux/static_resolv_conf.rs` (and equivalents)
+  back up `/etc/resolv.conf` to a sibling file *before* applying
+  VPN DNS, and restore from that backup on disconnect — crash-safe
+  by virtue of the backup existing on disk. Our `crates/core/src/cleanup.rs`
+  manifest covers macOS supplemental DNS and routes; verify the
+  Linux `/etc/resolv.conf` fallback path also does
+  backup-before-apply + restore-on-cleanup. If not, add it. (The
+  systemd-resolved path is fine — per-link state is naturally
+  scoped to the link and goes away when the link dies.)
+
+- **F.9 Pre-emptive AAD refresh-token refresh.** Today we refresh
+  the RT at connect time. AAD RTs expire after ~90 days of
+  inactivity, sliding. If the daemon stays connected for 89 days
+  without ever doing a Graph call or a reneg-with-AT refresh, the
+  next reneg can fail with `invalid_grant`. Background task in the
+  daemon: every ~24 h, if `now > rt_issued_at + 60 days`, run a
+  silent refresh (existing `auth::refresh::refresh_grant`) against
+  the gateway audience and persist. Surface as F.4 warning if a
+  silent refresh ever fails ("AAD refresh token rejected — `azvpn
+  login` to re-auth"). Edge case: on a fresh `azvpn login`, the
+  daemon should pick up the new cache atomically — we already use
+  temp+rename, just confirm.
+
+- **F.10 `azvpn login` as a first-class command.** Today the
+  device-code flow runs inside `connect`. Split it out: `azvpn
+  login` opens the browser, runs the device-code flow, persists
+  the RT cache, **does not connect**. Useful when:
+  - You want to refresh creds before they expire (F.9 fallback).
+  - You're scripting and want to verify auth without bringing the
+    tunnel up.
+  - The "headless / SSH / service" fallback path needs a clean
+    home: print the URL + code, optionally write `xdg-open` /
+    `open` URL to a tmpfile if the user wants to copy it.
+  *Reference:* Tailscale's `cli/login.go` is just an alias for
+  `cli/up.go:runUp` with `--login-only`; same shape works for us.
+
+
+## 5. Deferred / declined, with reasoning preserved
+
+- **FOCI family participation.** Declined. Sharing refresh tokens
+  with Outlook / Teams / OneDrive widens our blast radius for cache
+  compromise; the only real motivation is cache interop, and that's
+  a bad bet (three per-platform cache readers, and the official
+  client isn't meaningfully usable on Linux anyway). Long form in
+  `research/aad-flow-notes.md`. Pickup trigger: probably never.
+- **Refresh-token rotation drift in `cloud::exchange_for`.** Small,
+  theoretical. AAD's ~5 min grace window plus the typical pattern
+  (Graph/ARM calls interleaved with `connect`) means the cache
+  rotates before drift bites. Fix shape: `save_rotated_refresh_token`
+  that touches only the RT slot (so we don't overwrite the
+  gateway-AT with a Graph-AT). Defer until observed.
+- **Re-architect to userspace netstack.** Declined. The whole point
+  is that Azure expects an OS-level VPN; bypassing it would defeat
+  split-DNS by definition. tailscale-rs's smoltcp model is the
+  wrong shape for our problem.
+- **Killswitch / LAN blocking / obfuscation.** Declined per memory:
+  this is a work-VPN, not a privacy-VPN. Hostile UX for the target
+  use case (corp infra access via Azure P2S).
+- **macOS Intel.** Declined per memory. aarch64-darwin only.
+- **Cross-compile via `cross` / pkgsCross / docker-cross.** Declined
+  per memory unless explicitly requested. Build natively on each
+  target.
+
+---
+
+## 6. Risk register (current, not original)
 
 | # | Risk | Likelihood | Impact | Mitigation |
-|---|------|------------|--------|------------|
-| 1 | AAD token → OpenVPN handoff more complex than expected (challenge-response, custom peer-info, etc.) | Medium | High | M0 spike, in week 1, before anything else |
-| 2 | Microsoft updates the gateway and breaks third-party reimplementations | Low | Medium | Pin to observed wire format; track Windows client release notes for protocol changes; have a fallback to fail-closed with a clear error |
-| 3 | DNS suffix semantics subtler than assumed (e.g., interaction with `defaultDomains` from server push) | Low | Low | M4 acceptance test catches this; we already understand the macOS-side mechanism from the Ghidra work |
-| 4 | OpenVPN management interface insufficient for some Azure-specific control behavior | Very low | Medium | Mullvad has run on this for years; if it bites, fall back to wrapping `openvpn3` library via FFI |
-| 5 | `wintun-rs` or other key crate becomes unmaintained mid-project | Low | Medium | Vendor the bindings if needed; the Wintun ABI is small and stable |
+|---|---|---|---|---|
+| 1 | Microsoft updates the gateway and breaks our wire format | Low | Medium | Pinned to observed behavior; release-notes watch; fail-closed on negotiation surprises |
+| 2 | Real cert-auth profile schema diverges from our schema-harvest sample | Medium | Low | Tier A (embedded PEM) is cheap insurance; Tier B blocks on test data anyway |
+| 3 | Windows code-signing cert procurement drags | Medium | Low | Doesn't block development, only public release |
+| 4 | Static openvpn build (for Linux .deb / future Windows) breaks on a 2.7 release | Medium | Low | Pinned commit in the flake; bump deliberately |
+| 5 | systemd-resolved API changes (D-Bus method signatures) | Low | Medium | Direct-`/etc/resolv.conf` fallback already in place |
+| 6 | A new Azure auth scheme appears (e.g., Conditional Access device cert) | Low | High | Track release notes; cert-auth Tier B unlocks part of the answer |
 
-Only risk #1 is "could go very wrong." Everything else is "could be a couple
-extra days." That's why M0 lands first.
+---
 
-## 5. Open decisions
+## 7. References
 
-Decisions to make before M0 or as part of M0:
-
-- **Repo location**: GitHub under `jlevere/azvpn` (personal), or under
-  `remotethreat/azvpn` (work-affiliated), or under a new neutral org?
-- **Public vs. private**: open-source from day one, or private until MVP?
-  Lean toward public; the audience benefits from being able to find this.
-- **Tracking**: Linear (consistent with ITN-121), GitHub Issues, both, or
-  neither (markdown TODO files)?
-- **Timeline**: side-project pace or push for a 6-week MVP?
-- **MVP scope**: minimum useful cut is **AAD + macOS + DNS suffix works**.
-  That's M0 + M1 + M3 + M4 macOS path. ~5 weeks. Linux/Windows can follow.
-- **License**: MIT OR Apache-2.0 (dual) assumed; confirm.
-- **Name**: `azvpn` placeholder; revisit before public repo.
-
-## 6. References
-
-- Microsoft docs that document the schema (and the macOS limitation):
-  - <https://learn.microsoft.com/en-us/azure/vpn-gateway/azure-vpn-client-optional-configurations>
-  - <https://learn.microsoft.com/en-us/azure/virtual-wan/azure-vpn-client-optional-configurations>
-- Azure VPN Client release notes (track for the upstream fix):
-  - <https://learn.microsoft.com/en-us/azure/vpn-gateway/azure-vpn-client-versions>
-- Apple API the fix would call (and the one we'll call ourselves):
-  - <https://developer.apple.com/documentation/networkextension/nednssettings/matchdomains>
-- Mullvad client (the architectural reference for wrapping openvpn from
-  Rust):
-  - <https://github.com/mullvad/mullvadvpn-app>
-- Wintun (Windows userspace TUN driver):
-  - <https://www.wintun.net/>
-- Linear ticket this project potentially unblocks: ITN-121
-- Decompiled binary reference: `/tmp/azurevpn-ghidra/output/`
-- Original Microsoft VPN Client binary under study:
+- Microsoft profile schema:
+  <https://learn.microsoft.com/en-us/azure/vpn-gateway/azure-vpn-client-optional-configurations>
+- Azure VPN Client release notes (track for protocol changes):
+  <https://learn.microsoft.com/en-us/azure/vpn-gateway/azure-vpn-client-versions>
+- Apple's `NEDNSSettings.matchDomains` (the API the official client
+  forgets to call): <https://developer.apple.com/documentation/networkextension/nednssettings/matchdomains>
+- Mullvad client (architectural reference for wrapping openvpn from
+  Rust): <https://github.com/mullvad/mullvadvpn-app>. Highest-value
+  Windows pieces if/when we get there:
+  - `talpid-dns/src/windows/` — per-interface DNS via three
+    strategies (`iphlpapi::SetInterfaceDnsSettings`, netsh, TCP/IP
+    registry) with an `auto.rs` selector. *Alternate* approach to
+    NRPT (C.2); fallback if NRPT bites us.
+  - `talpid-routing/src/windows/{route_manager.rs,default_route_monitor.rs}`
+    — route apply + link-change detection via `NotifyRouteChange2`
+    / `NotifyIpInterfaceChange` / `NotifyUnicastIpAddressChange`.
+    Reference for C.6.
+  - `mullvad-daemon/src/system_service.rs` — SCM service lifecycle,
+    `Preshutdown` vs `Stop` semantics, hibernation detector.
+    Reference for C.4 + D.5.
+- Mullvad `windows-service-rs` (library, dual MIT/Apache-2.0):
+  <https://github.com/mullvad/windows-service-rs>. Drop-in for C.4 —
+  saves ~200 lines of `windows-sys::Services` boilerplate. Surface:
+  `service_dispatcher::start`, `define_windows_service!`,
+  `service_control_handler::register`, `ServiceManager`, `Service`.
+- Wintun (Windows userspace TUN driver): <https://www.wintun.net/>
+- Tailscale (the Go tree at `/tmp/tailscale/`) — canonical reference
+  for platform DNS, link-change detection, sleep/wake, and
+  NetworkManager-Reapply caveats. See
+  `net/dns/manager_{darwin,linux,windows}.go`, `net/dns/resolved.go`,
+  `net/dns/nrpt_windows.go`, `net/netmon/`. The Rust port
+  (`tailscale-rs`) deliberately omits all of this — it's a userspace
+  netstack — so don't look there for system-integration patterns.
+- Decompiled official client (Ghidra): `/tmp/azurevpn-ghidra/output/`
+  (588 functions; primary + OpenVPN layer).
+- Original Microsoft tunnel extension under study:
   `/Applications/Azure VPN Client.app/Contents/PlugIns/MacTunnelExtension.appex/Contents/MacOS/MacTunnelExtension`
+- Linear ticket this project unblocks: ITN-121 (split-horizon DNS
+  on macOS).

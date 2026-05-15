@@ -1,105 +1,154 @@
 # azvpn
 
 A cross-platform Azure VPN client in Rust. Connects to Azure Virtual WAN
-P2S OpenVPN gateways with Microsoft Entra ID (AAD) or certificate
-authentication, headless and scriptable, on macOS, Linux, and Windows.
+P2S OpenVPN gateways with Microsoft Entra ID (AAD) authentication,
+headless and scriptable, with a daemon + CLI split and native packaging
+on each platform.
 
 This project exists because Microsoft's official Azure VPN Client is
 broken or unavailable for our use case in three specific ways:
 
-1. **macOS DNS suffix bug** — `<dnssuffixes>` in the profile XML are
+1. **macOS DNS-suffix bug** — `<dnssuffixes>` in the profile XML are
    parsed end-to-end through the Microsoft client's Swift / Obj-C / C++
-   stack, but the `configureDNSSettings` function never reads them back
-   when populating `NEDNSSettings.matchDomains`. Microsoft has not
-   shipped a fix in any release between 2.4.0 (Nov 2023) and 2.8.100
-   (Oct 2025). `azvpn` writes the same `SCDynamicStore` key
-   `NEDNSSettings.matchDomains` would have written — only correctly
-   populated.
-2. **No headless / CLI mode** on any platform — Microsoft's client is
+   stack, but `configureDNSSettings` never reads them back when
+   populating `NEDNSSettings.matchDomains`. Microsoft has not shipped a
+   fix in any release between 2.4.0 (Nov 2023) and 2.8.100 (Oct 2025).
+   `azvpn` writes the same `SCDynamicStore` supplemental-match-domains
+   key the API would have written — only correctly populated.
+2. **No headless / CLI mode** on any platform. Microsoft's client is
    GUI-only.
-3. **Linux is Ubuntu Desktop only** — no RPM, no AUR, no Nix, no
-   headless.
+3. **Linux is Ubuntu Desktop only.** No RPM, no AUR, no Nix, no Debian
+   stable, no Fedora, no headless. The official `.deb` has FHS
+   assumptions that fight Nix.
 
-See [`PLAN.md`](PLAN.md) for the milestone-by-milestone roadmap and the
-M0 spike that derisks the AAD-to-OpenVPN auth handoff.
+See [`PLAN.md`](PLAN.md) for the current roadmap, status by capability,
+and the deferred-work register.
 
 ## Status
 
-| Platform | State | Notes |
-|----------|-------|-------|
-| macOS    | working end-to-end | AAD device-code, split-horizon DNS via SCDynamicStore, route programming via openvpn |
-| Linux    | scaffolded, not implemented | `tunnel-linux` crate is a stub |
-| Windows  | scaffolded, not implemented | `tunnel-windows` crate is a stub |
+| Platform | State |
+|---|---|
+| macOS (aarch64) | shipped — AAD, split-horizon DNS, routing, daemon, reachability, captive probe, Homebrew tap |
+| Linux (x86_64, aarch64) | shipped — AAD, systemd-resolved DNS (with `/etc/resolv.conf` fallback), daemon, reachability, `.deb` via cargo-deb |
+| Windows | not started — `tunnel-windows` is a stub |
 
-The macOS path is the one with the bug we're fixing; it's the reference
-implementation. Linux / Windows are next milestones (see
-[`docs/refactor-plan.md`](docs/refactor-plan.md)).
+Authentication today is AAD device-code. Client-certificate auth
+(`AuthType::Certificate`) is parsed but not yet implemented — connect
+errors clearly when handed a cert-auth profile. See PLAN §4.B.1.
 
 ## Building
 
-The project builds via standard `cargo`, with a Nix flake for
-reproducible builds on Determinate Systems Nix.
-
 ```sh
-cargo build --release          # ./target/release/azvpn
-nix build                      # ./result/bin/azvpn
+cargo build --release          # ./target/release/{azvpn,azvpnd}
+nix build                      # ./result/bin/{azvpn,azvpnd}
+                               # plus ./result/libexec/azvpn-openvpn
+                               # (patched static openvpn 2.6.x)
 ```
 
 MSRV: Rust 1.85 (pinned in `rust-toolchain.toml`).
 
-A working `openvpn` 2.x must be on `$PATH` (or pointed at via
-`--openvpn`). On macOS: `brew install openvpn`.
+The Nix flake builds a patched, statically-linked `openvpn` 2.6.x and
+places it at `<prefix>/libexec/azvpn-openvpn`; `azvpnd` resolves it via
+a relative path. For non-Nix builds you can supply your own `openvpn`
+on `$PATH` (macOS: `brew install openvpn`; Linux: distro package).
+
+## Installing
+
+`azvpn` ships a daemon (`azvpnd`) that owns the privileged side of the
+stack — utun/tun device, openvpn child, routes, DNS — and a CLI
+(`azvpn`) that talks to it over a unix socket. The same binary
+self-installs the daemon under the platform-native service manager.
+
+**macOS** (Homebrew):
+```sh
+brew install jlevere/tap/azvpn
+sudo azvpn install-daemon       # writes launchd plist, bootstraps
+```
+
+**Linux** (Debian / Ubuntu, via the `.deb`):
+```sh
+sudo apt install ./azvpn_0.1.0_amd64.deb
+sudo azvpn install-daemon       # writes systemd unit, enables + starts
+```
+
+`install-daemon` is idempotent: rerun it after upgrades and it
+re-points the service file at the newly-installed binaries.
 
 ## Using it
 
-`azvpn` needs a Microsoft Azure VPN profile XML — usually obtained from
-the Azure Portal by downloading the VPN client config zip. The path to
-the profile is the only required argument.
+`azvpn` reads an Azure VPN profile XML (download the client config zip
+from the Azure Portal; the XML is inside).
 
 ```sh
-# Connect (foreground; Ctrl-C to disconnect).
-sudo azvpn connect --profile ~/path/to/AzureVpnProfile.xml
+# Connect to the gateway in the profile.
+azvpn connect --profile ~/path/to/AzureVpnProfile.xml
 
-# Inspect what the gateway pushed (DNS servers, routes, MTU…).
-sudo azvpn pushed
+# Status: connection state, throughput, push-reply summary, last error.
+azvpn status
+
+# Inspect what the gateway pushed (DNS servers, routes, MTU, cipher).
+azvpn pushed
 
 # Verify split-horizon DNS is wired.
-sudo azvpn dns lookup intdocs.corp.example.com
+azvpn dns lookup intdocs.corp.example.com
 
-# Query Microsoft Graph using the cached refresh token.
-sudo azvpn me
-sudo azvpn groups
-sudo azvpn org
+# Microsoft Graph identity queries via the cached refresh token.
+azvpn me
+azvpn groups
+azvpn org
+azvpn manager
 
-# Disconnect (signals the live connect process).
-sudo azvpn disconnect
+# Disconnect.
+azvpn disconnect
 ```
 
-`sudo` is needed for the openvpn child process (utun device, route
-programming, `SCDynamicStore` write); the device-code browser opens as
-your real user via `SUDO_USER`.
+The CLI runs unprivileged; `sudo` is only needed once at install time
+(`install-daemon`). The device-code browser opens as your real user
+even when the daemon is started by launchd / systemd.
 
 ## Architecture
+
+```
+azvpn (CLI, unprivileged) ──tarpc/unix-socket──► azvpnd (daemon, root)
+                                                     │
+                                                     ├─ openvpn child (libexec/azvpn-openvpn)
+                                                     ├─ DNS (SCDynamicStore / systemd-resolved)
+                                                     ├─ routes (net-route: netlink/PF_ROUTE)
+                                                     └─ reachability watcher (sleep/wake/link-change)
+```
 
 Workspace layout:
 
 ```
 crates/
-  cli/             # argument parsing + presentation only
-  core/            # orchestration: connect lifecycle, DnsManager trait,
-                   # commands::{connect,disconnect,status,info,pushed}
+  cli/             # clap, presentation, daemon-client wiring (no orchestration)
+  core/            # connect/disconnect lifecycle, retry/backoff, route + DNS apply,
+                   # reachability, cleanup-on-crash manifest, validation
   auth/            # AAD device-code, refresh-token grant, Graph/ARM helpers
   profile/         # Azure VPN profile XML parser
   openvpn/         # openvpn child process + management-interface client
-  tunnel-darwin/   # macOS SCDynamicStore DNS impl
-  tunnel-linux/    # stub
+  ipc/             # tarpc service definition shared between azvpn and azvpnd
+  daemon/          # azvpnd binary
+  tunnel-darwin/   # SCDynamicStore split-horizon DNS
+  tunnel-linux/    # systemd-resolved DNS + /etc/resolv.conf fallback
   tunnel-windows/  # stub
-packaging/         # launchd / systemd templates, Info.plist, entitlements
-docs/              # design notes, refactor plans, graph/ARM exploration
+packaging/         # launchd plist, systemd unit, .deb scripts, Homebrew formula
+docs/              # OpenVPN coverage gaps, Graph/ARM notes, refactor postmortem
 ```
 
-See [`CLAUDE.md`](CLAUDE.md) for the working notes on conventions and
-context for AI-assisted development.
+Architectural decisions (also captured in PLAN.md):
+
+- **Wrap upstream `openvpn` 2.x via its management socket** (Mullvad
+  model). We don't reimplement the OpenVPN data plane.
+- **Daemon + CLI split.** Root-side state stays in `azvpnd`; the CLI
+  is unprivileged and stateless beyond the refresh-token cache.
+- **No shelling out.** D-Bus via `zbus`, netlink via `rtnetlink` /
+  `net-route`, raw syscalls where needed. Exception: macOS launchd,
+  which has no public non-CLI API.
+- **No userspace netstack.** Packets traverse the host kernel — that's
+  why platform DNS/routing is load-bearing for us. Contrast with
+  tailscale-rs's smoltcp model, which sidesteps the whole problem by
+  not being a system VPN.
 
 ## License
 
