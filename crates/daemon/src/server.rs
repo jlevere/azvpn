@@ -7,9 +7,9 @@ use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use azvpn_core::commands::connect::{self, ConnectOptions, ConnectionStatus};
+use azvpn_core::metrics::ConnectionMetrics;
 use azvpn_ipc::{
-    AzvpnApi, ByteCount, ConnectRequest, DisconnectOutcome, InfoReport, IpcError, PushOptions,
-    StatusReport,
+    AzvpnApi, ConnectRequest, DisconnectOutcome, InfoReport, IpcError, PushOptions, StatusReport,
 };
 use azvpn_openvpn::VpnState;
 use azvpn_profile::VpnProfile;
@@ -32,7 +32,7 @@ struct ActiveConnection {
     cancel: CancellationToken,
     status_rx: watch::Receiver<ConnectionStatus>,
     pushed_rx: watch::Receiver<Option<PushOptions>>,
-    bytes_rx: watch::Receiver<Option<(u64, u64)>>,
+    metrics_rx: watch::Receiver<ConnectionMetrics>,
     server_fqdn: String,
     profile_path: PathBuf,
     mgmt_addr: SocketAddr,
@@ -113,7 +113,7 @@ impl AzvpnApi for AzvpndServer {
         let cancel = CancellationToken::new();
         let (status_tx, _) = watch::channel(ConnectionStatus::Idle);
         let (pushed_tx, _) = watch::channel::<Option<PushOptions>>(None);
-        let (bytes_tx, _) = watch::channel::<Option<(u64, u64)>>(None);
+        let (metrics_tx, _) = watch::channel::<ConnectionMetrics>(ConnectionMetrics::default());
         let mut wait_rx = status_tx.subscribe();
 
         let started_at = SystemTime::now()
@@ -124,7 +124,7 @@ impl AzvpnApi for AzvpndServer {
             cancel: cancel.clone(),
             status_rx: status_tx.subscribe(),
             pushed_rx: pushed_tx.subscribe(),
-            bytes_rx: bytes_tx.subscribe(),
+            metrics_rx: metrics_tx.subscribe(),
             server_fqdn,
             profile_path: req.profile_path,
             mgmt_addr,
@@ -140,7 +140,7 @@ impl AzvpnApi for AzvpndServer {
                 req.access_token,
                 status_tx,
                 pushed_tx,
-                bytes_tx,
+                metrics_tx,
                 cancel,
             )
             .await;
@@ -236,10 +236,7 @@ fn build_status(conn: &ActiveConnection) -> StatusReport {
         .as_ref()
         .map(|p| (Vec::<String>::new(), p.dns_servers.clone()))
         .unwrap_or_default();
-    let bytes = conn
-        .bytes_rx
-        .borrow()
-        .map(|(rx_bytes, tx_bytes)| ByteCount { rx_bytes, tx_bytes });
+    let metrics = conn.metrics_rx.borrow().clone();
     StatusReport {
         server_fqdn: conn.server_fqdn.clone(),
         profile_path: conn.profile_path.clone(),
@@ -249,7 +246,11 @@ fn build_status(conn: &ActiveConnection) -> StatusReport {
         local_ip,
         dns_suffixes,
         dns_servers,
-        bytes,
+        bytes: metrics.bytes,
+        throughput: metrics.throughput,
+        reconnects: metrics.reconnects,
+        last_reconnect_at: metrics.last_reconnect_at,
+        last_error: metrics.last_error,
     }
 }
 

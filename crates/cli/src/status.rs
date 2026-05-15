@@ -1,7 +1,7 @@
 //! `azvpn status` — talks to the daemon over tarpc and renders the
 //! returned `StatusReport`. No filesystem snooping.
 
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use azvpn_ipc::StatusReport;
 use humansize::{BINARY, format_size};
@@ -32,12 +32,43 @@ fn print(r: &StatusReport) {
         println!("dns:     {}", join_ips(&r.dns_servers));
     }
     if let Some(b) = r.bytes {
+        let rate = r
+            .throughput
+            .map(|t| {
+                format!(
+                    "  ({} rx / {} tx, last {}s)",
+                    format_size(t.rx_bps, BINARY),
+                    format_size(t.tx_bps, BINARY),
+                    t.window_secs,
+                )
+            })
+            .unwrap_or_default();
         println!(
-            "traffic: rx {} / tx {}",
+            "traffic: rx {} / tx {}{rate}",
             format_size(b.rx_bytes, BINARY),
             format_size(b.tx_bytes, BINARY)
         );
     }
+    if r.reconnects > 0 {
+        let when = r
+            .last_reconnect_at
+            .and_then(time_ago)
+            .map(|s| format!(" (last {s} ago)"))
+            .unwrap_or_default();
+        println!("reconnects: {}{when}", r.reconnects);
+    }
+    if let Some(err) = &r.last_error {
+        println!("last error: {err}");
+    }
+}
+
+/// Format "N ago" from a Unix epoch timestamp. Falls back to `None`
+/// if the timestamp is in the future or the system clock is somehow
+/// before the epoch — both are weird-but-possible.
+fn time_ago(at: u64) -> Option<String> {
+    let now = SystemTime::now().duration_since(UNIX_EPOCH).ok()?.as_secs();
+    let secs = now.checked_sub(at)?;
+    Some(humantime::format_duration(Duration::from_secs(secs)).to_string())
 }
 
 /// Render uptime as `1h 23m 45s` via [`humantime`]. We trim the

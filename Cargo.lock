@@ -292,6 +292,7 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "azvpn-auth",
+ "azvpn-ipc",
  "azvpn-openvpn",
  "azvpn-profile",
  "azvpn-tunnel-darwin",

@@ -80,6 +80,26 @@ pub struct StatusReport {
     /// `--bytecount` started reporting. `None` until the first
     /// `>BYTECOUNT:` event arrives (typically within ~1s of CONNECTED).
     pub bytes: Option<ByteCount>,
+    /// Average rx/tx rate measured between the two most recent
+    /// `>BYTECOUNT:` samples. `None` until at least two samples have
+    /// arrived (i.e. the first second or two after Connected). Useful
+    /// for "is the tunnel actually carrying traffic *right now*", which
+    /// the cumulative `bytes` field can't answer.
+    pub throughput: Option<Throughput>,
+    /// Number of `RECONNECTING` state transitions on the openvpn
+    /// management interface since the daemon spawned this attempt.
+    /// Stays 0 on a healthy long-lived tunnel; non-zero values are
+    /// the "this tunnel is flaky" signal.
+    pub reconnects: u32,
+    /// Unix epoch seconds of the most recent `RECONNECTING` event.
+    /// Pairs with `reconnects` to answer "when did the most recent
+    /// hiccup happen" — useful when diagnosing intermittent issues.
+    pub last_reconnect_at: Option<u64>,
+    /// Last meaningful error surfaced by the connect loop (auth
+    /// rejected, DNS apply failure, route apply failure, openvpn
+    /// management stream drop, ...). Cleared on the next CONNECTED
+    /// transition so a recovered tunnel doesn't carry a stale error.
+    pub last_error: Option<String>,
 }
 
 /// Cumulative byte counters from openvpn's management `>BYTECOUNT:` events.
@@ -88,6 +108,19 @@ pub struct StatusReport {
 pub struct ByteCount {
     pub rx_bytes: u64,
     pub tx_bytes: u64,
+}
+
+/// Rate snapshot. Computed daemon-side from the two most recent
+/// `>BYTECOUNT:` samples — `window_secs` is the wall-clock gap
+/// between those samples (typically ≈ openvpn's `bytecount` interval,
+/// 5 s by default). Bytes-per-second so a CLI can format with
+/// existing humanizers (`humansize` already wired in for the
+/// cumulative counter).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Throughput {
+    pub rx_bps: u64,
+    pub tx_bps: u64,
+    pub window_secs: u32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

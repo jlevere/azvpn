@@ -17,6 +17,7 @@
 pub mod cleanup;
 pub mod commands;
 pub mod dns;
+pub mod metrics;
 pub mod reachability;
 pub mod route;
 pub mod session;
