@@ -40,6 +40,15 @@ pub async fn install(daemon: Option<PathBuf>, openvpn: Option<PathBuf>) -> Resul
     std::fs::create_dir_all("/var/run/azvpn")?;
     std::fs::create_dir_all("/var/lib/azvpn")?;
 
+    // Best-effort cleanup of any prior install before laying down a
+    // fresh unit. systemd refuses `EnableUnitFiles` for a unit that's
+    // still considered active with a different ExecStart path (e.g.
+    // after a `cargo install` puts the binary at a new location), so
+    // matching macOS's `launchctl bootout`-then-bootstrap pattern
+    // makes the install idempotent. Errors here are swallowed — a
+    // first-run system has nothing to clean up.
+    teardown_existing_unit().await;
+
     let unit = render_unit(&daemon, &openvpn);
     std::fs::write(UNIT_PATH, unit.as_bytes())?;
     eprintln!("wrote {UNIT_PATH}");
@@ -61,28 +70,7 @@ pub async fn install(daemon: Option<PathBuf>, openvpn: Option<PathBuf>) -> Resul
 
 pub async fn uninstall() -> Result<()> {
     require_root("uninstall-daemon")?;
-
-    // The D-Bus phase is best-effort — if the unit was never installed,
-    // StopUnit + DisableUnitFiles both return errors that we want to
-    // log-and-move-on. Only the file removal is hard-required.
-    if let Ok(conn) = zbus::Connection::system().await {
-        if let Ok(proxy) = SystemdManagerProxy::new(&conn).await {
-            match proxy
-                .stop_unit(UNIT_NAME.to_string(), "replace".to_string())
-                .await
-            {
-                Ok(job) => debug!(?job, "systemd accepted StopUnit"),
-                Err(e) => debug!(error = %e, "StopUnit failed (probably not running)"),
-            }
-            if let Err(e) = proxy
-                .disable_unit_files(vec![UNIT_NAME.to_string()], false)
-                .await
-            {
-                debug!(error = %e, "DisableUnitFiles failed (probably not enabled)");
-            }
-            let _ = proxy.reload().await;
-        }
-    }
+    teardown_existing_unit().await;
 
     match std::fs::remove_file(UNIT_PATH) {
         Ok(()) => eprintln!("removed {UNIT_PATH}"),
@@ -102,6 +90,34 @@ fn render_unit(daemon: &Path, openvpn: &Path) -> String {
     UNIT_TEMPLATE
         .replace(DEFAULT_DAEMON, &daemon.display().to_string())
         .replace(DEFAULT_OPENVPN, &openvpn.display().to_string())
+}
+
+/// Best-effort StopUnit + DisableUnitFiles + Reload sequence. Used
+/// by both `install` (pre-flight, so a re-install replaces cleanly)
+/// and `uninstall` (the actual teardown). All D-Bus failures
+/// downgrade to debug logs — a first-run system has nothing to
+/// clean up, and that shouldn't look like an error.
+async fn teardown_existing_unit() {
+    let Ok(conn) = zbus::Connection::system().await else {
+        return;
+    };
+    let Ok(proxy) = SystemdManagerProxy::new(&conn).await else {
+        return;
+    };
+    match proxy
+        .stop_unit(UNIT_NAME.to_string(), "replace".to_string())
+        .await
+    {
+        Ok(job) => debug!(?job, "systemd accepted StopUnit"),
+        Err(e) => debug!(error = %e, "StopUnit failed (probably not running)"),
+    }
+    if let Err(e) = proxy
+        .disable_unit_files(vec![UNIT_NAME.to_string()], false)
+        .await
+    {
+        debug!(error = %e, "DisableUnitFiles failed (probably not enabled)");
+    }
+    let _ = proxy.reload().await;
 }
 
 /// systemd1 manager — only the four methods install/uninstall needs.
