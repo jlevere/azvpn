@@ -54,7 +54,8 @@ pub async fn run(profile_path: &Path, verbose: bool, auth_mode: AuthMode) -> Res
     let client = connect_to_daemon().await?;
 
     let req = ConnectRequest {
-        profile_path: profile_path.to_owned(),
+        profile_label: profile_path.display().to_string(),
+        profile,
         access_token,
         verbose,
     };

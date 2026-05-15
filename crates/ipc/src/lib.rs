@@ -15,9 +15,9 @@
 //! - future GUI / mobile clients only need to depend on `azvpn-ipc`.
 
 use std::net::{IpAddr, SocketAddr};
-use std::path::PathBuf;
 
 pub use azvpn_openvpn::{AddrFamily, Ifconfig, PushOptions, PushedRoute};
+pub use azvpn_profile::VpnProfile;
 use serde::{Deserialize, Serialize};
 
 #[tarpc::service]
@@ -57,9 +57,16 @@ pub trait AzvpnApi {
 /// itself — that's a user-session concern (browser, terminal, token
 /// cache in `$XDG_STATE_HOME`). For certificate auth profiles, the CLI
 /// leaves it `None`.
+///
+/// The profile travels as the parsed struct rather than a path so the
+/// daemon (which runs with `ProtectHome=yes`) doesn't need filesystem
+/// access to wherever the user happens to keep their XML. `profile_label`
+/// is the user's path-as-typed, carried along purely for status / info
+/// display ("where did this come from").
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ConnectRequest {
-    pub profile_path: PathBuf,
+    pub profile: VpnProfile,
+    pub profile_label: String,
     pub access_token: Option<String>,
     pub verbose: bool,
 }
@@ -67,7 +74,10 @@ pub struct ConnectRequest {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StatusReport {
     pub server_fqdn: String,
-    pub profile_path: PathBuf,
+    /// Display string from the connect request — typically the path the
+    /// user typed. Not used by the daemon for anything but echoing back
+    /// to `azvpn status` / `azvpn info`.
+    pub profile_label: String,
     pub mgmt_addr: SocketAddr,
     /// Unix epoch seconds.
     pub started_at: u64,

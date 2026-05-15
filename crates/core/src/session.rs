@@ -3,7 +3,6 @@
 //! to disk now that the daemon process is the single source of truth.
 
 use std::net::{IpAddr, SocketAddr};
-use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use azvpn_openvpn::PushOptions;
@@ -17,7 +16,10 @@ pub enum Error {
 #[derive(Debug, Clone)]
 pub struct RunningSession {
     pub mgmt_addr: SocketAddr,
-    pub profile_path: PathBuf,
+    /// Caller-supplied display string for the profile — typically the
+    /// path the user typed. Not interpreted by core; just echoed back
+    /// in status output.
+    pub profile_label: String,
     pub server_fqdn: String,
     /// Unix epoch seconds.
     pub started_at: u64,
@@ -33,7 +35,7 @@ pub struct RunningSession {
 impl RunningSession {
     pub fn new(
         mgmt_addr: SocketAddr,
-        profile_path: PathBuf,
+        profile_label: String,
         server_fqdn: String,
     ) -> Result<Self, Error> {
         let started_at = SystemTime::now()
@@ -42,7 +44,7 @@ impl RunningSession {
             .as_secs();
         Ok(Self {
             mgmt_addr,
-            profile_path,
+            profile_label,
             server_fqdn,
             started_at,
             dns_suffixes: Vec::new(),

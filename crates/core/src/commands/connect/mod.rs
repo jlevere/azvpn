@@ -46,9 +46,16 @@ use retry::AttemptOutcome;
 /// Inputs the CLI / daemon / GUI marshals into a single bag. Stable across
 /// the orchestration call so callers can compose options without juggling
 /// long signatures.
+///
+/// `profile` is the parsed struct (caller — CLI or daemon — owns the
+/// parse); `profile_label` is a free-form display string echoed back in
+/// status output. Carrying the parsed profile instead of a path lets the
+/// daemon run with `ProtectHome=yes` even when the user's XML lives in
+/// `~/Downloads`.
 #[derive(Debug, Clone)]
 pub struct ConnectOptions {
-    pub profile_path: PathBuf,
+    pub profile: VpnProfile,
+    pub profile_label: String,
     pub openvpn_binary: PathBuf,
     pub mgmt_addr: SocketAddr,
     pub verbose: bool,
@@ -77,7 +84,7 @@ pub enum ConnectionStatus {
 /// Connect entry point. Drives `attempt()` under an exponential backoff
 /// — transient failures retry, fatal failures (config bugs, credentials
 /// rejected, weak cipher policy) propagate up immediately.
-#[instrument(skip_all, name = "connect", fields(profile = %opts.profile_path.display()))]
+#[instrument(skip_all, name = "connect", fields(profile = %opts.profile_label))]
 pub async fn run(
     opts: ConnectOptions,
     access_token: Option<String>,
@@ -86,11 +93,9 @@ pub async fn run(
     metrics_tx: watch::Sender<ConnectionMetrics>,
     cancel: CancellationToken,
 ) -> Result<()> {
-    // Profile parse + root-CA check are pure functions of the profile
-    // XML and don't change between retries; hoist out of the loop so
-    // we don't re-read the file 8× per failing connect.
-    let profile = VpnProfile::from_file(&opts.profile_path)?;
-    validation::bundled_root_matches(&profile)?;
+    // Root-CA check is a pure function of the profile; hoisted out of
+    // the retry loop so we don't redo it 8× per failing connect.
+    validation::bundled_root_matches(&opts.profile)?;
 
     let mut backoff = retry::default_backoff();
     let mut attempt_no: u32 = 0;
@@ -99,7 +104,6 @@ pub async fn run(
         info!(attempt = attempt_no, "connect attempt");
         let outcome = attempt(
             &opts,
-            &profile,
             access_token.as_deref(),
             &status_tx,
             &pushed_tx,
@@ -160,7 +164,6 @@ pub async fn run(
 #[allow(clippy::too_many_lines)]
 async fn attempt(
     opts: &ConnectOptions,
-    profile: &VpnProfile,
     access_token: Option<&str>,
     status_tx: &watch::Sender<ConnectionStatus>,
     pushed_tx: &watch::Sender<Option<PushOptions>>,
@@ -168,6 +171,7 @@ async fn attempt(
     cancel: CancellationToken,
 ) -> AttemptOutcome {
     let _ = status_tx.send(ConnectionStatus::Connecting);
+    let profile = &opts.profile;
     let Some(server) = profile.primary_server() else {
         return AttemptOutcome::Fatal(Error::Other("no server in profile".into()));
     };
@@ -216,7 +220,7 @@ async fn attempt(
 
     let mut session = match RunningSession::new(
         opts.mgmt_addr,
-        opts.profile_path.clone(),
+        opts.profile_label.clone(),
         server.fqdn.clone(),
     ) {
         Ok(s) => s,
