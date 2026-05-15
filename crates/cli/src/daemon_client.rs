@@ -5,10 +5,11 @@
 
 use std::io::ErrorKind;
 use std::path::PathBuf;
-use std::sync::OnceLock;
+use std::time::Duration;
 
-use azvpn_ipc::AzvpnApiClient;
+use azvpn_ipc::{AzvpnApiClient, WIRE_VERSION};
 use tarpc::client::Config;
+use tarpc::context;
 use tarpc::serde_transport;
 use tarpc::tokio_serde::formats::Bincode;
 use tarpc::tokio_util::codec::length_delimited::LengthDelimitedCodec;
@@ -19,10 +20,12 @@ use crate::Error;
 const DEFAULT_SOCKET: &str = "/var/run/azvpn/azvpnd.sock";
 
 /// Connect to the daemon. Honors `AZVPND_SOCKET` so dev workflows can
-/// point at a non-root socket without recompiling. Once connected,
-/// runs a version-mismatch check (warn-once per CLI invocation) so a
-/// CLI upgraded ahead of the daemon (or vice-versa) gets a hint
-/// before any further RPC weirdness.
+/// point at a non-root socket without recompiling. After the socket
+/// is up, runs a hard wire-version handshake: any mismatch or RPC
+/// failure refuses the CLI invocation with a reinstall instruction
+/// instead of letting bincode fail mid-decode on a real wire-sensitive
+/// call (which historically surfaced as "connection was already
+/// shutdown").
 pub async fn connect_to_daemon() -> Result<AzvpnApiClient, Error> {
     let path = socket_path();
     let conn = UnixStream::connect(&path)
@@ -39,7 +42,7 @@ pub async fn connect_to_daemon() -> Result<AzvpnApiClient, Error> {
     let framed = LengthDelimitedCodec::builder().new_framed(conn);
     let transport = serde_transport::new(framed, Bincode::default());
     let client = AzvpnApiClient::new(Config::default(), transport).spawn();
-    warn_on_version_mismatch(&client).await;
+    check_wire_version(&client).await?;
     Ok(client)
 }
 
@@ -47,28 +50,25 @@ fn socket_path() -> PathBuf {
     std::env::var_os("AZVPND_SOCKET").map_or_else(|| PathBuf::from(DEFAULT_SOCKET), PathBuf::from)
 }
 
-/// Once-per-CLI-invocation gate so multi-RPC subcommands don't print
-/// the warning every call. The `Status` token-type isn't load-bearing
-/// — we only care that `set` only succeeds the first time.
-static VERSION_WARN_ONCE: OnceLock<()> = OnceLock::new();
-
-async fn warn_on_version_mismatch(client: &AzvpnApiClient) {
-    let Ok(daemon_version) = client.version(tarpc::context::current()).await else {
-        // transient RPC failure — the caller's own RPC will surface
-        // a real error if it persists.
-        return;
-    };
-    let cli_version = env!("CARGO_PKG_VERSION");
-    if daemon_version == cli_version {
-        return;
+/// Verify the daemon speaks the same wire version this CLI was built
+/// against. An RPC error here typically means the daemon predates the
+/// `wire_version()` method entirely — that daemon is by definition too
+/// old to share our wire shape, so it gets the same "stale" message
+/// regardless. The short deadline keeps this from hanging a healthy
+/// CLI on a wedged daemon.
+async fn check_wire_version(client: &AzvpnApiClient) -> Result<(), Error> {
+    let mut ctx = context::current();
+    ctx.deadline = std::time::Instant::now() + Duration::from_secs(3);
+    match client.wire_version(ctx).await {
+        Ok(server) if server == WIRE_VERSION => Ok(()),
+        Ok(server) => Err(Error::DaemonStale {
+            reason: format!("wire version mismatch: CLI {WIRE_VERSION}, daemon {server}"),
+        }),
+        Err(e) => Err(Error::DaemonStale {
+            reason: format!(
+                "daemon doesn't support wire-version negotiation \
+                 (predates this release): {e}"
+            ),
+        }),
     }
-    // OnceLock::set returns Err if already set — silently no-op the
-    // second + subsequent calls within one CLI process.
-    if VERSION_WARN_ONCE.set(()).is_err() {
-        return;
-    }
-    eprintln!(
-        "warning: azvpn CLI version {cli_version} != azvpnd version {daemon_version} — \
-         features may behave unexpectedly until they match"
-    );
 }

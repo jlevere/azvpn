@@ -20,11 +20,35 @@ pub use azvpn_openvpn::{AddrFamily, Ifconfig, PushOptions, PushedRoute};
 pub use azvpn_profile::VpnProfile;
 use serde::{Deserialize, Serialize};
 
+/// Monotonic counter bumped on every wire-shape change — new request
+/// fields, request renames, enum variant additions, etc. Independent
+/// of `CARGO_PKG_VERSION`; a release without wire-shape changes
+/// doesn't bump it, and a dev branch that changes the wire bumps it
+/// without changing the package version.
+///
+/// The CLI checks this against the daemon's [`AzvpnApi::wire_version`]
+/// before any wire-sensitive RPC, and refuses to proceed on mismatch
+/// or RPC failure — historically a wire-shape change against a stale
+/// daemon surfaced as a cryptic "connection was already shutdown"
+/// (bincode failing mid-decode on the daemon side), forcing the user
+/// to guess that `azvpn install-daemon` was needed.
+///
+/// Bump when changing: any `ConnectRequest` field, any `*Report`
+/// shape returned over the wire, any new RPC added (the new method ID
+/// will be unknown to an old daemon).
+pub const WIRE_VERSION: u32 = 1;
+
 #[tarpc::service]
 pub trait AzvpnApi {
     /// Liveness probe — returns the daemon's package version. Doubles
     /// as the smoke-test RPC during bring-up.
     async fn version() -> String;
+
+    /// Wire-version handshake. Returns the daemon's [`WIRE_VERSION`].
+    /// CLI calls this as the first RPC after connecting; on mismatch
+    /// or RPC failure (a daemon predating this method) the CLI refuses
+    /// to issue any wire-sensitive call.
+    async fn wire_version() -> u32;
 
     /// Start a connection. The daemon spawns openvpn, applies DNS and
     /// routes, and replies once the tunnel reaches `Connected`.
