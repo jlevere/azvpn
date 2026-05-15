@@ -98,6 +98,53 @@ pub fn redirect_gateway_routes(rg: azvpn_openvpn::RedirectGateway) -> Vec<IpNet>
     routes
 }
 
+/// Convert a `net_route::Route` into the CIDR view used everywhere else.
+/// Returns `None` for invalid (family, prefix) pairings — protects the
+/// overlap check from kernel routes the prefix-range invariants wouldn't
+/// accept; treats them as "not interesting" rather than aborting.
+fn route_to_ipnet(r: &Route) -> Option<IpNet> {
+    match r.destination {
+        IpAddr::V4(a) => Ipv4Net::new(a, r.prefix).ok().map(IpNet::V4),
+        IpAddr::V6(a) => Ipv6Net::new(a, r.prefix).ok().map(IpNet::V6),
+    }
+}
+
+/// Walk currently-installed kernel routes and warn (don't block) for
+/// each pushed CIDR that exactly matches an existing non-tunnel route.
+/// Same-prefix collisions are the only case where the kernel silently
+/// prefers the wrong path — wider/narrower kernel routes resolve
+/// correctly via longest-prefix-match and don't need a warning.
+async fn warn_on_lan_overlap(handle: &Handle, desired: &[IpNet], our_gateway: IpAddr) {
+    let kernel_routes = match handle.list().await {
+        Ok(r) => r,
+        Err(e) => {
+            debug!(error = %e, "couldn't enumerate kernel routes for overlap check");
+            return;
+        }
+    };
+    for pushed in desired {
+        for kr in &kernel_routes {
+            if kr.gateway == Some(our_gateway) {
+                continue;
+            }
+            let Some(kernel_cidr) = route_to_ipnet(kr) else {
+                continue;
+            };
+            if kernel_cidr == *pushed {
+                warn!(
+                    pushed = %pushed,
+                    kernel_dest = %kernel_cidr,
+                    kernel_via = ?kr.gateway,
+                    kernel_ifindex = ?kr.ifindex,
+                    "pushed route conflicts with an existing local route at \
+                     the same prefix length — kernel will route this CIDR \
+                     through the local entry, not the tunnel"
+                );
+            }
+        }
+    }
+}
+
 /// Compute the (`to_add`, `to_remove`) split between `current` and `desired`
 /// route sets, where each route is keyed by destination CIDR and carries
 /// its gateway. A CIDR present in both with a different gateway counts
@@ -154,6 +201,17 @@ impl RouteManager {
     /// adds everything, subsequent calls only touch what changed.
     /// `EEXIST` on add is treated as success (the kernel already has it).
     pub async fn apply(&mut self, desired: &[IpNet], gateway: IpAddr) -> Result<(), Error> {
+        // Warn on any pushed CIDR that already exists in the kernel
+        // via a non-tunnel route — the kernel's longest-prefix-match
+        // will resolve same-length CIDRs in favor of the existing
+        // entry (link routes are protocol=kernel, ours are
+        // protocol=static, kernel wins the tiebreak). This is the bug
+        // we hit on the the lab VM: profile pushed 10.1.10.0/24, the VM
+        // was on 10.1.10.0/24, the LAN link route silently won, and
+        // we had no idea until tcpdump told us. Best-effort — a
+        // failure to enumerate kernel routes shouldn't block apply.
+        warn_on_lan_overlap(&self.handle, desired, gateway).await;
+
         let desired_map: HashMap<IpNet, IpAddr> =
             desired.iter().map(|net| (*net, gateway)).collect();
         let (to_add, to_remove) = diff(&self.installed, &desired_map);
