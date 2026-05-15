@@ -2,18 +2,11 @@
 //! unit so users don't have to copy plists by hand.
 //!
 //! Tailscale ships the same pattern (`tailscaled install-system-daemon`)
-//! and Mullvad runs the equivalent steps inside their `.pkg`
-//! postinstall script. We expose it as a real subcommand so the
-//! Homebrew formula doesn't have to dump a multi-step `caveats` block
-//! on every user — `brew install` lays down the binaries; one
-//! `sudo azvpn install-daemon` invocation does the rest.
-//!
-//! The subcommand resolves the daemon + bundled-openvpn paths relative
-//! to its own binary (works for both a brew install and a manual
-//! `install -m 755 …` layout), generates the launchd plist with those
-//! absolute paths baked in, drops it under `/Library/LaunchDaemons/`
-//! with the ownership / mode launchd insists on, then bootstraps the
-//! system domain. Uninstall is the mirror: `bootout` + remove plist.
+//! and Mullvad runs the equivalent steps inside their `.pkg` postinstall
+//! script. We expose it as a real subcommand so the Homebrew formula
+//! doesn't have to dump a multi-step `caveats` block on every user —
+//! `brew install` lays down the binaries; one `sudo azvpn install-daemon`
+//! invocation does the rest.
 //!
 //! macOS-only — Linux will get a systemd-resolved equivalent when
 //! `tunnel-linux` lands.
@@ -22,6 +15,8 @@
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
+
+use azvpn_core::Error as CoreError;
 
 use crate::{Error, Result};
 
@@ -38,37 +33,33 @@ pub fn install(daemon: Option<PathBuf>, openvpn: Option<PathBuf>) -> Result<()> 
     check_executable("azvpnd", &daemon_path)?;
     check_executable("openvpn", &openvpn_path)?;
 
-    // Mode 0755 owner root:wheel — launchd is fine reading it; the
-    // daemon will tighten its own socket to 0660 root:admin once up.
-    if !Path::new(RUNTIME_DIR).exists() {
-        std::fs::create_dir_all(RUNTIME_DIR)?;
-        eprintln!("created {RUNTIME_DIR}");
-    }
+    std::fs::create_dir_all(RUNTIME_DIR)?;
 
     // If a previous bootstrap is live, bootout first — launchctl rejects
-    // a fresh bootstrap when the label is already loaded. The
-    // "Boot-out failed: 3: No such process" stderr that launchctl
-    // prints when nothing was loaded is harmless but looks alarming,
-    // so we route stderr to /dev/null here. The real bootstrap below
-    // gets normal error handling.
-    let _ = launchctl_quiet(&["bootout", &format!("system/{LAUNCHD_LABEL}")]);
+    // a fresh bootstrap when the label is already loaded. Suppress the
+    // "Boot-out failed: 3: No such process" stderr that launchctl prints
+    // when nothing was loaded; the real bootstrap below gets normal
+    // error handling.
+    let _ = launchctl(&["bootout", &format!("system/{LAUNCHD_LABEL}")], Quiet::Yes);
 
     let plist = render_plist(&daemon_path, &openvpn_path);
     std::fs::write(LAUNCHD_PLIST, &plist)?;
     eprintln!("wrote {LAUNCHD_PLIST}");
 
-    launchctl(&["bootstrap", "system", LAUNCHD_PLIST])?;
+    launchctl(&["bootstrap", "system", LAUNCHD_PLIST], Quiet::No)?;
     eprintln!("daemon bootstrapped — try `azvpn status`");
     Ok(())
 }
 
 /// Bootout + remove plist. Best-effort on bootout (a daemon that's not
 /// running just no-ops); errors on plist removal propagate so the user
-/// notices if something's wrong with the install location.
+/// notices if something's wrong with the install location. Intentionally
+/// leaves `/var/run/azvpn/` + `/var/log/azvpnd.log` so a re-install
+/// resumes cleanly; `rm -rf` is the operator's call.
 pub fn uninstall() -> Result<()> {
     require_root("uninstall-daemon")?;
 
-    let _ = launchctl_quiet(&["bootout", &format!("system/{LAUNCHD_LABEL}")]);
+    let _ = launchctl(&["bootout", &format!("system/{LAUNCHD_LABEL}")], Quiet::Yes);
     eprintln!("booted out {LAUNCHD_LABEL} (or it wasn't running)");
 
     match std::fs::remove_file(LAUNCHD_PLIST) {
@@ -78,25 +69,14 @@ pub fn uninstall() -> Result<()> {
         }
         Err(e) => return Err(e.into()),
     }
-
-    // Intentionally leave /var/run/azvpn/ and /var/log/azvpnd.log in
-    // place — keeping them around lets a re-install pick up where the
-    // last one left off without surprising the operator. Operators
-    // wanting a full wipe can `rm -rf` themselves.
     Ok(())
 }
 
-/// `geteuid() == 0`. The actual launchd ops below would fail with
-/// permission errors anyway; we surface a clear "this needs sudo"
-/// upfront because the launchctl messages are cryptic.
 fn require_root(subcommand: &str) -> Result<()> {
-    // SAFETY: geteuid is async-signal-safe and has no failure mode.
-    #[allow(unsafe_code)]
-    let euid = unsafe { libc::geteuid() };
-    if euid == 0 {
+    if uzers::get_effective_uid() == 0 {
         Ok(())
     } else {
-        Err(Error::Other(format!(
+        Err(other(format!(
             "`azvpn {subcommand}` writes to /Library/LaunchDaemons/ and \
              talks to system launchd — run with `sudo`"
         )))
@@ -106,22 +86,17 @@ fn require_root(subcommand: &str) -> Result<()> {
 /// Resolve daemon + openvpn paths. Caller-supplied flags win; otherwise
 /// we look next to the running `azvpn` binary on the standard layout
 /// (`<prefix>/bin/azvpn` ↔ `<prefix>/libexec/{azvpnd, azvpn-openvpn}`).
-/// This works for both `brew install` (paths resolve under the cellar
-/// after symlink follow) and the manual `install -m 755` layout in
-/// the launchd plist comments.
+/// Works for both `brew install` (paths resolve under the cellar after
+/// symlink follow) and a manual `install -m 755` layout.
 fn resolve_paths(
     daemon: Option<PathBuf>,
     openvpn: Option<PathBuf>,
 ) -> Result<(PathBuf, PathBuf)> {
-    let prefix = if daemon.is_none() || openvpn.is_none() {
-        Some(default_prefix()?)
-    } else {
-        None
-    };
-    let daemon_path = daemon.unwrap_or_else(|| prefix.as_ref().unwrap().join("libexec/azvpnd"));
-    let openvpn_path =
-        openvpn.unwrap_or_else(|| prefix.as_ref().unwrap().join("libexec/azvpn-openvpn"));
-    Ok((daemon_path, openvpn_path))
+    let prefix = default_prefix()?;
+    Ok((
+        daemon.unwrap_or_else(|| prefix.join("libexec/azvpnd")),
+        openvpn.unwrap_or_else(|| prefix.join("libexec/azvpn-openvpn")),
+    ))
 }
 
 /// Two directories up from the CLI binary — `…/bin/azvpn` → `…/`.
@@ -133,27 +108,28 @@ fn default_prefix() -> Result<PathBuf> {
     let prefix = exe
         .parent()
         .and_then(Path::parent)
-        .ok_or_else(|| Error::Other("can't derive install prefix from current_exe".into()))?
+        .ok_or_else(|| other("can't derive install prefix from current_exe"))?
         .to_path_buf();
     Ok(prefix)
 }
 
 fn check_executable(label: &str, path: &Path) -> Result<()> {
-    if !path.is_file() {
-        return Err(Error::Other(format!(
+    if path.is_file() {
+        Ok(())
+    } else {
+        Err(other(format!(
             "{label} binary not found at {} — pass `--{label} <path>` to override",
             path.display()
-        )));
+        )))
     }
-    Ok(())
 }
 
 /// Format the launchd plist with absolute binary paths substituted in.
-/// Kept here (rather than `include_str!`-ing a template file with a
-/// `gsub`) because the plist is small, this binary already encodes
-/// the label / file paths / log destinations as code-side invariants,
-/// and the alternative is a template file that ships separately and
-/// drifts.
+/// Inlined as a `format!` template rather than a sibling
+/// `include_str!`-able file because the label / log destinations /
+/// resource limits are already code-side invariants — pulling them out
+/// to a separate file just creates drift between the rendered output
+/// and whatever the static template happens to say.
 fn render_plist(daemon: &Path, openvpn: &Path) -> String {
     format!(
         r#"<?xml version="1.0" encoding="UTF-8"?>
@@ -201,33 +177,33 @@ fn render_plist(daemon: &Path, openvpn: &Path) -> String {
     )
 }
 
-fn launchctl(args: &[&str]) -> Result<()> {
-    let status = Command::new("/bin/launchctl").args(args).status()?;
+#[derive(Copy, Clone)]
+enum Quiet {
+    Yes,
+    No,
+}
+
+/// Run `launchctl <args>`. `Quiet::Yes` routes stderr to /dev/null —
+/// used for the pre-install bootout, which is expected to fail with
+/// "no such process" when nothing was loaded; printing that to a clean
+/// install makes it look like an error.
+fn launchctl(args: &[&str], quiet: Quiet) -> Result<()> {
+    let mut cmd = Command::new("/bin/launchctl");
+    cmd.args(args);
+    if matches!(quiet, Quiet::Yes) {
+        cmd.stderr(std::process::Stdio::null());
+    }
+    let status = cmd.status()?;
     if status.success() {
         Ok(())
     } else {
-        Err(Error::Other(format!(
+        Err(other(format!(
             "launchctl {} exited with {status}",
             args.join(" "),
         )))
     }
 }
 
-/// Same as [`launchctl`] but suppresses stderr. Used for the
-/// pre-install bootout that's expected to fail with "no such process"
-/// when there's nothing to clear out — printing that to the user
-/// makes a clean install look like an error.
-fn launchctl_quiet(args: &[&str]) -> Result<()> {
-    let status = Command::new("/bin/launchctl")
-        .args(args)
-        .stderr(std::process::Stdio::null())
-        .status()?;
-    if status.success() {
-        Ok(())
-    } else {
-        Err(Error::Other(format!(
-            "launchctl {} exited with {status}",
-            args.join(" "),
-        )))
-    }
+fn other(msg: impl Into<String>) -> Error {
+    Error::Core(CoreError::Other(msg.into()))
 }

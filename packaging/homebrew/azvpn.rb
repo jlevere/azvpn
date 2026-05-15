@@ -29,15 +29,9 @@ class Azvpn < Formula
   # `scripts/release-macos.sh` prints these three values when it
   # builds a fresh tarball.
   version "0.1.0"
-  if Hardware::CPU.arm?
-    url "https://github.com/jlevere/azvpn/releases/download/v#{version}/azvpn-#{version}-aarch64-apple-darwin.tar.gz"
-    sha256 "REPLACE_ME_WITH_AARCH64_SHA256"
-  else
-    # x86_64 build TBD — needs an Intel runner in CI. The arch path will
-    # surface a clear error until that lands; for now Intel users
-    # build from source via the flake.
-    odie "azvpn x86_64 binary build pending; build from source: nix build .#azvpn"
-  end
+  url "https://github.com/jlevere/azvpn/releases/download/v#{version}/azvpn-#{version}-aarch64-apple-darwin.tar.gz"
+  sha256 "REPLACE_ME_WITH_AARCH64_SHA256"
+  depends_on arch: :arm64
   # =========================================================
 
   def install

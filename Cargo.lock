@@ -252,7 +252,6 @@ dependencies = [
  "humansize",
  "humantime",
  "jiff",
- "libc",
  "open",
  "reqwest",
  "serde",
@@ -262,6 +261,7 @@ dependencies = [
  "tokio",
  "tracing",
  "tracing-subscriber",
+ "uzers",
 ]
 
 [[package]]
