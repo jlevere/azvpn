@@ -668,23 +668,16 @@ independently converged on most of these; we should too.
   `install-daemon`. *Reference:* Mullvad `mullvad-daemon/src/main.rs`
   — single explicit warn line at boot.
 
-- **G.14 Hard daemon-version mismatch refusal.** Today the CLI
-  already warns once per invocation when `client.version() !=
-  CLI_VERSION` (shipped in `crates/cli/src/daemon_client.rs`), but
-  the user can still issue a `connect` against a stale daemon — at
-  which point any wire-format change (e.g., the profile-over-IPC
-  swap shipped 2026-05-15) causes a cryptic `daemon rpc: the
-  connection to the server was already shutdown` because bincode
-  silently fails to deserialize the new request shape on the old
-  daemon. The version-mismatch warning fired correctly but the user
-  still spent debug cycles chasing the cryptic error. Two paths:
-  (a) make the CLI refuse `connect` / `disconnect` / `up` / `down`
-  with a clear "your daemon at /usr/local/libexec/azvpnd is stale —
-  reinstall with `sudo azvpn install-daemon`" error, OR
-  (b) wire-version-pin the IPC handshake (a small `wire_version: u32`
-  in every request, daemon returns `WireVersionMismatch` cleanly
-  instead of letting bincode fail mid-decode). (b) is the durable
-  fix.
+- **G.14 Hard daemon-version mismatch refusal.** *Shipped
+  2026-05-15.* `azvpn_ipc::WIRE_VERSION` (currently 1) is bumped on
+  every wire-shape change; daemon exposes `wire_version()` RPC and
+  the CLI calls it as the first RPC after socket connect (3 s
+  deadline). Mismatch or RPC failure becomes
+  `Error::DaemonStale { reason }` with a "reinstall with `sudo
+  azvpn install-daemon`" hint — no more cryptic "connection was
+  already shutdown" when the daemon is stale. Bump WIRE_VERSION on
+  any future change to `ConnectRequest`, `*Report` shapes, or the
+  RPC method set.
 
 ### Recommended order for G
 

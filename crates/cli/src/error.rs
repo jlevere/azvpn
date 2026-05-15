@@ -58,6 +58,16 @@ pub enum Error {
          `sudo azvpn install-daemon`, or set AZVPND_SOCKET if it's listening elsewhere"
     )]
     DaemonNotRunning { path: std::path::PathBuf },
+    /// Daemon binary is stale relative to this CLI — wire shapes have
+    /// changed between releases and continuing would surface as a
+    /// cryptic "connection was already shutdown" once bincode fails to
+    /// decode the new request shape. Refuse early with a clear
+    /// reinstall instruction.
+    #[error(
+        "daemon is stale ({reason}) — reinstall with `sudo azvpn install-daemon` so the \
+         daemon binary matches this CLI"
+    )]
+    DaemonStale { reason: String },
     /// Transport-level RPC error (socket disconnected, deadline, …).
     #[error("daemon rpc: {0}")]
     Rpc(#[from] tarpc::client::RpcError),

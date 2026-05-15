@@ -84,6 +84,10 @@ impl AzvpnApi for AzvpndServer {
         env!("CARGO_PKG_VERSION").to_owned()
     }
 
+    async fn wire_version(self, _: Context) -> u32 {
+        azvpn_ipc::WIRE_VERSION
+    }
+
     async fn connect(self, _: Context, req: ConnectRequest) -> Result<(), IpcError> {
         let mut active = self.state.active.lock().await;
         if active.is_some() {
