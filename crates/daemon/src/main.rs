@@ -69,6 +69,13 @@ async fn main() -> ExitCode {
     let shutdown = CancellationToken::new();
     spawn_signal_listener(shutdown.clone());
 
+    // systemd Type=notify expects READY=1 once we're prepared to
+    // handle work — i.e. socket is bound, signal handler is up. Sent
+    // here rather than at the top of main so a daemon that crashes
+    // during init reports startup failure to systemd correctly. No-op
+    // (and not even compiled) outside Linux.
+    notify_ready();
+
     accept_loop(listener, server.clone(), &shutdown).await;
 
     info!("shutting down — tearing down any active connection");
@@ -151,15 +158,72 @@ fn spawn_signal_listener(shutdown: CancellationToken) {
     });
 }
 
+/// Default tracing directives — used both as `EnvFilter` fallback and
+/// as the source the journald path re-parses (`EnvFilter` isn't Clone,
+/// so passing the source string is cheaper than juggling two copies).
+const DEFAULT_DIRECTIVES: &str =
+    "azvpnd=info,azvpn_daemon=info,azvpn_core=info,azvpn_openvpn=info,\
+     azvpn_ipc=info,warn";
+
+fn current_directives() -> String {
+    std::env::var("RUST_LOG").unwrap_or_else(|_| DEFAULT_DIRECTIVES.to_string())
+}
+
 fn init_tracing() {
-    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| {
-        EnvFilter::new(
-            "azvpnd=info,azvpn_daemon=info,azvpn_core=info,azvpn_openvpn=info,\
-             azvpn_ipc=info,warn",
-        )
-    });
+    let directives = current_directives();
+    // Under systemd, stdout/stderr are piped to journald and the
+    // env var `JOURNAL_STREAM` is set to "<devid>:<inode>" of that
+    // pipe. When present, emit structured journald records (so each
+    // tracing field becomes its own indexed key, searchable via
+    // `journalctl AZVPND_PROFILE=/tmp/x.xml -u azvpn`) instead of
+    // the flat compact text we'd otherwise produce.
+    if try_init_journald(&directives) {
+        return;
+    }
+    let filter = EnvFilter::try_new(&directives).unwrap_or_else(|_| EnvFilter::new("info"));
     tracing_subscriber::fmt()
         .with_env_filter(filter)
         .compact()
         .init();
 }
+
+#[cfg(target_os = "linux")]
+fn try_init_journald(directives: &str) -> bool {
+    use tracing_subscriber::layer::SubscriberExt as _;
+    use tracing_subscriber::util::SubscriberInitExt as _;
+
+    if std::env::var_os("JOURNAL_STREAM").is_none() {
+        return false;
+    }
+    match tracing_journald::layer() {
+        Ok(journald) => {
+            let filter = EnvFilter::try_new(directives).unwrap_or_else(|_| EnvFilter::new("info"));
+            tracing_subscriber::registry().with(filter).with(journald).init();
+            true
+        }
+        Err(e) => {
+            eprintln!("warning: failed to open journald socket ({e}); falling back to stderr");
+            false
+        }
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+fn try_init_journald(_directives: &str) -> bool {
+    false
+}
+
+#[cfg(target_os = "linux")]
+fn notify_ready() {
+    if let Err(e) = sd_notify::notify(false, &[sd_notify::NotifyState::Ready]) {
+        // Not running under systemd (or `Type` isn't `notify`) — the
+        // crate returns an io error in that case, which is fine; we
+        // don't require systemd.
+        tracing::debug!(error = %e, "sd_notify failed (not running under systemd?)");
+    } else {
+        tracing::debug!("sent sd_notify(READY=1)");
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+fn notify_ready() {}

@@ -24,6 +24,15 @@ tokio = { version = "1", features = ["full"] }
 tokio-util = { version = "0.7", features = ["rt"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+# Linux-only — structured journald output (key=value fields searchable
+# via `journalctl AZVPND_PROFILE=/path`). Used by the daemon when
+# systemd has piped stdout/stderr to the journal (detected via the
+# JOURNAL_STREAM env var). The crate compiles on non-Linux as a stub.
+tracing-journald = "0.3"
+# Linux-only — `sd_notify(READY=1)` after the daemon's socket is bound.
+# Needed because the systemd unit uses Type=notify; without the
+# ready signal systemd flags startup as failed after the timeout.
+sd-notify = "0.4"
 thiserror = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
