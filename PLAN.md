@@ -122,11 +122,14 @@ NRPT (Name Resolution Policy Table) on Windows once it exists.
 
 ## 4. Roadmap
 
-Six tracks. Within each track, items are roughly ordered by next-up.
-Track F (set-and-forget UX) is the product-defining one — without it,
-users still have to type `connect` after every reboot. Letter ordering
-is alphabetical, not priority; A–D fix correctness, E packages, F
-makes it disappear.
+Seven tracks. Within each track, items are roughly ordered by
+next-up. Track F (set-and-forget UX) is the product-defining one —
+without it, users still have to type `connect` after every reboot.
+Track G (hardening + support) is the production-readiness one —
+without it, "something broke" means walking the user through
+`tcpdump` and `journalctl`. Letter ordering is alphabetical, not
+priority: A–D fix correctness, E packages, F makes it disappear, G
+makes it survive production.
 
 ### A. OpenVPN coverage tail
 
@@ -484,6 +487,192 @@ auto-converge on every startup. This is the central addition.
   *Reference:* Tailscale's `cli/login.go` is just an alias for
   `cli/up.go:runUp` with `--login-only`; same shape works for us.
 
+### G. Production hardening & support flows
+
+Items here are mostly invisible until something goes wrong, at which
+point they're the difference between "send me your logs" hell and a
+one-command bundled diagnostic. Both Tailscale and Mullvad
+independently converged on most of these; we should too.
+
+- **G.1 PeerCreds-based IPC auth.** Today our unix socket is
+  protected only by filesystem permissions on the parent directory.
+  Add daemon-side per-RPC authorization using `SO_PEERCRED` (Linux)
+  / `LOCAL_PEERCRED` (macOS), checking UID and group membership.
+  Some RPCs (`up`, `down`, `disconnect`, `install-daemon`,
+  `bugreport upload`) require admin; read-only RPCs (`status`,
+  `info`, `pushed`, `watch`) are open to any local user. *Reference:*
+  Tailscale `/tmp/tailscale/ipn/ipnauth/ipnauth.go` — peercred
+  lookup, username resolution, root-only enforcement on the daemon
+  side. Mullvad's complementary pattern (`mullvad-management-interface/src/lib.rs`):
+  socket chowned to a specific group via `MULLVAD_MANAGEMENT_SOCKET_GROUP`
+  env var with mode 0o760 — OS-level enforcement of "only members
+  of group `azvpn` may connect." Use both: peercred for per-RPC
+  authz, group for the coarse outer gate. **Security gap today.**
+
+- **G.2 Per-operation watchdog.** Wrap critical work (connect,
+  dns_apply, route_apply, profile_load) in a watchdog that fires at
+  a generous timeout (45–90 s). On fire: log a structured diagnostic
+  (operation name, elapsed, in-flight task list, backtrace if
+  available), tear down openvpn, terminate the daemon — launchd /
+  systemd will restart. Prevents "the daemon is wedged but the
+  socket is still open and replies are slow forever." *Reference:*
+  Tailscale `/tmp/tailscale/wgengine/watchdog.go` — wraps engine
+  ops with per-op timeout, dumps in-flight ops on timeout, emits
+  `watchdog_timeout_*` counters.
+
+- **G.3 `azvpn doctor` preflight.** A pluggable preflight that runs
+  on first `up` after install and on-demand. Checks:
+  - openvpn binary resolves at `<prefix>/libexec/azvpn-openvpn` and
+    runs (`--version` exits 0)
+  - TUN device available (`/dev/net/tun` perms on Linux; `utun`
+    `socket(AF_SYSTEM)` on macOS)
+  - daemon socket reachable; daemon version matches CLI version
+  - AAD refresh-token cache exists and isn't past expiry (G.4
+    surfaces the warning if so)
+  - default route present and non-tunnel-bound
+  - DNS resolver chain isn't already pointing at a tunnel IP (would
+    cause a loop on connect)
+  - on Linux: systemd-resolved status, NM presence, kernel `tun`
+    module
+  - on macOS: `Network.framework` reachability prims working
+  *Reference:* Tailscale `/tmp/tailscale/doctor/doctor.go` +
+  `feature/doctor/doctor.go` — parallel-fan-out check framework,
+  rate-limited log emission. Each check is a `fn(&Ctx) -> Result`;
+  `doctor` runs all, aggregates, prints. **The biggest first-run UX
+  win after F.1.**
+
+- **G.4 Typed health Tracker + TimeToVisible.** Implementation of
+  the F.4 surface. Each subsystem (openvpn, dns, route, reachability,
+  auth, captive, gateway) registers `Warnable`s; the tracker holds
+  current state and emits change events. Each Warnable carries a
+  `TimeToVisible` (e.g., 10 s for "reachability transiently lost,"
+  0 s for "AAD token rejected") so flutters don't reach the user.
+  `azvpn status` queries the tracker; `azvpn watch` streams change
+  events. *Reference:* Tailscale `/tmp/tailscale/health/health.go`
+  — `Tracker` + `Warnable`, `TimeToVisible` field, change-event
+  bus. Their visibility filter (`upWorthyWarning` in
+  `cmd/tailscale/cli/up.go:845`) is the curation step.
+
+- **G.5 `azvpn bugreport` bundle.** The single biggest force
+  multiplier for support and self-debugging. Bundles into one
+  tarball:
+  - last N MB of daemon log (from G.7 ring)
+  - last cleanup manifest
+  - last PUSH_REPLY captured
+  - profile XML (cert thumbprints redacted)
+  - CLI version, daemon version, OS/kernel, openvpn version
+  - current health state (G.4 snapshot)
+  - current target.json (F.1)
+  - `azvpn doctor` (G.3) output
+  - non-sensitive systemd / launchd unit dump
+  Redacted on write via G.6: AAD JWTs, refresh-token contents,
+  account UUIDs, IPv4/IPv6 if `--full` not passed. Output:
+  `/tmp/azvpn-bugreport-{date}.tar.gz`. *Reference:* Tailscale
+  `/tmp/tailscale/cmd/tailscale/cli/bugreport.go` — including the
+  `--record` mode (pause for user to reproduce, then capture
+  delta state) for fault diagnosis. **High priority once the parts
+  exist.**
+
+- **G.6 Log redaction at write time.** A `tracing` layer (or a
+  custom `MakeWriter` impl) that scans each log line for known
+  bearer-secret patterns and replaces them before persistence to
+  disk or journald. Patterns to redact unless `AZVPN_LOG_RAW=1`:
+  AAD JWTs (`eyJhbG[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_.-]+`), refresh
+  tokens, AAD device codes during the flow window. *Reference:*
+  Mullvad `mullvad-ios/src/log_redactor.rs` + `mullvad-daemon/src/logging.rs`
+  — regex over `Cow<str>` so clean lines stay zero-alloc.
+  **Required before G.5; AAD tokens are bearer creds — a leaked
+  log = an attacker can connect.**
+
+- **G.7 On-disk log ring buffer.** Independent of journald / launchd
+  log rotation. `tracing-appender::rolling` with a hard size cap
+  (~50 MB) at a fixed path (`/var/log/azvpn/daemon.log` Linux,
+  `/Library/Logs/com.azvpn/daemon.log` macOS). Guarantees that
+  after a crash, the last N MB are on disk and bugreport (G.5) can
+  bundle them. *Reference:* Tailscale `/tmp/tailscale/logtail/filch/filch.go`
+  — dual-file alternating ring buffer, 64 KB line cap, rotates on
+  overflow.
+
+- **G.8 Settings/state versioning + migration.** Today our
+  `target.json` (F.1) has no schema version. Add `schema_version:
+  u32` to every persistent JSON the daemon owns (target, RT cache,
+  cleanup manifest). On unknown version: refuse to load, surface a
+  G.4 warning, fall back to safe defaults (state=Disconnected for
+  target, empty for RT cache). Migration modules are forward-only
+  and structurally immutable — they can't import the current
+  settings struct, only the previous-version struct + the
+  next-version struct, so changing the latest schema can't
+  retroactively break an old migration. *Reference:* Mullvad
+  `mullvad-daemon/src/migrations/mod.rs` — versioned JSON, strict
+  forward-only chain, lockdown on corruption.
+
+- **G.9 Uniqueness check on daemon startup.** Before binding the
+  socket and initializing the logger, attempt to connect to the
+  daemon's own socket path. If connect succeeds, another instance
+  is already running — log loudly and exit non-zero. Avoids race
+  conditions during launchd / systemd restart loops and the
+  "two daemons fighting over the same TUN" failure mode.
+  *Reference:* Mullvad `mullvad-daemon/src/rpc_uniqueness_check.rs`
+  — RPC ping pre-flight before logger init.
+
+- **G.10 Component debug logging on demand.** New RPC:
+  `set_debug_logging(component, until_unix_ts)`. The daemon flips
+  the `EnvFilter` for that target up to TRACE for the requested
+  window, then reverts. CLI: `azvpn debug log openvpn 10m`. No
+  daemon restart, no `RUST_LOG` env var dance, no permanent noise.
+  *Reference:* Tailscale's `SetComponentDebugLogging` in
+  `/tmp/tailscale/ipn/ipnlocal/local.go`. Cheap once F.2 (streaming
+  RPC) is in.
+
+- **G.11 Panic + signal handlers.** Two halves:
+  - Rust panics: `std::panic::set_hook` that writes a structured
+    panic record (location, message, backtrace) to the log via the
+    normal tracing path, *then* unwinds.
+  - Unix signals (SIGSEGV / SIGBUS / SIGFPE / SIGILL / SIGSYS):
+    handlers on an alternate stack via `sigaltstack`, with a
+    reentrancy guard to prevent cascading faults, writing a
+    minimal backtrace via signal-safe primitives (`libc::write`,
+    `libc::_exit`). *Reference:* Mullvad
+    `mullvad-daemon/src/exception_logging/unix.rs` —
+    `SA_ONSTACK`, debug-builds-only backtrace capture, reentrancy
+    flag. **Without this, a daemon segfault is debugging hell.**
+
+- **G.12 Corporate proxy support.** Two paths:
+  - AAD device-code flow + Graph/ARM calls: ensure `reqwest`
+    honors `HTTPS_PROXY` / `NO_PROXY` env vars (it should by
+    default; verify on macOS where `system_proxy` resolution is
+    quirky).
+  - OpenVPN control connection: passthrough `--http-proxy
+    HOST:PORT` and `--http-proxy-user-pass` via openvpn config
+    when set. Mullvad supports SOCKS5 / Shadowsocks /
+    domain-fronting; ours is simpler — corp users almost always
+    need only HTTP CONNECT.
+  *Reference:* Mullvad `mullvad-api/src/proxy.rs` — rotatable
+  proxy endpoints persisted in `api-endpoint.json`. Overkill for
+  us; the key takeaway is "make proxy injection a daemon-side
+  concern, not scattered through call sites."
+
+- **G.13 Loud admin-check at daemon startup.** Today the daemon
+  silently fails later when it can't open `utun` or write to
+  `SCDynamicStore`. Detect at startup: if `geteuid() != 0` (Unix)
+  / not in Administrators group (Windows), log a single bold
+  warning that explains the consequence and points at
+  `install-daemon`. *Reference:* Mullvad `mullvad-daemon/src/main.rs`
+  — single explicit warn line at boot.
+
+### Recommended order for G
+
+If you only land four things here, in this order:
+
+1. **G.6 + G.7** together — log redaction at write time, on-disk
+   ring buffer. Prerequisite for G.5 and good in their own right.
+2. **G.5** — bugreport bundle. Force multiplier for everything
+   else; once it exists, every other bug becomes "share the
+   bundle" instead of an interview.
+3. **G.1** — PeerCreds IPC auth. Current security gap; small,
+   well-scoped, important.
+4. **G.3** — doctor. Biggest first-run UX win on top of F.1; the
+   place new users will notice the most polish.
 
 ## 5. Deferred / declined, with reasoning preserved
 
@@ -536,7 +725,7 @@ auto-converge on every startup. This is the central addition.
   forgets to call): <https://developer.apple.com/documentation/networkextension/nednssettings/matchdomains>
 - Mullvad client (architectural reference for wrapping openvpn from
   Rust): <https://github.com/mullvad/mullvadvpn-app>. Highest-value
-  Windows pieces if/when we get there:
+  files mapped to our tracks:
   - `talpid-dns/src/windows/` — per-interface DNS via three
     strategies (`iphlpapi::SetInterfaceDnsSettings`, netsh, TCP/IP
     registry) with an `auto.rs` selector. *Alternate* approach to
@@ -548,6 +737,19 @@ auto-converge on every startup. This is the central addition.
   - `mullvad-daemon/src/system_service.rs` — SCM service lifecycle,
     `Preshutdown` vs `Stop` semantics, hibernation detector.
     Reference for C.4 + D.5.
+  - `mullvad-daemon/src/target_state.rs` — file-backed declarative
+    target state, the model for F.1.
+  - `mullvad-daemon/src/migrations/mod.rs` — forward-only,
+    structurally-immutable settings migrations. Reference for G.8.
+  - `mullvad-management-interface/src/lib.rs` — gRPC socket
+    chowned to a group via env var with mode 0o760. Reference for
+    G.1 (outer authz gate).
+  - `mullvad-daemon/src/exception_logging/unix.rs` — SA_ONSTACK
+    signal handlers with reentrancy guards. Reference for G.11.
+  - `mullvad-daemon/src/rpc_uniqueness_check.rs` — RPC-ping
+    pre-flight before logger init. Reference for G.9.
+  - `mullvad-ios/src/log_redactor.rs` + `mullvad-daemon/src/logging.rs`
+    — regex-over-`Cow<str>` log redaction. Reference for G.6.
 - Mullvad `windows-service-rs` (library, dual MIT/Apache-2.0):
   <https://github.com/mullvad/windows-service-rs>. Drop-in for C.4 —
   saves ~200 lines of `windows-sys::Services` boilerplate. Surface:
@@ -556,11 +758,33 @@ auto-converge on every startup. This is the central addition.
 - Wintun (Windows userspace TUN driver): <https://www.wintun.net/>
 - Tailscale (the Go tree at `/tmp/tailscale/`) — canonical reference
   for platform DNS, link-change detection, sleep/wake, and
-  NetworkManager-Reapply caveats. See
-  `net/dns/manager_{darwin,linux,windows}.go`, `net/dns/resolved.go`,
-  `net/dns/nrpt_windows.go`, `net/netmon/`. The Rust port
-  (`tailscale-rs`) deliberately omits all of this — it's a userspace
-  netstack — so don't look there for system-integration patterns.
+  NetworkManager-Reapply caveats. The Rust port (`tailscale-rs`)
+  deliberately omits all of this — it's a userspace netstack — so
+  don't look there for system-integration patterns. Key files
+  mapped to our tracks:
+  - `net/dns/manager_{darwin,linux,windows}.go`, `net/dns/resolved.go`,
+    `net/dns/nrpt_windows.go` — platform DNS managers. C.2.
+  - `net/netmon/` — link-change detection. C.6.
+  - `net/captivedetection/captivedetection.go` — multi-endpoint
+    concurrent captive probe. A.6.
+  - `ipn/ipnlocal/local.go` — `LocalBackend.Start`, `WantRunning`
+    persistence. F.1, F.3.
+  - `ipn/ipnauth/ipnauth.go` — SO_PEERCRED daemon-side authz.
+    G.1.
+  - `health/health.go` + `health/healthmsg/healthmsg.go` —
+    Tracker, Warnable, TimeToVisible. F.4, G.4.
+  - `wgengine/watchdog.go` — per-operation watchdog with stack
+    dump on timeout. G.2.
+  - `doctor/doctor.go` + `feature/doctor/doctor.go` — pluggable
+    preflight check framework. G.3.
+  - `cmd/tailscale/cli/bugreport.go` — bugreport bundle, with
+    `--record` mode for before/after capture. G.5.
+  - `logtail/filch/filch.go` — on-disk log ring buffer
+    independent of upload. G.7.
+  - `cmd/tailscale/cli/update.go` + `clientupdate/clientupdate.go`
+    — self-update via native package manager. F.6.
+  - `cmd/tailscale/cli/ffcomplete/scripts.go` — shell completion
+    generation. F.7.
 - Decompiled official client (Ghidra): `/tmp/azurevpn-ghidra/output/`
   (588 functions; primary + OpenVPN layer).
 - Original Microsoft tunnel extension under study:
