@@ -3,7 +3,23 @@
 [advisories]
 version = 2
 yanked = "warn"
-ignore = []
+ignore = [
+    # bincode 1.x is officially unmaintained — author shipped 2.x as a
+    # different typed API. tarpc-tokio-serde-bincode still pins 1.x;
+    # nothing we can fix upstream. Tracking for whenever tarpc moves.
+    "RUSTSEC-2025-0141",
+    # `paste` is unmaintained but widely used as a procedural macro
+    # helper across the ecosystem. No exploitable surface — it just
+    # joins identifiers at proc-macro time.
+    "RUSTSEC-2024-0436",
+    # hickory-resolver CPU-exhaustion-during-message-encoding advisory.
+    # The vulnerable code path is on the *server* side (encoding
+    # responses with O(n²) name compression). We use hickory as a
+    # *client* (decoding responses, encoding small queries we
+    # construct ourselves with bounded names). Not exploitable in
+    # our usage; tracked for the next hickory bump.
+    "RUSTSEC-2026-0119",
+]
 
 [licenses]
 version = 2
@@ -14,13 +30,21 @@ allow = [
     "BSD-3-Clause",
     "ISC",
     "Unicode-3.0",
-    "Unicode-DFS-2016",
+    # MPL-2.0: option-ext (via dirs-sys via keyring). OSI/FSF approved,
+    # file-level copyleft only — doesn't infect our codebase.
+    "MPL-2.0",
+    # CDLA-Permissive-2.0: webpki-roots (via hyper-rustls). Permissive
+    # data license used by Mozilla's bundled CA list.
+    "CDLA-Permissive-2.0",
 ]
 confidence-threshold = 0.93
 
 [bans]
 multiple-versions = "warn"
+# Internal workspace deps declare only `path = "..."` (no version),
+# which cargo-deny treats as wildcard. Whitelist path-relative deps.
 wildcards = "deny"
+allow-wildcard-paths = true
 
 [sources]
 unknown-registry = "deny"

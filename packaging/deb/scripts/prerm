@@ -1,0 +1,20 @@
+#!/bin/sh
+# prerm — runs before the .deb's files are removed. We stop the
+# service explicitly because cargo-deb's #DEBHELPER# splice ended up
+# empty for our `enable=false / start=false` config; without this,
+# `apt remove azvpn` leaves a running daemon orphaned (the unit file
+# vanishes but the process keeps going).
+
+set -e
+
+case "$1" in
+    remove|upgrade|deconfigure)
+        if [ -d /run/systemd/system ]; then
+            systemctl stop azvpn.service || true
+        fi
+        ;;
+esac
+
+#DEBHELPER#
+
+exit 0

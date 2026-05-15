@@ -18,6 +18,11 @@ edition = "2024"
 rust-version = "1.95.0"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/jlevere/azvpn"
+# Internal workspace crates are not published to crates.io — only the
+# `azvpn` CLI binary is the user-facing artifact, shipped as static
+# binary / .deb / .rpm. cargo-deny needs this to allow wildcard path
+# deps between workspace members.
+publish = false
 
 [workspace.dependencies]
 tokio = { version = "1", features = ["full"] }
@@ -122,4 +127,9 @@ cast_possible_truncation = "allow"
 module_name_repetitions = "allow"
 missing_errors_doc = "allow"
 must_use_candidate = "allow"
+# clippy 1.83+ flags numbered/bulleted list continuation lines that
+# don't satisfy its Markdown indentation expectations. We don't ship
+# rendered docs; the lint produces noisy false positives on aligned
+# lists.
+doc_lazy_continuation = "allow"
 
