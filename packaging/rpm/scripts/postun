@@ -1,0 +1,21 @@
+#!/bin/sh
+# RPM post-uninstall scriptlet. Cleanup mirroring
+# packaging/deb/scripts/postrm.
+#
+# $1 == 0 → real uninstall: daemon-reload (the unit file just vanished),
+#           remove the empty state dirs, drop the azvpn group.
+# $1 == 1 → upgrade — leave everything alone, the new postin handled it.
+
+set -e
+
+if [ "$1" = "0" ]; then
+    if [ -d /run/systemd/system ]; then
+        systemctl daemon-reload || true
+    fi
+    rmdir /var/run/azvpn /var/lib/azvpn 2>/dev/null || true
+    if getent group azvpn >/dev/null; then
+        groupdel azvpn || true
+    fi
+fi
+
+exit 0
