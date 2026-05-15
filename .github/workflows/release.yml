@@ -21,7 +21,13 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - os: ubuntu-latest
+          # ubuntu-22.04 (glibc 2.35) — not ubuntu-latest (24.04 / glibc 2.39).
+          # 22.04's glibc is old enough that the resulting binary runs on
+          # Debian 12 (2.36), Ubuntu 22.04+, RHEL 9 (2.34 — symbol-versioning
+          # still works), Amazon Linux 2023, etc. ubuntu-latest would
+          # produce a binary that apt rejects on Debian 12 with
+          # "libc6 (>= 2.39) but 2.36-9+deb12u13 is to be installed".
+          - os: ubuntu-22.04
             target: x86_64-unknown-linux-gnu
             artifact: azvpn-linux-x86_64
           - os: macos-latest
@@ -95,7 +101,10 @@ jobs:
   # The actual cargo-deb metadata lives in crates/cli/Cargo.toml.
   build-deb:
     needs: build-openvpn
-    runs-on: ubuntu-latest
+    # ubuntu-22.04 (glibc 2.35) for the same reason as the matrix build
+    # above — the .deb's `$auto` Depends line resolves to the build
+    # host's glibc version, and Debian 12 ships 2.36.
+    runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
