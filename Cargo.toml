@@ -75,6 +75,23 @@ humantime = "2"
 # datetime work shows up later — replaces hand-rolled civil-from-days
 # arithmetic for JWT iat/exp claim rendering.
 jiff = "0.2"
+# Pure-Rust D-Bus. No libdbus-1 C dep (sidesteps the cross-compile
+# pain we hit with libdbus-sys). Tokio-native via `tokio` feature.
+# Used by tunnel-linux to talk to systemd-resolved + systemd1 over
+# the system bus — per the no-shelling-out rule, we don't reach for
+# `resolvectl` / `systemctl` from azvpn.
+zbus = { version = "5", default-features = false, features = ["tokio"] }
+# `getifaddrs(3)` wrapper. We need it on Linux to find the tun
+# interface index that systemd-resolved's `SetLinkDNS` expects, by
+# matching the openvpn-assigned tunnel IP. Pure-Rust binding;
+# cross-platform so it also works for any future macOS/Windows code
+# that needs the same.
+if-addrs = "0.13"
+# `async fn` in trait, dyn-compatible. The `DnsManager` trait is
+# `Box<dyn>`'d through `core::dns`, and the Linux backend calls
+# zbus's async D-Bus client — async-trait is the well-trodden
+# dtolnay-maintained crate that makes both compose.
+async-trait = "0.1"
 
 azvpn-core = { path = "crates/core" }
 azvpn-ipc = { path = "crates/ipc" }

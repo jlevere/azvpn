@@ -526,7 +526,7 @@ async fn attempt(
     route_manager.clear().await;
     drop(route_manager);
 
-    dns_manager.clear();
+    dns_manager.clear().await;
     drop(dns_manager);
 
     // Clean exit — drop the cleanup manifest so the next daemon start

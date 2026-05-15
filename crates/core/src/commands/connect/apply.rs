@@ -9,7 +9,7 @@ use ipnet::IpNet;
 use tracing::info;
 
 use crate::cleanup;
-use crate::dns::DnsManager;
+use crate::dns::{DnsApplyCtx, DnsManager};
 use crate::route::{self, RouteManager};
 use crate::session::RunningSession;
 use crate::Result;
@@ -25,7 +25,7 @@ pub(super) async fn tunnel_state(
     profile: &VpnProfile,
     push_opts: &PushOptions,
 ) {
-    apply_dns(dns_manager, session, profile, push_opts);
+    apply_dns(dns_manager, session, profile, push_opts).await;
     if let Err(e) = apply_routes(route_manager, push_opts).await {
         tracing::error!(error = %e, "route apply failed");
     }
@@ -114,7 +114,7 @@ fn route_for_apply(r: &PushedRoute, has_v6_ifconfig: bool) -> Option<IpNet> {
 /// Apply DNS suffixes + servers. `DnsManager::apply` is documented as
 /// set-replace (first call installs, subsequent calls overwrite), so
 /// this is safe to call on every push-reply.
-fn apply_dns(
+async fn apply_dns(
     manager: &mut dyn DnsManager,
     session: &mut RunningSession,
     profile: &VpnProfile,
@@ -130,8 +130,12 @@ fn apply_dns(
         return;
     }
 
+    let ctx = DnsApplyCtx {
+        tunnel_local: push_opts.ifconfig.as_ref().map(|c| c.local),
+    };
+
     info!(?suffixes, ?dns_servers, "applying DNS resolvers");
-    match manager.apply(&suffixes, &dns_servers) {
+    match manager.apply(&suffixes, &dns_servers, &ctx).await {
         Ok(()) => session.record_dns(&suffixes, &dns_servers),
         Err(e) => tracing::error!(error = %e, "failed to apply DNS resolvers"),
     }
