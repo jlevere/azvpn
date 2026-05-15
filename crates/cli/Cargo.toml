@@ -6,6 +6,7 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
+publish.workspace = true
 
 [[bin]]
 name = "azvpn"
@@ -92,6 +93,10 @@ thiserror = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
+
+# uzers wraps Unix passwd/group lookups (used by install-daemon's
+# require_root via geteuid). Unix-only — Windows uses ACLs, not uids.
+[target.'cfg(unix)'.dependencies]
 uzers = { workspace = true }
 
 # Linux-only — install-daemon talks to org.freedesktop.systemd1 over

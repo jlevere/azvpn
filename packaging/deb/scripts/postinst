@@ -22,19 +22,30 @@ case "$1" in
         install -d -o root -g azvpn -m 2775 /var/lib/azvpn
         install -d -o root -g azvpn -m 2775 /var/run/azvpn
 
+        # Reload systemd so the new unit file is registered. With
+        # `enable = false / start = false` in cargo-deb's metadata,
+        # cargo-deb doesn't splice this in for us. Without it, the
+        # operator's first `systemctl enable azvpn` fails with
+        # "Unknown unit".
+        if [ -d /run/systemd/system ]; then
+            systemctl daemon-reload || true
+        fi
+
         # User has to be in the group AND re-login for the
         # supplementary group set to take effect. Print the hint at
         # configure time so it's the last thing the user sees from
         # `apt install`.
         cat <<EOF
 
-azvpn installed. To use without sudo, add yourself to the azvpn group:
+azvpn installed. To finish setup:
 
-    sudo usermod -aG azvpn \$USER
+    sudo usermod -aG azvpn \$USER          # log out + back in after
+    sudo systemctl enable --now azvpn      # start the daemon
 
-Then log out and back in for it to take effect. Verify with:
+Verify with:
 
-    id      # azvpn should be in the group list
+    id              # azvpn should be in the group list
+    azvpn status    # talks to /var/run/azvpn/azvpnd.sock
 
 EOF
         ;;
