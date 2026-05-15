@@ -432,6 +432,7 @@ async fn attempt(
                                 &mut session,
                                 profile,
                                 &push_opts,
+                                metrics_tx,
                             )
                             .await;
                         }
@@ -541,6 +542,7 @@ async fn attempt(
                                 &mut session,
                                 profile,
                                 &push_opts,
+                                metrics_tx,
                             )
                             .await;
                         }

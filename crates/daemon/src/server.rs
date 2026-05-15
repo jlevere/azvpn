@@ -230,11 +230,6 @@ fn build_status(conn: &ActiveConnection) -> StatusReport {
         .map_or(conn.started_at, |d| d.as_secs());
     let uptime_secs = now.saturating_sub(conn.started_at);
     let local_ip = current_local_ip(conn);
-    let pushed = conn.pushed_rx.borrow();
-    let (dns_suffixes, dns_servers) = pushed
-        .as_ref()
-        .map(|p| (Vec::<String>::new(), p.dns_servers.clone()))
-        .unwrap_or_default();
     let metrics = conn.metrics_rx.borrow().clone();
     StatusReport {
         server_fqdn: conn.server_fqdn.clone(),
@@ -243,8 +238,8 @@ fn build_status(conn: &ActiveConnection) -> StatusReport {
         started_at: conn.started_at,
         uptime_secs,
         local_ip,
-        dns_suffixes,
-        dns_servers,
+        dns_suffixes: metrics.dns_suffixes,
+        dns_servers: metrics.dns_servers,
         bytes: metrics.bytes,
         throughput: metrics.throughput,
         reconnects: metrics.reconnects,

@@ -6,11 +6,13 @@
 use azvpn_openvpn::{PushOptions, PushedRoute};
 use azvpn_profile::VpnProfile;
 use ipnet::IpNet;
+use tokio::sync::watch;
 use tracing::info;
 
 use crate::Result;
 use crate::cleanup;
 use crate::dns::{DnsApplyCtx, DnsManager};
+use crate::metrics::ConnectionMetrics;
 use crate::route::{self, RouteManager};
 use crate::session::RunningSession;
 
@@ -24,8 +26,9 @@ pub(super) async fn tunnel_state(
     session: &mut RunningSession,
     profile: &VpnProfile,
     push_opts: &PushOptions,
+    metrics_tx: &watch::Sender<ConnectionMetrics>,
 ) {
-    apply_dns(dns_manager, session, profile, push_opts).await;
+    apply_dns(dns_manager, session, profile, push_opts, metrics_tx).await;
     if let Err(e) = apply_routes(route_manager, push_opts).await {
         tracing::error!(error = %e, "route apply failed");
     }
@@ -122,6 +125,7 @@ async fn apply_dns(
     session: &mut RunningSession,
     profile: &VpnProfile,
     push_opts: &PushOptions,
+    metrics_tx: &watch::Sender<ConnectionMetrics>,
 ) {
     let (suffixes, dns_servers) = collect_dns_inputs(profile, push_opts);
     if suffixes.is_empty() {
@@ -139,7 +143,26 @@ async fn apply_dns(
 
     info!(?suffixes, ?dns_servers, "applying DNS resolvers");
     match manager.apply(&suffixes, &dns_servers, &ctx).await {
-        Ok(()) => session.record_dns(&suffixes, &dns_servers),
+        Ok(()) => {
+            session.record_dns(&suffixes, &dns_servers);
+            // Surface the actually-applied set on the metrics watch
+            // so the daemon's status RPC reports what's installed,
+            // not the raw push reply. The merged set (profile +
+            // push.domain) is what `SCDynamicStore` /
+            // `systemd-resolved` actually holds; reading from the
+            // push reply silently drops profile-only suffixes and
+            // shows nothing when Azure didn't push dns_servers and
+            // we fell back to `profile.dns_servers`.
+            let suffix_strings: Vec<String> = suffixes.iter().map(|s| (*s).to_string()).collect();
+            metrics_tx.send_if_modified(|m| {
+                if m.dns_suffixes == suffix_strings && m.dns_servers == dns_servers {
+                    return false;
+                }
+                m.dns_suffixes = suffix_strings;
+                m.dns_servers = dns_servers;
+                true
+            });
+        }
         Err(e) => tracing::error!(error = %e, "failed to apply DNS resolvers"),
     }
 }

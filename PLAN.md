@@ -428,19 +428,14 @@ auto-converge on every startup. This is the central addition.
     Connected to profile X; daemon is currently reconnecting (next
     attempt in 14 s)." Today we show "no active connection"
     regardless of intent.
-  - **Bug found 2026-05-15:** `StatusReport.dns_suffixes` is
-    hardcoded to `Vec::<String>::new()` in
-    `crates/daemon/src/server.rs::build_status` (~line 235). The
-    DNS apply actually works and `session.record_dns()` stores the
-    applied suffixes — but build_status reads from `pushed_rx`, not
-    from the session. Fix: surface applied suffixes through the
-    metrics_rx pipeline like we did for throughput, or read from
-    the active session. Today `azvpn info` shows `server: 10.0.0.36`
-    but no `suffix:` line even when one is installed.
   - **Bug found 2026-05-15:** `azvpn info` exits with code 1 on
     apparent success — the chained `&& echo ===` style of caller
     commands sees a non-zero status. Likely in the route-print path
-    or the post-print return. Investigate.
+    or the post-print return. Investigate. *Could not reproduce on
+    macOS or the Debian VM after the G.14 handshake landed; leave
+    open until next live test confirms it's actually gone — the
+    most likely root cause (stale daemon producing partial output
+    + late RPC error) is now caught at connect time.*
 
 - **F.6 Self-update.** `azvpn update` that delegates to the native
   package manager. *Reference:* Tailscale
