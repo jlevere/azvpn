@@ -4,9 +4,9 @@
 
 use azvpn_ipc::{InfoReport, StatusReport, TunnelRoute};
 
+use crate::Result;
 use crate::daemon_client::connect_to_daemon;
 use crate::status::format_uptime;
-use crate::Result;
 
 pub async fn run() -> Result<()> {
     let client = connect_to_daemon().await?;
@@ -65,9 +65,7 @@ fn print_status(s: &StatusReport) {
 
 fn print_route(r: &TunnelRoute) {
     let dest = format!("{}/{}", r.destination, r.prefix);
-    let gw = r
-        .gateway
-        .map_or_else(|| "—".to_owned(), |g| g.to_string());
+    let gw = r.gateway.map_or_else(|| "—".to_owned(), |g| g.to_string());
     println!("{dest:<24} {:<24} {:>8}", gw, r.interface);
 }
 

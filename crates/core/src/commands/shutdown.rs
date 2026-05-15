@@ -17,17 +17,23 @@ use tracing::info;
 /// elsewhere, so callers that finish normally and want the listener
 /// gone can `token.cancel()` themselves rather than leaving the task
 /// parked on signals that may never fire.
+///
+/// Windows has no SIGTERM concept — `tokio::signal::unix` doesn't
+/// compile there. The Windows path watches Ctrl-C (the closest
+/// equivalent) plus the cancellation token; service-stop messages
+/// from the SCM go through a different surface that callers wire up
+/// at the binary level if/when we ship a Windows service.
+#[cfg(unix)]
 pub fn listen_for_signals(token: CancellationToken) {
     tokio::spawn(async move {
-        let mut sigterm = match tokio::signal::unix::signal(
-            tokio::signal::unix::SignalKind::terminate(),
-        ) {
-            Ok(s) => s,
-            Err(e) => {
-                tracing::warn!(error = %e, "failed to install SIGTERM handler");
-                return;
-            }
-        };
+        let mut sigterm =
+            match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
+                Ok(s) => s,
+                Err(e) => {
+                    tracing::warn!(error = %e, "failed to install SIGTERM handler");
+                    return;
+                }
+            };
         tokio::select! {
             res = tokio::signal::ctrl_c() => {
                 if let Err(e) = res {
@@ -44,6 +50,23 @@ pub fn listen_for_signals(token: CancellationToken) {
             () = token.cancelled() => {
                 // Loop finished cleanly elsewhere; nothing left to do.
             }
+        }
+    });
+}
+
+#[cfg(not(unix))]
+pub fn listen_for_signals(token: CancellationToken) {
+    tokio::spawn(async move {
+        tokio::select! {
+            res = tokio::signal::ctrl_c() => {
+                if let Err(e) = res {
+                    tracing::warn!(error = %e, "ctrl_c watcher failed");
+                } else {
+                    info!("received Ctrl-C");
+                    token.cancel();
+                }
+            }
+            () = token.cancelled() => {}
         }
     });
 }

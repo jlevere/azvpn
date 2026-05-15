@@ -31,8 +31,8 @@ impl Config {
             || PathBuf::from("/var/run/azvpn/azvpnd.sock"),
             PathBuf::from,
         );
-        let socket_group = std::env::var("AZVPND_GROUP")
-            .unwrap_or_else(|_| default_socket_group().into());
+        let socket_group =
+            std::env::var("AZVPND_GROUP").unwrap_or_else(|_| default_socket_group().into());
         let openvpn_binary = resolve_openvpn_binary();
         Self {
             socket_path,

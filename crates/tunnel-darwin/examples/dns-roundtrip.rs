@@ -84,10 +84,7 @@ fn diagnostic_dump(label: &str) {
 
 fn main() {
     let suffixes = [TEST_SUFFIX_A, TEST_SUFFIX_B];
-    let dns_servers: Vec<IpAddr> = vec![
-        TEST_NS_A.parse().unwrap(),
-        TEST_NS_B.parse().unwrap(),
-    ];
+    let dns_servers: Vec<IpAddr> = vec![TEST_NS_A.parse().unwrap(), TEST_NS_B.parse().unwrap()];
 
     println!("phase 1: install");
     let mut guard = install_or_die(&suffixes, &dns_servers);
@@ -110,15 +107,11 @@ fn main() {
 
     // Second: does mDNSResponder pick it up?
     let after_install = scutil_dns();
-    let mdns_visible = after_install.contains(SERVICE_UUID)
-        || after_install.contains(TEST_SUFFIX_A);
+    let mdns_visible =
+        after_install.contains(SERVICE_UUID) || after_install.contains(TEST_SUFFIX_A);
     if !mdns_visible {
-        eprintln!(
-            "\n  \u{2717} key is in the store but mDNSResponder is NOT picking it up"
-        );
-        eprintln!(
-            "  most likely: synthetic services without an Interface/IPv4 binding"
-        );
+        eprintln!("\n  \u{2717} key is in the store but mDNSResponder is NOT picking it up");
+        eprintln!("  most likely: synthetic services without an Interface/IPv4 binding");
         eprintln!("  get filtered out");
         diagnostic_dump("mDNSResponder did not pick up our key");
         // tear down so we don't leave a key in the store

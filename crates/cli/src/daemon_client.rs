@@ -25,15 +25,17 @@ const DEFAULT_SOCKET: &str = "/var/run/azvpn/azvpnd.sock";
 /// before any further RPC weirdness.
 pub async fn connect_to_daemon() -> Result<AzvpnApiClient, Error> {
     let path = socket_path();
-    let conn = UnixStream::connect(&path).await.map_err(|e| match e.kind() {
-        // Daemon socket absent or refusing connections — almost
-        // always "daemon isn't running" rather than a real I/O fault,
-        // and the user wants install instructions, not an io::Error.
-        ErrorKind::NotFound | ErrorKind::ConnectionRefused => {
-            Error::DaemonNotRunning { path: path.clone() }
-        }
-        _ => Error::Io(std::io::Error::other(format!("{}: {e}", path.display()))),
-    })?;
+    let conn = UnixStream::connect(&path)
+        .await
+        .map_err(|e| match e.kind() {
+            // Daemon socket absent or refusing connections — almost
+            // always "daemon isn't running" rather than a real I/O fault,
+            // and the user wants install instructions, not an io::Error.
+            ErrorKind::NotFound | ErrorKind::ConnectionRefused => {
+                Error::DaemonNotRunning { path: path.clone() }
+            }
+            _ => Error::Io(std::io::Error::other(format!("{}: {e}", path.display()))),
+        })?;
     let framed = LengthDelimitedCodec::builder().new_framed(conn);
     let transport = serde_transport::new(framed, Bincode::default());
     let client = AzvpnApiClient::new(Config::default(), transport).spawn();

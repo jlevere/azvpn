@@ -38,6 +38,12 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           key: release-${{ matrix.target }}
+      # libdbus-1-dev: the keyring crate's sync-secret-service feature
+      # links to system libdbus on Linux (not pure-Rust like zbus). The
+      # macOS / Windows runners pick a native backend and don't need it.
+      - name: Install Linux system deps
+        if: matrix.os == 'ubuntu-latest'
+        run: sudo apt-get update && sudo apt-get install -y libdbus-1-dev pkg-config
       - run: cargo build --release --target ${{ matrix.target }}
       - name: Rename binary
         shell: bash

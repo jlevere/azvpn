@@ -128,16 +128,12 @@ pub(super) fn build_auth_file(
                 .username
                 .as_deref()
                 .filter(|s| !s.is_empty())
-                .ok_or_else(|| {
-                    Error::Other("<usernamepass><username> missing or empty".into())
-                })?;
+                .ok_or_else(|| Error::Other("<usernamepass><username> missing or empty".into()))?;
             let password = creds
                 .password
                 .as_deref()
                 .filter(|s| !s.is_empty())
-                .ok_or_else(|| {
-                    Error::Other("<usernamepass><password> missing or empty".into())
-                })?;
+                .ok_or_else(|| Error::Other("<usernamepass><password> missing or empty".into()))?;
             let f = write_creds_file(username, password)?;
             info!(auth = ?profile.clientauth.auth_type, "wrote username/password auth file");
             Ok(Some(f))
@@ -181,7 +177,9 @@ mod tests {
                 </clientauth>
             </AzVpnProfile>",
         );
-        let f = build_auth_file(&profile, Some("ey.jwt.token")).unwrap().unwrap();
+        let f = build_auth_file(&profile, Some("ey.jwt.token"))
+            .unwrap()
+            .unwrap();
         let body = std::fs::read_to_string(f.path()).unwrap();
         assert_eq!(body, "AzureAD\ney.jwt.token\n");
     }

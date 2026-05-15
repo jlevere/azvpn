@@ -8,5 +8,7 @@ result-*
 *~
 .DS_Store
 output.txt
+# Local Claude Code session state (lock files, scratch).
+/.claude
 # RE / vendor binaries; not source-of-truth code, just analysis fodder.
 /research

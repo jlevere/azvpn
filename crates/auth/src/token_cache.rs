@@ -59,7 +59,10 @@ impl CacheKey {
     /// once during the legacy-cache migration; the cache header doesn't
     /// know its own key, but the AT does.
     pub fn from_access_token(jwt: &str) -> Result<Self, Error> {
-        let payload = jwt.split('.').nth(1).ok_or(Error::MalformedJwt("payload"))?;
+        let payload = jwt
+            .split('.')
+            .nth(1)
+            .ok_or(Error::MalformedJwt("payload"))?;
         let decoded = URL_SAFE_NO_PAD.decode(payload)?;
         let claims: KeyClaims = serde_json::from_slice(&decoded)?;
         Ok(Self {
@@ -307,7 +310,10 @@ impl TokenCache {
             info!("cached token expired");
             return None;
         }
-        info!(has_refresh = cached.refresh_token.is_some(), "using cached token");
+        info!(
+            has_refresh = cached.refresh_token.is_some(),
+            "using cached token"
+        );
         Some(cached.into())
     }
 
@@ -660,7 +666,10 @@ mod tests {
             refresh_token: Some("legacy-rt".into()),
         };
         backend
-            .save(legacy_slot(&backend), &serde_json::to_string(&legacy).unwrap())
+            .save(
+                legacy_slot(&backend),
+                &serde_json::to_string(&legacy).unwrap(),
+            )
             .unwrap();
 
         let key = migrate_legacy_into(&backend).expect("migration produces a key");

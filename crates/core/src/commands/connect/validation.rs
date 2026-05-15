@@ -215,7 +215,9 @@ mod tests {
 
     #[test]
     fn cipher_validation_rejects_bf_cbc() {
-        let err = pushed_cipher_acceptable(Some("BF-CBC")).unwrap_err().to_string();
+        let err = pushed_cipher_acceptable(Some("BF-CBC"))
+            .unwrap_err()
+            .to_string();
         assert!(err.contains("BF-CBC"));
     }
 
@@ -232,7 +234,9 @@ mod tests {
     #[test]
     fn cipher_validation_rejects_none() {
         // `cipher none` means no encryption on the data channel.
-        let err = pushed_cipher_acceptable(Some("none")).unwrap_err().to_string();
+        let err = pushed_cipher_acceptable(Some("none"))
+            .unwrap_err()
+            .to_string();
         assert!(err.to_lowercase().contains("none"));
     }
 
@@ -243,7 +247,11 @@ mod tests {
 
     #[test]
     fn compression_validation_accepts_safe_variants() {
-        for safe in [Compression::Stub, Compression::StubV2, Compression::CompLzoOff] {
+        for safe in [
+            Compression::Stub,
+            Compression::StubV2,
+            Compression::CompLzoOff,
+        ] {
             pushed_compression_acceptable(Some(&safe)).expect("safe variant must pass");
         }
     }
@@ -251,7 +259,9 @@ mod tests {
     #[test]
     fn compression_validation_rejects_active_variant() {
         let active = Compression::Active("lz4-v2".into());
-        let err = pushed_compression_acceptable(Some(&active)).unwrap_err().to_string();
+        let err = pushed_compression_acceptable(Some(&active))
+            .unwrap_err()
+            .to_string();
         assert!(err.contains("lz4-v2"));
     }
 

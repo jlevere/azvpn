@@ -101,7 +101,10 @@ impl DnsGuard {
         };
         let removed = store.remove(CFString::from_static_string(SERVICE_KEY));
         if removed {
-            info!(key = SERVICE_KEY, "removed DNS settings from SCDynamicStore");
+            info!(
+                key = SERVICE_KEY,
+                "removed DNS settings from SCDynamicStore"
+            );
         } else {
             // Race-free: SCDynamicStore may have lost the key (system DNS
             // service restart, manual scutil edit). Not an error — we

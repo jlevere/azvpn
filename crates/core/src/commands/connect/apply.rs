@@ -8,11 +8,11 @@ use azvpn_profile::VpnProfile;
 use ipnet::IpNet;
 use tracing::info;
 
+use crate::Result;
 use crate::cleanup;
 use crate::dns::{DnsApplyCtx, DnsManager};
 use crate::route::{self, RouteManager};
 use crate::session::RunningSession;
-use crate::Result;
 
 /// One-shot entry point: bring DNS + routes into sync with `push_opts`.
 /// Errors during route install are logged but don't fail the whole
@@ -41,7 +41,10 @@ fn record_cleanup_manifest(route_manager: &RouteManager) {
         routes: route_manager
             .installed_routes()
             .into_iter()
-            .map(|(destination, gateway)| cleanup::RouteEntry { destination, gateway })
+            .map(|(destination, gateway)| cleanup::RouteEntry {
+                destination,
+                gateway,
+            })
             .collect(),
     };
     let path = cleanup::default_path();

@@ -29,7 +29,7 @@ use tokio_util::sync::CancellationToken;
 use tracing::{info, instrument};
 
 use crate::dns;
-use crate::metrics::{throughput_between, ByteSample, ConnectionMetrics};
+use crate::metrics::{ByteSample, ConnectionMetrics, throughput_between};
 use crate::reachability::ReachabilityWatcher;
 use crate::route::RouteManager;
 use crate::session::RunningSession;
@@ -637,8 +637,8 @@ async fn attempt(
     //   trying to reach the gateway and exited unhappy)
     outcome.unwrap_or_else(|| match code {
         Some(0) | None => AttemptOutcome::Completed,
-        Some(_) => AttemptOutcome::Transient(Error::Other(format!(
-            "openvpn exited with code {code:?}"
-        ))),
+        Some(_) => {
+            AttemptOutcome::Transient(Error::Other(format!("openvpn exited with code {code:?}")))
+        }
     })
 }

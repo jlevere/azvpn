@@ -24,13 +24,8 @@ pub const ARM_RESOURCE: &str = "https://management.azure.com/.default";
 
 /// [`BasicClient`] specialised for the refresh-token grant: token endpoint
 /// is the only one that matters.
-type AadRefreshClient = BasicClient<
-    EndpointNotSet,
-    EndpointNotSet,
-    EndpointNotSet,
-    EndpointNotSet,
-    EndpointSet,
->;
+type AadRefreshClient =
+    BasicClient<EndpointNotSet, EndpointNotSet, EndpointNotSet, EndpointNotSet, EndpointSet>;
 
 pub struct RefreshGrant {
     tenant_id: String,

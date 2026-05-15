@@ -439,7 +439,6 @@ mod tests {
         assert!(!routes.iter().any(|r| matches!(r, IpNet::V4(_))));
     }
 
-
     #[test]
     fn diff_gateway_change_triggers_reinstall() {
         let mut current = HashMap::new();

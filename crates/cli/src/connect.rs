@@ -15,8 +15,8 @@ use azvpn_auth::{
 use azvpn_ipc::ConnectRequest;
 use azvpn_profile::{AuthType, VpnProfile};
 
-use crate::daemon_client::connect_to_daemon;
 use crate::Result;
+use crate::daemon_client::connect_to_daemon;
 
 /// Which AAD interactive flow to use when no cached token is valid.
 /// Mirrors MSAL's `AuthorizeType` matrix (interactive vs device-code);
@@ -88,10 +88,7 @@ pub async fn run(profile_path: &Path, verbose: bool, auth_mode: AuthMode) -> Res
 ///
 /// Only step (3) requires the user to do anything; (2) keeps the daily-
 /// driver session-resume path off the browser.
-async fn ensure_access_token(
-    profile: &VpnProfile,
-    auth_mode: AuthMode,
-) -> Result<Option<String>> {
+async fn ensure_access_token(profile: &VpnProfile, auth_mode: AuthMode) -> Result<Option<String>> {
     match profile.clientauth.auth_type {
         AuthType::Certificate | AuthType::UsernamePass | AuthType::Radius => Ok(None),
         AuthType::Aad => {
@@ -216,9 +213,7 @@ fn print_prompt(p: &DeviceCodePrompt) {
 /// a strictly worse UX and `--auth device-code` is an easy override.
 fn looks_headless() -> bool {
     use std::io::IsTerminal as _;
-    if std::env::var_os("SSH_CONNECTION").is_some()
-        || std::env::var_os("SSH_TTY").is_some()
-    {
+    if std::env::var_os("SSH_CONNECTION").is_some() || std::env::var_os("SSH_TTY").is_some() {
         return true;
     }
     if !std::io::stderr().is_terminal() {

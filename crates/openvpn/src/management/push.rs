@@ -487,9 +487,7 @@ impl PushOptions {
             return true;
         }
         if token == "redirect-gateway" || token.starts_with("redirect-gateway ") {
-            let rest = token
-                .strip_prefix("redirect-gateway")
-                .map_or("", str::trim);
+            let rest = token.strip_prefix("redirect-gateway").map_or("", str::trim);
             let rg = RedirectGateway::parse(rest);
             opts.redirect_gateway = Some(merge_redirect(opts.redirect_gateway, rg));
             return true;
@@ -588,12 +586,18 @@ mod tests {
             ]
         );
         assert_eq!(opts.domain.as_deref(), Some("corp.internal"));
-        assert_eq!(opts.domain_search, ["dev.corp.internal", "ops.corp.internal"]);
+        assert_eq!(
+            opts.domain_search,
+            ["dev.corp.internal", "ops.corp.internal"]
+        );
         assert_eq!(opts.ntp_servers, ["10.0.0.10".parse::<IpAddr>().unwrap()]);
         assert_eq!(opts.wins_servers, ["10.0.0.20".parse::<IpAddr>().unwrap()]);
 
         assert_eq!(opts.routes.len(), 3);
-        assert_eq!(opts.routes[0].destination, "10.0.0.0".parse::<IpAddr>().unwrap());
+        assert_eq!(
+            opts.routes[0].destination,
+            "10.0.0.0".parse::<IpAddr>().unwrap()
+        );
         assert_eq!(opts.routes[0].prefix, 16);
         assert!(opts.routes[0].gateway.is_none());
         assert_eq!(opts.routes[0].family, AddrFamily::V4);
@@ -602,7 +606,10 @@ mod tests {
             Some("10.0.8.1".parse::<IpAddr>().unwrap())
         );
         assert_eq!(opts.routes[2].family, AddrFamily::V6);
-        assert_eq!(opts.routes[2].destination, "fd00::".parse::<IpAddr>().unwrap());
+        assert_eq!(
+            opts.routes[2].destination,
+            "fd00::".parse::<IpAddr>().unwrap()
+        );
         assert_eq!(opts.routes[2].prefix, 64);
 
         assert_eq!(opts.route_gateway, Some("10.0.8.1".parse().unwrap()));
@@ -661,9 +668,8 @@ mod tests {
 
     #[test]
     fn redirect_gateway_multiple_directives_merge() {
-        let opts = PushOptions::parse(
-            "redirect-gateway def1,redirect-gateway-ipv6 def1,topology subnet",
-        );
+        let opts =
+            PushOptions::parse("redirect-gateway def1,redirect-gateway-ipv6 def1,topology subnet");
         let rg = opts.redirect_gateway.unwrap();
         assert!(rg.def1);
         assert!(rg.ipv6);
@@ -713,9 +719,8 @@ mod tests {
 
     #[test]
     fn duplicate_route_gateway_keeps_first() {
-        let opts = PushOptions::parse(
-            "route-gateway 10.0.8.1,route-gateway 10.0.9.1,topology subnet",
-        );
+        let opts =
+            PushOptions::parse("route-gateway 10.0.8.1,route-gateway 10.0.9.1,topology subnet");
         assert_eq!(opts.route_gateway, Some("10.0.8.1".parse().unwrap()));
     }
 
@@ -723,7 +728,10 @@ mod tests {
     fn discontiguous_mask_skips_route_without_panic() {
         // 255.0.255.0 isn't representable as a prefix-length CIDR.
         let opts = PushOptions::parse("route 10.0.0.0 255.0.255.0,topology subnet");
-        assert!(opts.routes.is_empty(), "discontiguous mask should drop the route");
+        assert!(
+            opts.routes.is_empty(),
+            "discontiguous mask should drop the route"
+        );
     }
 
     #[test]

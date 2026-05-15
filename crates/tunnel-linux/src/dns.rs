@@ -313,7 +313,10 @@ impl ResolvedBackend {
         // zbus::Error` impl rather than carrying a second error type.
         let proxy = ResolvedProxy::new(&conn).await?;
         proxy.0.introspect().await.map_err(zbus::Error::from)?;
-        Ok(Self { conn, last_ifindex: None })
+        Ok(Self {
+            conn,
+            last_ifindex: None,
+        })
     }
 
     async fn apply(
@@ -390,7 +393,6 @@ fn find_ifindex_by_local_ip(addr: IpAddr) -> Result<i32> {
     }
     Err(Error::InterfaceNotFound(addr))
 }
-
 
 // ─── direct /etc/resolv.conf backend ────────────────────────────────
 
@@ -546,7 +548,11 @@ mod tests {
         be.apply(&["corp.example.com"], &[ip("10.0.0.36")]).unwrap();
 
         let written = fs::read(&resolv).unwrap();
-        assert!(written.windows(b"10.0.0.36".len()).any(|w| w == b"10.0.0.36"));
+        assert!(
+            written
+                .windows(b"10.0.0.36".len())
+                .any(|w| w == b"10.0.0.36")
+        );
         assert_eq!(fs::read(&backup).unwrap(), original);
 
         be.clear().unwrap();

@@ -17,13 +17,8 @@ use crate::{AadConfig, Error, Token, aad_device_url, aad_http_client, aad_token_
 
 /// [`BasicClient`] specialised for the device-code flow: token endpoint +
 /// device-authorization endpoint set, everything else unset.
-type AadDeviceClient = BasicClient<
-    EndpointNotSet,
-    EndpointSet,
-    EndpointNotSet,
-    EndpointNotSet,
-    EndpointSet,
->;
+type AadDeviceClient =
+    BasicClient<EndpointNotSet, EndpointSet, EndpointNotSet, EndpointNotSet, EndpointSet>;
 
 pub struct DeviceCodeFlow {
     config: AadConfig,
@@ -79,7 +74,10 @@ impl DeviceCodeFlow {
     pub async fn start(&self) -> Result<DeviceCodePrompt, Error> {
         let scope = format!("{}/.default offline_access", self.config.audience);
 
-        let mut request = self.client.exchange_device_code().add_scope(Scope::new(scope));
+        let mut request = self
+            .client
+            .exchange_device_code()
+            .add_scope(Scope::new(scope));
         if self.config.enable_groups {
             // Tenants with >200 groups will have AAD return a
             // `groupOverageIndicator` instead of the full list —

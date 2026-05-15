@@ -19,8 +19,8 @@ use std::net::IpAddr;
 use std::time::{Duration, Instant, SystemTime};
 
 use futures::StreamExt as _;
-use if_watch::tokio::IfWatcher;
 use if_watch::IfEvent;
+use if_watch::tokio::IfWatcher;
 use tracing::{debug, info, warn};
 
 #[derive(Debug, thiserror::Error)]
@@ -300,4 +300,3 @@ mod tests {
         assert!(WALL_CLOCK_JUMP > WALL_CLOCK_POLL * 10);
     }
 }
-

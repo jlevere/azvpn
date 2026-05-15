@@ -82,7 +82,10 @@ fn print_org(o: &Organization) {
         println!("on-prem sync:   {sync}");
     }
     if !o.technical_notification_mails.is_empty() {
-        println!("technical:      {}", o.technical_notification_mails.join(", "));
+        println!(
+            "technical:      {}",
+            o.technical_notification_mails.join(", ")
+        );
     }
     if !o.security_compliance_notification_mails.is_empty() {
         println!(

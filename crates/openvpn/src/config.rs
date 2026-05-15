@@ -190,7 +190,6 @@ impl<'a> ConfigBuilder<'a> {
             write_route(config, route, RouteKind::Exclude);
         }
     }
-
 }
 
 enum RouteKind {
