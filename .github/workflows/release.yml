@@ -90,8 +90,47 @@ jobs:
           name: openvpn-azvpn-linux-x86_64
           path: out/openvpn-azvpn-linux-x86_64
 
+  # Debian package — bundles azvpn + azvpnd + the patched static openvpn
+  # + a systemd unit + maintainer scripts that create the azvpn group.
+  # The actual cargo-deb metadata lives in crates/cli/Cargo.toml.
+  build-deb:
+    needs: build-openvpn
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: build-deb
+      - name: Install Linux system deps
+        run: sudo apt-get update && sudo apt-get install -y libdbus-1-dev pkg-config
+      - name: Install cargo-deb
+        run: cargo install cargo-deb --locked
+      - name: Build release binaries (host triple)
+        # cargo-deb looks under target/release/, not target/<triple>/release/,
+        # so we drop the --target flag the matrix-build step uses.
+        run: cargo build --release -p azvpn -p azvpn-daemon
+      - name: Stage bundled openvpn
+        uses: actions/download-artifact@v4
+        with:
+          name: openvpn-azvpn-linux-x86_64
+          path: target/openvpn-azvpn-staged
+      - name: Move openvpn into the path cargo-deb expects
+        run: |
+          mkdir -p target/openvpn-azvpn
+          mv target/openvpn-azvpn-staged/openvpn-azvpn-linux-x86_64 target/openvpn-azvpn/openvpn
+          chmod +x target/openvpn-azvpn/openvpn
+      - name: Build .deb
+        run: cargo deb -p azvpn --no-build --output target/debian/
+      - name: List produced .deb
+        run: ls -la target/debian/
+      - uses: actions/upload-artifact@v4
+        with:
+          name: azvpn-deb-linux-x86_64
+          path: target/debian/*.deb
+
   release:
-    needs: [build, build-openvpn]
+    needs: [build, build-openvpn, build-deb]
     # Only publish a GH release on tag pushes — manual dispatches still
     # produce artifacts (visible from the run page) but don't create
     # a draft release out of nowhere.

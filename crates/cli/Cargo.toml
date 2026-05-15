@@ -16,6 +16,45 @@ path = "src/main.rs"
 # users who don't have a CLI workflow, and so a future GUI target slots in
 # without re-doing this scaffolding. Icon / category / Info.plist tweaks
 # live alongside under `packaging/macos/`.
+# `cargo deb` produces a Debian package containing the CLI, the daemon,
+# the patched openvpn we bundle (built separately via Nix in CI and
+# dropped at target/openvpn-azvpn/openvpn before `cargo deb` runs),
+# the systemd unit, and the maintainer scripts that create the
+# `azvpn` group + state dirs. See packaging/deb/.
+#
+# Paths are relative to this Cargo.toml (crates/cli/), which is why the
+# workspace-level artifacts are reached via ../../.
+[package.metadata.deb]
+name = "azvpn"
+maintainer = "Jackson Leverett <jacksonleverett@gmail.com>"
+section = "net"
+priority = "optional"
+# $auto picks up libc + small dynamic deps for azvpn/azvpnd (we use
+# rustls everywhere — no libssl). systemd is the unit prerequisite.
+depends = "$auto, systemd"
+extended-description = """
+A from-scratch reimplementation of the Microsoft Azure VPN Client as a
+portable Rust CLI/library. Connects to Azure Virtual WAN P2S OpenVPN
+gateways with Microsoft Entra ID (AAD) or certificate authentication.
+
+Bundles a patched openvpn at /usr/libexec/azvpn/openvpn — stock
+openvpn 2.6 truncates AAD bearer tokens during the TLS handshake."""
+assets = [
+    ["../../target/release/azvpn", "usr/bin/", "755"],
+    ["../../target/release/azvpnd", "usr/sbin/", "755"],
+    ["../../target/openvpn-azvpn/openvpn", "usr/libexec/azvpn/openvpn", "755"],
+    ["../../packaging/deb/azvpn.service", "lib/systemd/system/azvpn.service", "644"],
+    ["../../LICENSE-MIT", "usr/share/doc/azvpn/LICENSE-MIT", "644"],
+    ["../../LICENSE-APACHE", "usr/share/doc/azvpn/LICENSE-APACHE", "644"],
+    ["../../README.md", "usr/share/doc/azvpn/README.md", "644"],
+]
+maintainer-scripts = "../../packaging/deb/scripts"
+# enable=false / start=false leaves the unit installed but inactive —
+# admins have to `systemctl enable --now azvpn.service` themselves
+# after `usermod -aG azvpn $USER`. Matches Tailscale's pattern; avoids
+# surprising the operator with an immediately-running daemon.
+systemd-units = { enable = false, start = false, restart-after-upgrade = true }
+
 [package.metadata.bundle]
 name = "azvpn"
 identifier = "com.jlevere.azvpn"

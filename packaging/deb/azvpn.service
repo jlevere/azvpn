@@ -1,0 +1,53 @@
+# systemd unit shipped by the .deb / .rpm. Lives at
+# /lib/systemd/system/azvpn.service — the canonical "package-installed
+# unit" location. Admins who want to tweak settings should drop an
+# override at /etc/systemd/system/azvpn.service.d/override.conf
+# rather than editing this file.
+#
+# Different from packaging/systemd/azvpn.service — that one is the
+# template the `azvpn install-daemon` CLI substitutes paths into for
+# `cargo install`-style dev installs. The packaged unit doesn't need
+# substitution; the .deb puts the daemon at /usr/sbin/azvpnd and
+# the patched openvpn at /usr/libexec/azvpn/openvpn, and the daemon's
+# resolver finds it automatically.
+
+[Unit]
+Description=Azure VPN client daemon
+Documentation=https://github.com/jlevere/azvpn
+After=network-online.target systemd-resolved.service
+Wants=network-online.target
+
+[Service]
+Type=notify
+ExecStart=/usr/sbin/azvpnd
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=10s
+
+# `AZVPND_GROUP=azvpn` — the postinst-created dedicated group. Members
+# of this group can talk to /var/run/azvpn/azvpnd.sock without sudo.
+# `AZVPND_OPENVPN` deliberately not set: the daemon's libexec fallback
+# resolves /usr/libexec/azvpn/openvpn (the patched binary the .deb
+# ships) automatically.
+Environment=AZVPND_GROUP=azvpn
+Environment=RUST_LOG=info
+
+# Hardening — see packaging/systemd/azvpn.service for the rationale on
+# each setting. CAP_NET_ADMIN for tun + netlink routes; CAP_NET_RAW
+# for openvpn's protocol probing; CAP_CHOWN to set the socket group at
+# bind time.
+CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_RAW CAP_CHOWN
+AmbientCapabilities=CAP_NET_ADMIN CAP_NET_RAW CAP_CHOWN
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+DeviceAllow=/dev/net/tun rw
+# /etc is needed when the direct-file DNS backend is the active one —
+# the atomic-write helper creates a tempfile in the same directory as
+# the target before rename(2). Hosts where direct-file activates have
+# no other writer for /etc/resolv.conf so the broader scope is safe.
+ReadWritePaths=/var/run/azvpn /var/lib/azvpn /etc
+
+[Install]
+WantedBy=multi-user.target

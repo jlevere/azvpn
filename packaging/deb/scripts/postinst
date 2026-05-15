@@ -1,0 +1,45 @@
+#!/bin/sh
+# postinst — runs after the .deb's files are unpacked into the
+# filesystem. cargo-deb's `systemd-units` integration splices in the
+# daemon-reload + enable/start machinery at `#DEBHELPER#`.
+
+set -e
+
+case "$1" in
+    configure)
+        # Dedicated system group whose members can talk to the daemon
+        # socket without sudo. Using --system keeps the GID in the
+        # system range (<1000) so it doesn't collide with real users.
+        if ! getent group azvpn >/dev/null; then
+            groupadd --system azvpn
+        fi
+
+        # Runtime + state dirs. mode 2775 = setgid bit (new files
+        # inherit the azvpn group) + rwx for root, rwx for group, r-x
+        # for others. The daemon creates the actual socket; we just
+        # pre-create the parent so ProtectSystem=strict doesn't have
+        # to fight us at bind time.
+        install -d -o root -g azvpn -m 2775 /var/lib/azvpn
+        install -d -o root -g azvpn -m 2775 /var/run/azvpn
+
+        # User has to be in the group AND re-login for the
+        # supplementary group set to take effect. Print the hint at
+        # configure time so it's the last thing the user sees from
+        # `apt install`.
+        cat <<EOF
+
+azvpn installed. To use without sudo, add yourself to the azvpn group:
+
+    sudo usermod -aG azvpn \$USER
+
+Then log out and back in for it to take effect. Verify with:
+
+    id      # azvpn should be in the group list
+
+EOF
+        ;;
+esac
+
+#DEBHELPER#
+
+exit 0
