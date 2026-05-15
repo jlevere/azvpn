@@ -13,7 +13,7 @@ use std::path::{Path, PathBuf};
 use tracing::debug;
 use zbus::zvariant::OwnedObjectPath;
 
-use super::{check_executable, other, require_root};
+use super::{check_executable, require_root};
 use crate::Result;
 
 const UNIT_NAME: &str = "azvpn.service";
@@ -23,13 +23,11 @@ const UNIT_PATH: &str = "/etc/systemd/system/azvpn.service";
 /// daemon + openvpn paths.
 const UNIT_TEMPLATE: &str = include_str!("../../../../packaging/systemd/azvpn.service");
 
+/// Canonical install paths — also what the template ships with, so
+/// `render_unit` substitutes against the same string the file already
+/// contains.
 const DEFAULT_DAEMON: &str = "/usr/lib/azvpn/azvpnd";
 const DEFAULT_OPENVPN: &str = "/usr/sbin/openvpn";
-/// Templates ship with these values; `render_unit` swaps them for the
-/// caller-resolved real paths. Kept as named constants so a future
-/// change to the template's defaults can't silently desync.
-const TEMPLATE_DAEMON_PATH: &str = DEFAULT_DAEMON;
-const TEMPLATE_OPENVPN_PATH: &str = DEFAULT_OPENVPN;
 
 pub async fn install(daemon: Option<PathBuf>, openvpn: Option<PathBuf>) -> Result<()> {
     require_root("install-daemon")?;
@@ -46,25 +44,15 @@ pub async fn install(daemon: Option<PathBuf>, openvpn: Option<PathBuf>) -> Resul
     std::fs::write(UNIT_PATH, unit.as_bytes())?;
     eprintln!("wrote {UNIT_PATH}");
 
-    let conn = zbus::Connection::system()
-        .await
-        .map_err(|e| other(format!("connecting to system D-Bus: {e}")))?;
-    let proxy = SystemdManagerProxy::new(&conn)
-        .await
-        .map_err(|e| other(format!("creating systemd1 proxy: {e}")))?;
-
-    proxy
-        .reload()
-        .await
-        .map_err(|e| other(format!("systemd Reload: {e}")))?;
+    let conn = zbus::Connection::system().await?;
+    let proxy = SystemdManagerProxy::new(&conn).await?;
+    proxy.reload().await?;
     proxy
         .enable_unit_files(vec![UNIT_NAME.to_string()], false, true)
-        .await
-        .map_err(|e| other(format!("systemd EnableUnitFiles: {e}")))?;
+        .await?;
     let job: OwnedObjectPath = proxy
         .start_unit(UNIT_NAME.to_string(), "replace".to_string())
-        .await
-        .map_err(|e| other(format!("systemd StartUnit: {e}")))?;
+        .await?;
     debug!(?job, "systemd accepted StartUnit");
 
     eprintln!("daemon enabled and started — try `azvpn status`");
@@ -112,8 +100,8 @@ pub async fn uninstall() -> Result<()> {
 /// `/usr/sbin/openvpn`); `cargo install`-style installs override.
 fn render_unit(daemon: &Path, openvpn: &Path) -> String {
     UNIT_TEMPLATE
-        .replace(TEMPLATE_DAEMON_PATH, &daemon.display().to_string())
-        .replace(TEMPLATE_OPENVPN_PATH, &openvpn.display().to_string())
+        .replace(DEFAULT_DAEMON, &daemon.display().to_string())
+        .replace(DEFAULT_OPENVPN, &openvpn.display().to_string())
 }
 
 /// systemd1 manager — only the four methods install/uninstall needs.

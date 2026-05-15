@@ -137,44 +137,38 @@ enum Backend {
 ///      lesser evil.
 ///    - **resolvconf owner** or **unknown**: direct backend.
 async fn detect_backend() -> Backend {
-    // Ping resolved up-front so a daemon that's installed-but-idle
-    // wakes up and writes its resolv.conf header before we sample.
-    // The probe also doubles as our "is resolved actually answering"
-    // check for the resolved branch below.
-    let resolved_alive = ResolvedBackend::try_connect().await.is_ok();
+    // Connect-and-introspect up-front so a daemon that's installed-but-
+    // idle wakes up and writes its resolv.conf header before we sample.
+    // The connection doubles as the resolved backend we'd return — no
+    // second probe needed downstream.
+    let resolved_probe = ResolvedBackend::try_connect().await.ok();
     let resolv = fs::read_to_string(RESOLV_CONF).unwrap_or_default();
     let signal = fingerprint(&resolv);
 
-    match signal {
-        ResolvSignal::SystemdResolved => {
-            if resolved_alive && resolv_points_at_resolved(&resolv) {
-                if let Ok(b) = ResolvedBackend::try_connect().await {
-                    info!(backend = "systemd-resolved", fingerprint = ?signal, "DNS backend selected");
-                    return Backend::Resolved(b);
-                }
-            }
+    let resolved_ok = |reason: &str, b: ResolvedBackend| {
+        info!(backend = "systemd-resolved", fingerprint = ?signal, reason, "DNS backend selected");
+        Backend::Resolved(b)
+    };
+
+    match (signal, resolved_probe) {
+        (ResolvSignal::SystemdResolved, Some(b)) if resolv_points_at_resolved(&resolv) => {
+            return resolved_ok("owner=resolved + points at 127.0.0.53", b);
         }
-        ResolvSignal::NetworkManager => {
-            // NM may delegate DNS to resolved (`dns=systemd-resolved`)
-            // or own resolv.conf directly (`dns=default`). When it
-            // delegates, talking to resolved is strictly better.
-            if resolved_alive && nm_is_using_resolved().await {
-                if let Ok(b) = ResolvedBackend::try_connect().await {
-                    info!(backend = "systemd-resolved", fingerprint = ?signal, "DNS backend selected (NM delegates DNS to resolved)");
-                    return Backend::Resolved(b);
-                }
-            }
-            // NM owns resolv.conf and isn't delegating. Tailscale
-            // chose `direct` here for two compounding reasons:
-            // (1) NM's per-link DNS API (Reapply) loses IPv6 config
-            // — their issue #1699 — and (2) NM ≥ 1.26.6 silently
-            // rejects DNS settings on unmanaged devices, which is
-            // exactly what an externally-created openvpn tun looks
-            // like. Empirically verified on this VM: NM Reapply
-            // also strips our netlink-installed routes since they
-            // aren't in NM's `route-data` view. Match Tailscale's
-            // call — fall through to direct, accept the (rare) NM-
-            // wins-the-race-to-rewrite-resolv.conf risk.
+        (ResolvSignal::NetworkManager, Some(b)) if nm_is_using_resolved().await => {
+            return resolved_ok("owner=NM, NM delegates DNS to resolved", b);
+        }
+        (ResolvSignal::Unknown, Some(b)) if resolv_points_at_resolved(&resolv) => {
+            return resolved_ok("no magic comment but resolv.conf points at 127.0.0.53", b);
+        }
+        (ResolvSignal::NetworkManager, _) => {
+            // NM owns resolv.conf and isn't delegating. Tailscale chose
+            // `direct` here for two compounding reasons: NM's per-link
+            // DNS API (Reapply) loses IPv6 config (issue #1699) and
+            // NM ≥ 1.26.6 silently rejects DNS settings on unmanaged
+            // devices, which is exactly what an externally-created
+            // openvpn tun looks like. Empirically verified: NM Reapply
+            // also strips our netlink-installed routes. Fall to direct
+            // and accept the (rare) NM-wins-the-race-to-rewrite risk.
             warn!(
                 "/etc/resolv.conf is managed by NetworkManager and NM is not \
                  delegating DNS to systemd-resolved — falling back to direct \
@@ -182,23 +176,13 @@ async fn detect_backend() -> Backend {
                  reapply lands."
             );
         }
-        ResolvSignal::Resolvconf => {
+        (ResolvSignal::Resolvconf, _) => {
             warn!(
                 "/etc/resolv.conf is managed by resolvconf — proper resolvconf \
                  integration isn't wired yet; falling back to direct file."
             );
         }
-        ResolvSignal::Unknown => {
-            // No magic comment — common on minimalist containers,
-            // Alpine, manually-configured boxes. resolved might still
-            // be running (rare but possible); check.
-            if resolved_alive && resolv_points_at_resolved(&resolv) {
-                if let Ok(b) = ResolvedBackend::try_connect().await {
-                    info!(backend = "systemd-resolved", fingerprint = ?signal, "DNS backend selected (resolv.conf points at 127.0.0.53)");
-                    return Backend::Resolved(b);
-                }
-            }
-        }
+        _ => {}
     }
 
     info!(backend = "direct-resolv.conf", fingerprint = ?signal, "DNS backend selected");
