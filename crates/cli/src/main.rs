@@ -10,7 +10,7 @@ mod dns;
 mod error;
 mod groups;
 mod info;
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 mod install_daemon;
 mod logging;
 mod manager;
@@ -79,24 +79,26 @@ enum Command {
     /// DNS queries — verify split-horizon resolution against the gateway
     #[command(subcommand)]
     Dns(DnsCommand),
-    /// Install the system daemon: writes /Library/LaunchDaemons/<label>.plist
-    /// and bootstraps launchd. Mirrors `tailscaled install-system-daemon` so
-    /// `brew install` doesn't have to dump a multi-step caveats block.
-    /// Requires sudo. macOS only.
-    #[cfg(target_os = "macos")]
+    /// Install the system daemon: writes the platform's init-system unit
+    /// (launchd plist on macOS, systemd .service on Linux) and starts it.
+    /// Mirrors `tailscaled install-system-daemon` so package installs
+    /// don't have to dump a multi-step caveats block. Requires sudo.
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
     InstallDaemon {
-        /// Override the azvpnd binary path baked into the plist. Default:
-        /// `<prefix>/libexec/azvpnd` relative to the running azvpn binary.
+        /// Override the azvpnd binary path baked into the unit. Default:
+        /// `<prefix>/libexec/azvpnd` on macOS, `/usr/lib/azvpn/azvpnd`
+        /// on Linux.
         #[arg(long)]
         daemon: Option<PathBuf>,
-        /// Override the bundled openvpn binary path. Default:
-        /// `<prefix>/libexec/azvpn-openvpn`.
+        /// Override the openvpn binary path. Default:
+        /// `<prefix>/libexec/azvpn-openvpn` on macOS,
+        /// `/usr/sbin/openvpn` on Linux.
         #[arg(long)]
         openvpn: Option<PathBuf>,
     },
-    /// Boot out the system daemon and remove its launchd plist. Requires
-    /// sudo. Mirrors install-daemon. macOS only.
-    #[cfg(target_os = "macos")]
+    /// Stop and remove the system daemon installed by install-daemon.
+    /// Requires sudo.
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
     UninstallDaemon,
 }
 
@@ -134,12 +136,12 @@ async fn main() {
         Command::Dns(DnsCommand::Lookup { host, via }) => {
             report(dns::lookup(&host, via.as_deref()).await)
         }
-        #[cfg(target_os = "macos")]
+        #[cfg(any(target_os = "macos", target_os = "linux"))]
         Command::InstallDaemon { daemon, openvpn } => {
-            report(install_daemon::install(daemon, openvpn))
+            report(install_daemon::install(daemon, openvpn).await)
         }
-        #[cfg(target_os = "macos")]
-        Command::UninstallDaemon => report(install_daemon::uninstall()),
+        #[cfg(any(target_os = "macos", target_os = "linux"))]
+        Command::UninstallDaemon => report(install_daemon::uninstall().await),
         Command::Import { path } => {
             tracing::info!(?path, "importing profile");
             eprintln!("not yet implemented");
