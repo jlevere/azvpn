@@ -49,7 +49,10 @@ fn load_claims() -> Result<Claims> {
 }
 
 fn decode_claims(jwt: &str) -> Result<Claims> {
-    let payload_b64 = jwt.split('.').nth(1).ok_or(Error::MalformedJwt("payload"))?;
+    let payload_b64 = jwt
+        .split('.')
+        .nth(1)
+        .ok_or(Error::MalformedJwt("payload"))?;
     let decoded = URL_SAFE_NO_PAD.decode(payload_b64)?;
     Ok(serde_json::from_slice(&decoded)?)
 }
@@ -90,7 +93,10 @@ pub fn run() -> Result<()> {
     println!("oid:      {}", claims.oid.as_deref().unwrap_or("(unknown)"));
     println!("tenant:   {}", claims.tid.as_deref().unwrap_or("(unknown)"));
     println!("audience: {}", claims.aud.as_deref().unwrap_or("(unknown)"));
-    println!("appid:    {}", claims.appid.as_deref().unwrap_or("(unknown)"));
+    println!(
+        "appid:    {}",
+        claims.appid.as_deref().unwrap_or("(unknown)")
+    );
     println!("issuer:   {}", claims.iss.as_deref().unwrap_or("(unknown)"));
     println!("scopes:   {}", claims.scp.as_deref().unwrap_or("(none)"));
     println!(

@@ -23,11 +23,7 @@ mod whoami;
 pub use error::{Error, Result};
 
 #[derive(Parser)]
-#[command(
-    name = "azvpn",
-    version,
-    about = "Cross-platform Azure VPN client"
-)]
+#[command(name = "azvpn", version, about = "Cross-platform Azure VPN client")]
 struct Cli {
     #[command(subcommand)]
     command: Command,

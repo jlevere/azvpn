@@ -34,8 +34,7 @@ const AAD_AUTHORITY: &str = "https://login.microsoftonline.com";
 /// `claims` parameter we pass to AAD when the profile sets
 /// `<enablegrouptoken>true`. Asks AAD to include the `groups` claim
 /// in the access token (essential so it's never silently dropped).
-pub(crate) const GROUPS_CLAIMS_JSON: &str =
-    r#"{"access_token":{"groups":{"essential":true}}}"#;
+pub(crate) const GROUPS_CLAIMS_JSON: &str = r#"{"access_token":{"groups":{"essential":true}}}"#;
 
 /// `https://login.microsoftonline.com/{tenant}/oauth2/v2.0/token`.
 pub(crate) fn aad_token_url(tenant: &str) -> Result<TokenUrl> {
@@ -69,9 +68,7 @@ impl From<&BasicTokenResponse> for Token {
         // AAD always sends `expires_in`; the fallback exists because the
         // type signature is `Option<Duration>` and we'd rather pin a
         // conservative default than panic.
-        let expires_in = t
-            .expires_in()
-            .unwrap_or_else(|| Duration::from_hours(1));
+        let expires_in = t.expires_in().unwrap_or_else(|| Duration::from_hours(1));
         Self {
             access_token: t.access_token().secret().to_owned(),
             expires_at: SystemTime::now() + expires_in,
@@ -154,9 +151,7 @@ impl AadConfig {
     /// USGov/sovereign-cloud variant, not commercial. Audience-as-
     /// client is what works in commercial.)
     pub fn client_id(&self) -> &str {
-        self.application_id
-            .as_deref()
-            .unwrap_or(&self.audience)
+        self.application_id.as_deref().unwrap_or(&self.audience)
     }
 }
 

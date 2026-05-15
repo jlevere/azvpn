@@ -89,7 +89,10 @@ impl AuthCodeFlow {
             warn!(error = %e, addr = LISTENER_BIND, "cannot bind loopback for OAuth callback");
             Error::LoopbackBindFailed
         })?;
-        info!(listener = LISTENER_BIND, "loopback ready for OAuth callback");
+        info!(
+            listener = LISTENER_BIND,
+            "loopback ready for OAuth callback"
+        );
 
         let scope = format!("{}/.default offline_access", self.config.audience);
         let (pkce_challenge, pkce_verifier) = PkceCodeChallenge::new_random_sha256();
@@ -110,7 +113,10 @@ impl AuthCodeFlow {
         }
         let (auth_url, csrf_state) = authorize.url();
 
-        info!(uri = auth_url.as_str(), "opening system browser for sign-in");
+        info!(
+            uri = auth_url.as_str(),
+            "opening system browser for sign-in"
+        );
         if let Err(e) = open::that(auth_url.as_str()) {
             warn!(error = %e, "failed to launch browser; user can paste the URL manually");
         }

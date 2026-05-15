@@ -13,10 +13,7 @@ pub struct OpenVpnProcess {
 
 impl OpenVpnProcess {
     #[instrument(skip_all)]
-    pub fn start(
-        ovpn_config: &OpenVpnConfig,
-        config_path: &Path,
-    ) -> Result<Self, Error> {
+    pub fn start(ovpn_config: &OpenVpnConfig, config_path: &Path) -> Result<Self, Error> {
         info!(
             binary = %ovpn_config.openvpn_binary.display(),
             config = %config_path.display(),

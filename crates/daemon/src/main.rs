@@ -23,6 +23,7 @@ use tarpc::serde_transport;
 use tarpc::server::{BaseChannel, Channel};
 use tarpc::tokio_serde::formats::Bincode;
 use tarpc::tokio_util::codec::length_delimited::LengthDelimitedCodec;
+#[cfg(unix)]
 use tokio::signal::unix::{SignalKind, signal};
 use tokio_util::sync::CancellationToken;
 use tracing::{error, info, warn};
@@ -133,6 +134,7 @@ async fn accept_loop(
     }
 }
 
+#[cfg(unix)]
 fn spawn_signal_listener(shutdown: CancellationToken) {
     tokio::spawn(async move {
         let mut sigterm = match signal(SignalKind::terminate()) {
@@ -158,11 +160,26 @@ fn spawn_signal_listener(shutdown: CancellationToken) {
     });
 }
 
+// Windows has no SIGTERM; the Windows path is just Ctrl-C. We don't
+// have a real Windows daemon yet — this stub exists so `cargo check
+// --target x86_64-pc-windows-msvc` (which CI runs) succeeds. A real
+// Windows service would wire the SCM stop callback here.
+#[cfg(not(unix))]
+fn spawn_signal_listener(shutdown: CancellationToken) {
+    tokio::spawn(async move {
+        if let Err(e) = tokio::signal::ctrl_c().await {
+            warn!(error = %e, "ctrl_c watcher failed");
+        } else {
+            info!("received Ctrl-C");
+        }
+        shutdown.cancel();
+    });
+}
+
 /// Default tracing directives — used both as `EnvFilter` fallback and
 /// as the source the journald path re-parses (`EnvFilter` isn't Clone,
 /// so passing the source string is cheaper than juggling two copies).
-const DEFAULT_DIRECTIVES: &str =
-    "azvpnd=info,azvpn_daemon=info,azvpn_core=info,azvpn_openvpn=info,\
+const DEFAULT_DIRECTIVES: &str = "azvpnd=info,azvpn_daemon=info,azvpn_core=info,azvpn_openvpn=info,\
      azvpn_ipc=info,warn";
 
 fn current_directives() -> String {
@@ -198,7 +215,10 @@ fn try_init_journald(directives: &str) -> bool {
     match tracing_journald::layer() {
         Ok(journald) => {
             let filter = EnvFilter::try_new(directives).unwrap_or_else(|_| EnvFilter::new("info"));
-            tracing_subscriber::registry().with(filter).with(journald).init();
+            tracing_subscriber::registry()
+                .with(filter)
+                .with(journald)
+                .init();
             true
         }
         Err(e) => {

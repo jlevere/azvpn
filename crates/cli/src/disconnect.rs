@@ -2,8 +2,8 @@
 
 use azvpn_ipc::DisconnectOutcome;
 
-use crate::daemon_client::connect_to_daemon;
 use crate::Result;
+use crate::daemon_client::connect_to_daemon;
 
 pub async fn run() -> Result<()> {
     let client = connect_to_daemon().await?;

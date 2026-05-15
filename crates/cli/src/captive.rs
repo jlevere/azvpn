@@ -65,13 +65,21 @@ pub async fn probe() -> Outcome {
         .build()
     {
         Ok(c) => c,
-        Err(e) => return Outcome::NetworkBlocked { reason: e.to_string() },
+        Err(e) => {
+            return Outcome::NetworkBlocked {
+                reason: e.to_string(),
+            };
+        }
     };
 
     match client.head(PROBE_URL).send().await {
         Ok(resp) if resp.status() == StatusCode::NO_CONTENT => Outcome::Clear,
-        Ok(resp) => Outcome::PortalInterception { status: resp.status().as_u16() },
-        Err(e) => Outcome::NetworkBlocked { reason: e.to_string() },
+        Ok(resp) => Outcome::PortalInterception {
+            status: resp.status().as_u16(),
+        },
+        Err(e) => Outcome::NetworkBlocked {
+            reason: e.to_string(),
+        },
     }
 }
 

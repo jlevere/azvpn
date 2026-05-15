@@ -13,10 +13,10 @@ use azvpn_core::Error as CoreError;
 
 use crate::{Error, Result};
 
-#[cfg(target_os = "macos")]
-mod macos;
 #[cfg(target_os = "linux")]
 mod linux;
+#[cfg(target_os = "macos")]
+mod macos;
 
 /// Install + start the daemon for the current platform.
 pub async fn install(daemon: Option<PathBuf>, openvpn: Option<PathBuf>) -> Result<()> {
@@ -50,9 +50,7 @@ pub async fn uninstall() -> Result<()> {
     }
     #[cfg(not(any(target_os = "macos", target_os = "linux")))]
     {
-        Err(other(
-            "uninstall-daemon is currently macOS and Linux only",
-        ))
+        Err(other("uninstall-daemon is currently macOS and Linux only"))
     }
 }
 

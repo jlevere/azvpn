@@ -84,23 +84,32 @@ pub enum Event {
     /// TLS renegotiation when the initial `auth-user-pass` file is no
     /// longer in scope. The caller responds with
     /// [`crate::ManagementClient::send_auth`].
-    PasswordPrompt { realm: Realm },
+    PasswordPrompt {
+        realm: Realm,
+    },
     /// `>PASSWORD:Auth-Token:<token>` — openvpn delivering a fresh
     /// auth-token issued by the gateway, out-of-band from `PUSH_REPLY`.
     /// Functionally equivalent to [`PushOptions::auth_token`] but this
     /// is the canonical management-socket path; some openvpn versions
     /// only emit it via this notification.
-    AuthTokenIssued { token: String },
+    AuthTokenIssued {
+        token: String,
+    },
     /// `>PASSWORD:Verification Failed: '<realm>'` — server rejected the
     /// credentials we sent for `realm`. Terminal for the connection.
-    PasswordVerificationFailed { realm: Realm },
+    PasswordVerificationFailed {
+        realm: Realm,
+    },
     /// `>FATAL:<message>` — openvpn has hit an unrecoverable error and
     /// is about to exit. Terminal for the connection. Carries the
     /// message verbatim so callers can surface a specific cause
     /// (auth failure, TLS handshake error, cert chain mismatch, etc.).
     Fatal(String),
     Info(String),
-    ByteCount { rx: u64, tx: u64 },
+    ByteCount {
+        rx: u64,
+        tx: u64,
+    },
     /// `>LOG:<timestamp>,<level>,<message>` — openvpn's structured
     /// log line. The wire-form timestamp is discarded (we have our
     /// own logger's), but the level is preserved so the caller can

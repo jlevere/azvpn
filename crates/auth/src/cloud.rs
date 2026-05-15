@@ -74,13 +74,25 @@ pub async fn arm_token() -> Result<String> {
 /// Returns [`Error::HttpStatus`] on non-2xx so callers can match on it
 /// (e.g. treat 404 as "not configured" rather than failure).
 pub async fn graph_get<T: serde::de::DeserializeOwned>(path: &str) -> Result<T> {
-    typed_get("graph", "https://graph.microsoft.com/v1.0", path, graph_token().await?).await
+    typed_get(
+        "graph",
+        "https://graph.microsoft.com/v1.0",
+        path,
+        graph_token().await?,
+    )
+    .await
 }
 
 /// GET an ARM endpoint. Same shape as [`graph_get`] but against
 /// `management.azure.com`.
 pub async fn arm_get<T: serde::de::DeserializeOwned>(path: &str) -> Result<T> {
-    typed_get("arm", "https://management.azure.com", path, arm_token().await?).await
+    typed_get(
+        "arm",
+        "https://management.azure.com",
+        path,
+        arm_token().await?,
+    )
+    .await
 }
 
 async fn typed_get<T: serde::de::DeserializeOwned>(

@@ -1,11 +1,12 @@
+# cargo-deny configuration (schema v2 — required by cargo-deny ≥ 0.16).
+
 [advisories]
-vulnerability = "deny"
-unmaintained = "warn"
+version = 2
 yanked = "warn"
-notice = "warn"
+ignore = []
 
 [licenses]
-unlicensed = "deny"
+version = 2
 allow = [
     "MIT",
     "Apache-2.0",
@@ -15,7 +16,7 @@ allow = [
     "Unicode-3.0",
     "Unicode-DFS-2016",
 ]
-copyleft = "deny"
+confidence-threshold = 0.93
 
 [bans]
 multiple-versions = "warn"

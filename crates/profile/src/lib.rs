@@ -223,9 +223,11 @@ impl VpnProfile {
 
         match self.clientauth.auth_type {
             AuthType::Aad => {
-                let aad = self.clientauth.aad.as_ref().ok_or_else(|| {
-                    Error::Validation("AAD auth requires <aad> block".into())
-                })?;
+                let aad = self
+                    .clientauth
+                    .aad
+                    .as_ref()
+                    .ok_or_else(|| Error::Validation("AAD auth requires <aad> block".into()))?;
                 if aad.audience.is_empty() {
                     return Err(Error::Validation("AAD auth requires audience".into()));
                 }
@@ -391,10 +393,7 @@ mod tests {
         assert!(profile.clientauth.aad.is_none());
 
         assert_eq!(profile.dns_servers(), vec!["10.0.0.4", "10.0.0.5"]);
-        assert_eq!(
-            profile.dns_suffixes(),
-            vec![".mycorp.com", ".internal.net"]
-        );
+        assert_eq!(profile.dns_suffixes(), vec![".mycorp.com", ".internal.net"]);
 
         let includes = profile
             .clientconfig
@@ -655,7 +654,12 @@ mod tests {
 
         let with_canonical = VpnProfile::from_xml(&base("applicationid")).unwrap();
         assert_eq!(
-            with_canonical.clientauth.aad.unwrap().applicationid.as_deref(),
+            with_canonical
+                .clientauth
+                .aad
+                .unwrap()
+                .applicationid
+                .as_deref(),
             Some("custom-app-guid")
         );
 
