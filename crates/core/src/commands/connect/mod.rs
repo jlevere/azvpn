@@ -29,6 +29,7 @@ use tokio_util::sync::CancellationToken;
 use tracing::{info, instrument};
 
 use crate::dns;
+use crate::metrics::{throughput_between, ByteSample, ConnectionMetrics};
 use crate::reachability::ReachabilityWatcher;
 use crate::route::RouteManager;
 use crate::session::RunningSession;
@@ -82,7 +83,7 @@ pub async fn run(
     access_token: Option<String>,
     status_tx: watch::Sender<ConnectionStatus>,
     pushed_tx: watch::Sender<Option<PushOptions>>,
-    bytes_tx: watch::Sender<Option<(u64, u64)>>,
+    metrics_tx: watch::Sender<ConnectionMetrics>,
     cancel: CancellationToken,
 ) -> Result<()> {
     // Profile parse + root-CA check are pure functions of the profile
@@ -102,7 +103,7 @@ pub async fn run(
             access_token.as_deref(),
             &status_tx,
             &pushed_tx,
-            &bytes_tx,
+            &metrics_tx,
             cancel.clone(),
         )
         .await;
@@ -163,7 +164,7 @@ async fn attempt(
     access_token: Option<&str>,
     status_tx: &watch::Sender<ConnectionStatus>,
     pushed_tx: &watch::Sender<Option<PushOptions>>,
-    bytes_tx: &watch::Sender<Option<(u64, u64)>>,
+    metrics_tx: &watch::Sender<ConnectionMetrics>,
     cancel: CancellationToken,
 ) -> AttemptOutcome {
     let _ = status_tx.send(ConnectionStatus::Connecting);
@@ -262,6 +263,23 @@ async fn attempt(
     // Set inside the event loop to record why we broke out. None means
     // "openvpn exited on its own" — exit code decides post-loop.
     let mut outcome: Option<AttemptOutcome> = None;
+    // Previous BYTECOUNT sample — held locally because the wire-shape
+    // `ConnectionMetrics` only carries cumulative + computed-rate
+    // fields, not the per-sample `Instant` we need to derive that
+    // rate. Updated on every `Event::ByteCount`.
+    let mut prev_byte_sample: Option<ByteSample> = None;
+    // Surface the most recent fatal/transient failure on the status
+    // RPC. CONNECTED clears it; break-out arms below set it before
+    // they break.
+    let record_error = |msg: &str| {
+        metrics_tx.send_if_modified(|m| {
+            if m.last_error.as_deref() == Some(msg) {
+                return false;
+            }
+            m.last_error = Some(msg.to_string());
+            true
+        });
+    };
     // Watch for wifi↔ethernet handoffs / sleep-wake / adapter cycles
     // so we can soft-restart openvpn the moment the network moves,
     // instead of waiting 60+s for keepalive to time out. Failure to
@@ -315,6 +333,7 @@ async fn attempt(
                         // crashed, or the network underneath collapsed.
                         // Treat as transient so the retry loop gets a
                         // chance to reestablish.
+                        record_error(&format!("management socket dropped: {e}"));
                         outcome = Some(AttemptOutcome::Transient(e.into()));
                         break;
                     }
@@ -343,11 +362,37 @@ async fn attempt(
                                 true
                             }
                         });
+                        if *state == VpnState::Reconnecting {
+                            // Track every openvpn-driven reconnect for
+                            // the status RPC. Surfaces flaky sessions
+                            // ("uptime 4h, but 30 reconnects" reads
+                            // very differently from "uptime 4h, 0
+                            // reconnects").
+                            let now = std::time::SystemTime::now()
+                                .duration_since(std::time::UNIX_EPOCH)
+                                .map_or(0, |d| d.as_secs());
+                            metrics_tx.send_if_modified(|m| {
+                                m.reconnects = m.reconnects.saturating_add(1);
+                                m.last_reconnect_at = Some(now);
+                                true
+                            });
+                        }
                         if *state == VpnState::Connected {
                             if !have_connected {
                                 info!(server = %server.fqdn, "connected");
                                 have_connected = true;
                             }
+                            // A fresh CONNECTED clears any stale
+                            // last_error from a prior reconnect cycle
+                            // — the tunnel recovered, the report
+                            // shouldn't claim otherwise.
+                            metrics_tx.send_if_modified(|m| {
+                                if m.last_error.is_none() {
+                                    return false;
+                                }
+                                m.last_error = None;
+                                true
+                            });
                             // Register the tun-local IP with the watcher
                             // so the upcoming Up event for our own
                             // interface doesn't tip us into an instant
@@ -398,6 +443,7 @@ async fn attempt(
                     }
                     Event::Hold => {
                         if let Err(e) = mgmt.hold_release().await {
+                            record_error(&format!("hold-release failed: {e}"));
                             outcome = Some(AttemptOutcome::Transient(e.into()));
                             break;
                         }
@@ -430,6 +476,7 @@ async fn attempt(
                         let msg =
                             format!("credentials rejected by gateway (realm {realm})");
                         let _ = status_tx.send(ConnectionStatus::Failed(msg.clone()));
+                        record_error(&msg);
                         let _ = mgmt.send("signal SIGTERM").await;
                         // Rejection won't fix by retrying with the same
                         // token — caller has to acquire a fresh AAD AT
@@ -441,6 +488,7 @@ async fn attempt(
                         tracing::error!("openvpn fatal: {msg}");
                         let status_msg = format!("openvpn fatal: {msg}");
                         let _ = status_tx.send(ConnectionStatus::Failed(status_msg.clone()));
+                        record_error(&status_msg);
                         // openvpn will exit on its own after emitting >FATAL:,
                         // so we don't need to signal it — just stop pumping
                         // events and let the wait() at loop exit reap it.
@@ -465,7 +513,9 @@ async fn attempt(
                         );
                         if let Err(e) = validation::push_reply_acceptable(&opts) {
                             tracing::error!(error = %e, "refusing push reply on crypto policy");
-                            let _ = status_tx.send(ConnectionStatus::Failed(e.to_string()));
+                            let msg = e.to_string();
+                            let _ = status_tx.send(ConnectionStatus::Failed(msg.clone()));
+                            record_error(&msg);
                             let _ = mgmt.send("signal SIGTERM").await;
                             // Gateway-side misconfiguration — retrying
                             // gets the same cipher / compression, no point.
@@ -518,17 +568,30 @@ async fn attempt(
                     }
                     Event::ByteCount { rx, tx } => {
                         tracing::debug!(rx, tx, "byte count");
+                        let now_sample = ByteSample {
+                            rx,
+                            tx,
+                            at: std::time::Instant::now(),
+                        };
+                        let new_throughput = prev_byte_sample
+                            .and_then(|prev| throughput_between(prev, now_sample));
+                        prev_byte_sample = Some(now_sample);
+                        let next_bytes = azvpn_ipc::ByteCount {
+                            rx_bytes: rx,
+                            tx_bytes: tx,
+                        };
                         // Coalesce via send_if_modified so a static
-                        // (idle) tunnel doesn't wake every status
-                        // subscriber once per second.
-                        bytes_tx.send_if_modified(|cur| {
-                            let next = Some((rx, tx));
-                            if *cur == next {
-                                false
-                            } else {
-                                *cur = next;
-                                true
+                        // (idle) tunnel with unchanged counters doesn't
+                        // wake every status subscriber once per second.
+                        metrics_tx.send_if_modified(|m| {
+                            let bytes_same = m.bytes == Some(next_bytes);
+                            let throughput_same = m.throughput == new_throughput;
+                            if bytes_same && throughput_same {
+                                return false;
                             }
+                            m.bytes = Some(next_bytes);
+                            m.throughput = new_throughput;
+                            true
                         });
                     }
                 }

@@ -10,6 +10,11 @@ repository.workspace = true
 [dependencies]
 async-trait = { workspace = true }
 azvpn-auth = { workspace = true }
+# Wire-type crate. We don't talk over the wire from core, but
+# `ByteCount` / `Throughput` live there as the daemon-↔-CLI contract,
+# and `core::metrics` builds those same shapes so the daemon can hand
+# them off without conversion at status-RPC time.
+azvpn-ipc = { workspace = true }
 azvpn-openvpn = { workspace = true }
 azvpn-profile = { workspace = true }
 backon = { workspace = true }
