@@ -8,6 +8,7 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
+async-trait = { workspace = true }
 azvpn-auth = { workspace = true }
 azvpn-openvpn = { workspace = true }
 azvpn-profile = { workspace = true }
