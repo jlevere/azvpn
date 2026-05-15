@@ -15,7 +15,6 @@
 #  * `nix build .#openvpn-azvpn` for the patched openvpn (renamed to
 #    `azvpn-openvpn` in the tarball to dodge the brew openvpn formula
 #    PATH collision)
-#  * launchd plist + LICENSEs from the tree
 #
 # Output: dist/azvpn-${VERSION}-aarch64-apple-darwin.tar.gz and its
 # SHA256, plus a copy-pasteable Homebrew formula stanza printed to
@@ -23,53 +22,32 @@
 # step; we'll automate via Actions on tag-push once the manual path
 # is wired and tested.
 #
-# Usage:
-#     scripts/release-macos.sh           # builds for the host arch
-#     scripts/release-macos.sh --clean   # also wipes dist/ first
-#
-# Hard requirements: bash, cargo, nix (for the openvpn package), and
-# the standard BSD `tar`, `shasum`, `lipo`, `strip` on PATH. The
-# release runs from the repo root.
+# Intel macs are out of scope — single target is aarch64-apple-darwin.
+# To start a fresh build, `rm -rf dist/`.
 
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$REPO_ROOT"
 
-CLEAN=0
-if [[ "${1:-}" == "--clean" ]]; then
-    CLEAN=1
+if [[ "$(uname -s)" != "Darwin" || "$(uname -m)" != "arm64" ]]; then
+    echo "error: this script targets macOS arm64 only" >&2
+    exit 1
 fi
 
-# Version lives on each crate (the workspace doesn't share a single
-# `version` field) — the CLI crate is canonical since users invoke its
-# binary first. CLI and daemon are bumped together by convention.
+# CLI crate's `version =` is canonical; CLI and daemon ride the same
+# number by convention.
 VERSION="$(grep -E '^version' crates/cli/Cargo.toml | head -1 | sed -E 's/.*"([^"]+)".*/\1/')"
 if [[ -z "$VERSION" ]]; then
     echo "error: couldn't extract version from crates/cli/Cargo.toml" >&2
     exit 1
 fi
 
-ARCH="$(uname -m)"
-case "$ARCH" in
-    arm64|aarch64) TARGET_TRIPLE="aarch64-apple-darwin" ;;
-    x86_64)        TARGET_TRIPLE="x86_64-apple-darwin" ;;
-    *)             echo "error: unsupported arch $ARCH" >&2; exit 1 ;;
-esac
-
-if [[ "$(uname -s)" != "Darwin" ]]; then
-    echo "error: this script targets macOS only" >&2
-    exit 1
-fi
-
+TARGET_TRIPLE="aarch64-apple-darwin"
 DIST="$REPO_ROOT/dist"
 STAGE="$DIST/azvpn-$VERSION-$TARGET_TRIPLE"
 TARBALL="$DIST/azvpn-$VERSION-$TARGET_TRIPLE.tar.gz"
-
-if [[ "$CLEAN" -eq 1 ]]; then
-    rm -rf "$DIST"
-fi
-mkdir -p "$STAGE"/{bin,libexec,share/azvpn}
+mkdir -p "$STAGE"/{bin,libexec}
 
 echo "==> building azvpn + azvpnd (release)"
 cargo build --release --workspace --bins
@@ -90,9 +68,6 @@ install -m 0755 "$DIST/nix-openvpn/bin/openvpn"    "$STAGE/libexec/azvpn-openvpn
 strip "$STAGE/bin/azvpn" "$STAGE/libexec/azvpnd" "$STAGE/libexec/azvpn-openvpn" 2>/dev/null || true
 
 echo "==> staging support files"
-install -m 0644 \
-    "$REPO_ROOT/packaging/launchd/com.jlevere.azvpn.daemon.plist" \
-    "$STAGE/share/azvpn/com.jlevere.azvpn.daemon.plist"
 install -m 0644 "$REPO_ROOT/LICENSE-MIT"    "$STAGE/LICENSE-MIT"
 install -m 0644 "$REPO_ROOT/LICENSE-APACHE" "$STAGE/LICENSE-APACHE"
 install -m 0644 "$REPO_ROOT/README.md"      "$STAGE/README.md"
@@ -115,12 +90,8 @@ cat <<EOF
 Homebrew formula stanza (paste into jlevere/homebrew-tap/Formula/azvpn.rb):
 
   version "$VERSION"
-  if Hardware::CPU.arm?
-    url "https://github.com/jlevere/azvpn/releases/download/v$VERSION/azvpn-$VERSION-aarch64-apple-darwin.tar.gz"
-    sha256 "$SHA256"
-  else
-    # TODO: build + upload x86_64 tarball, paste its sha256 here.
-  end
+  url "https://github.com/jlevere/azvpn/releases/download/v$VERSION/azvpn-$VERSION-$TARGET_TRIPLE.tar.gz"
+  sha256 "$SHA256"
 
 Next steps:
   1. \`gh release create v$VERSION $TARBALL\` (or upload via the web UI)
