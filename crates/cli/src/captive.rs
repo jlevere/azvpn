@@ -49,6 +49,14 @@ pub enum Outcome {
 /// the caller can decide policy — captive-portal detection is hint,
 /// not gate.
 pub async fn probe() -> Outcome {
+    // Short-circuit when nothing is up: hitting the probe URL takes
+    // the full 3s timeout on a fully-offline machine for no signal —
+    // we already know there's no network. Tailscale does the same
+    // check (`net/captivedetection/captivedetection.go`).
+    if !has_non_loopback_interface() {
+        return Outcome::Clear;
+    }
+
     let client = match reqwest::Client::builder()
         .timeout(PROBE_TIMEOUT)
         // Don't follow the captive portal's redirect — the target is
@@ -64,6 +72,19 @@ pub async fn probe() -> Outcome {
         Ok(resp) if resp.status() == StatusCode::NO_CONTENT => Outcome::Clear,
         Ok(resp) => Outcome::PortalInterception { status: resp.status().as_u16() },
         Err(e) => Outcome::NetworkBlocked { reason: e.to_string() },
+    }
+}
+
+/// True if any non-loopback interface has at least one address. Used
+/// to skip the probe on a fully-offline machine where we already know
+/// the answer.
+fn has_non_loopback_interface() -> bool {
+    match if_addrs::get_if_addrs() {
+        Ok(addrs) => addrs.iter().any(|i| !i.is_loopback()),
+        // `get_if_addrs` failure is rare (sandboxing). Default to
+        // running the probe — at worst we eat 3s of timeout, which
+        // matches the behavior before this guard.
+        Err(_) => true,
     }
 }
 

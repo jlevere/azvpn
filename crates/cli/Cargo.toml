@@ -41,6 +41,7 @@ base64 = { workspace = true }
 clap = { workspace = true }
 hickory-resolver = { workspace = true }
 humansize = { workspace = true }
+if-addrs = { workspace = true }
 humantime = { workspace = true }
 jiff = { workspace = true }
 reqwest = { workspace = true }

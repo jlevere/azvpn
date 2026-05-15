@@ -251,6 +251,7 @@ dependencies = [
  "hickory-resolver",
  "humansize",
  "humantime",
+ "if-addrs 0.13.4",
  "jiff",
  "open",
  "reqwest",
