@@ -40,6 +40,13 @@ pub enum Error {
     #[error("dns resolver: {0}")]
     DnsResolver(#[from] hickory_resolver::error::ResolveError),
 
+    /// Linux `install-daemon` talks to `org.freedesktop.systemd1` over
+    /// D-Bus to write + start the unit. `#[from]` so each call site
+    /// can just `?` rather than wrap with `other(format!(...))`.
+    #[cfg(target_os = "linux")]
+    #[error("dbus: {0}")]
+    Dbus(#[from] zbus::Error),
+
     // ---------- daemon IPC ----------
     /// Transport-level RPC error (socket disconnected, deadline, …).
     #[error("daemon rpc: {0}")]
