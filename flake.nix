@@ -32,10 +32,16 @@
         # Fedora 39+, Amazon Linux 2023, RHEL 9). Linux-only — pkgsStatic
         # on Darwin falls back to dynamic and isn't what we want here.
         #
-        # PAM + systemd are disabled because (a) linux-pam isn't built
-        # for static targets in nixpkgs (it's fundamentally a dlopen-
-        # based subsystem) and (b) the openvpn child doesn't need
-        # sd_notify — our daemon owns that signal.
+        # PAM + systemd are disabled because:
+        #   (a) linux-pam doesn't have a static nixpkgs target — it's
+        #       fundamentally a dlopen-based subsystem.
+        #   (b) the openvpn child doesn't need sd_notify; the daemon
+        #       owns that signal.
+        # `--disable-plugin-auth-pam` is required at the configure level
+        # because openvpn's configure script REQUIRES libpam by default
+        # (the nixpkgs default `configureFlags` adds the disable flag on
+        # Darwin but not Linux). Plugins use dlopen — meaningless in a
+        # static build, so disable them outright.
         openvpn-azvpn-static =
           (pkgs.pkgsStatic.openvpn.override {
             useSystemd = false;
@@ -43,6 +49,10 @@
           }).overrideAttrs (old: {
             patches = (old.patches or []) ++ [
               ./patches/openvpn-increase-user-pass-len.patch
+            ];
+            configureFlags = (old.configureFlags or []) ++ [
+              "--disable-plugin-auth-pam"
+              "--disable-plugins"
             ];
           });
 
