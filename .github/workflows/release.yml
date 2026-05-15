@@ -144,8 +144,53 @@ jobs:
           name: azvpn-deb-linux-x86_64
           path: target/debian/*.deb
 
+  # RPM-family package — same shape as build-deb but produces a .rpm
+  # via cargo-generate-rpm. Targets Fedora 39+, RHEL 9, Amazon Linux
+  # 2023. Reuses the openvpn artifact + systemd unit + the host-built
+  # azvpn / azvpnd binaries from the same release profile.
+  build-rpm:
+    needs: build-openvpn
+    # ubuntu-22.04 (glibc 2.35) for the same reason as build-deb: the
+    # binaries' auto-detected sonames need to be old enough to install
+    # on RHEL 9 (glibc 2.34) and Fedora's current stable.
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: build-rpm-ubuntu-22.04
+      - name: Install Linux system deps
+        run: sudo apt-get update && sudo apt-get install -y libdbus-1-dev pkg-config
+      - name: Install cargo-generate-rpm
+        run: cargo install cargo-generate-rpm --locked
+      - name: Build release binaries (host triple)
+        # Same host-triple build cargo-deb uses; cargo-generate-rpm
+        # also looks under target/release/ by default.
+        run: cargo build --release -p azvpn -p azvpn-daemon
+      - name: Stage bundled openvpn
+        uses: actions/download-artifact@v4
+        with:
+          name: openvpn-azvpn-linux-x86_64
+          path: target/openvpn-azvpn-staged
+      - name: Move openvpn into the path the manifest expects
+        run: |
+          mkdir -p target/openvpn-azvpn
+          mv target/openvpn-azvpn-staged/openvpn-azvpn-linux-x86_64 target/openvpn-azvpn/openvpn
+          chmod +x target/openvpn-azvpn/openvpn
+      - name: Build .rpm
+        run: |
+          mkdir -p target/generate-rpm
+          cargo generate-rpm -p crates/cli --output target/generate-rpm/
+      - name: List produced .rpm
+        run: ls -la target/generate-rpm/
+      - uses: actions/upload-artifact@v4
+        with:
+          name: azvpn-rpm-linux-x86_64
+          path: target/generate-rpm/*.rpm
+
   release:
-    needs: [build, build-openvpn, build-deb]
+    needs: [build, build-openvpn, build-deb, build-rpm]
     # Only publish a GH release on tag pushes — manual dispatches still
     # produce artifacts (visible from the run page) but don't create
     # a draft release out of nowhere.

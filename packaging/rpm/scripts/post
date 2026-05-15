@@ -1,0 +1,43 @@
+#!/bin/sh
+# RPM post-install scriptlet. Mirrors packaging/deb/scripts/postinst:
+# create the azvpn system group, set up state dirs setgid to it, reload
+# systemd so the new unit registers, and print the "add yourself to the
+# group" hint.
+#
+# RPM scriptlet args: $1 is the count of installed instances *after*
+# the operation. Always >= 1 here (we just installed). The same script
+# runs on upgrade, which is fine because every action below is
+# idempotent.
+
+set -e
+
+if ! getent group azvpn >/dev/null; then
+    groupadd --system azvpn
+fi
+
+install -d -o root -g azvpn -m 2775 /var/lib/azvpn
+install -d -o root -g azvpn -m 2775 /var/run/azvpn
+
+if [ -d /run/systemd/system ]; then
+    systemctl daemon-reload || true
+fi
+
+if [ "$1" = "1" ]; then
+    # First-install hint only — on upgrade ($1 == 2) the user already
+    # knows the drill.
+    cat <<EOF
+
+azvpn installed. To finish setup:
+
+    sudo usermod -aG azvpn \$USER          # log out + back in after
+    sudo systemctl enable --now azvpn      # start the daemon
+
+Verify with:
+
+    id              # azvpn should be in the group list
+    azvpn status    # talks to /var/run/azvpn/azvpnd.sock
+
+EOF
+fi
+
+exit 0

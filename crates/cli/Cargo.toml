@@ -56,6 +56,39 @@ maintainer-scripts = "../../packaging/deb/scripts"
 # surprising the operator with an immediately-running daemon.
 systemd-units = { enable = false, start = false, restart-after-upgrade = true }
 
+# `cargo generate-rpm` is the RPM-family counterpart of cargo-deb. Same
+# input artifacts (target/release/{azvpn,azvpnd}, target/openvpn-azvpn/openvpn,
+# packaging/deb/azvpn.service), different metadata shape. Targets:
+# Fedora 39+, RHEL 9, Amazon Linux 2023, Azure Linux 3.
+#
+# Paths are absolute from the workspace root, not relative — unlike
+# cargo-deb. cargo-generate-rpm resolves them itself.
+[package.metadata.generate-rpm]
+name = "azvpn"
+summary = "Cross-platform Azure VPN client"
+# auto_req = "auto" makes cargo-generate-rpm scan the binaries' dynamic
+# imports and emit per-soname Requires (libc.so.6, libdbus-1.so.3, ...).
+# Same flow as cargo-deb's "$auto".
+auto-req = "auto"
+assets = [
+    { source = "target/release/azvpn", dest = "/usr/bin/azvpn", mode = "755" },
+    { source = "target/release/azvpnd", dest = "/usr/sbin/azvpnd", mode = "755" },
+    { source = "target/openvpn-azvpn/openvpn", dest = "/usr/libexec/azvpn/openvpn", mode = "755" },
+    { source = "packaging/deb/azvpn.service", dest = "/lib/systemd/system/azvpn.service", mode = "644" },
+    { source = "LICENSE-MIT", dest = "/usr/share/doc/azvpn/LICENSE-MIT", mode = "644" },
+    { source = "LICENSE-APACHE", dest = "/usr/share/doc/azvpn/LICENSE-APACHE", mode = "644" },
+    { source = "README.md", dest = "/usr/share/doc/azvpn/README.md", mode = "644" },
+]
+post_install_script = "packaging/rpm/scripts/post"
+pre_uninstall_script = "packaging/rpm/scripts/preun"
+post_uninstall_script = "packaging/rpm/scripts/postun"
+
+# systemd is the unit prerequisite. auto-req picks up libc and libdbus
+# transitively; declaring systemd explicitly so older RPM tooling that
+# doesn't track soname-of-/usr/bin/systemctl still pulls it.
+[package.metadata.generate-rpm.requires]
+systemd = "*"
+
 [package.metadata.bundle]
 name = "azvpn"
 identifier = "com.jlevere.azvpn"

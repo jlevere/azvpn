@@ -1,0 +1,19 @@
+#!/bin/sh
+# RPM pre-uninstall scriptlet. Stops the service before file removal.
+#
+# $1 is the number of installs remaining *after* the operation:
+#   - $1 == 0 → real uninstall (not upgrade) — stop the service
+#   - $1 == 1 → upgrade in progress — leave it running, the new postin
+#                will daemon-reload and the user can restart deliberately
+# Mirrors the dpkg "remove vs upgrade" distinction we handle in
+# packaging/deb/scripts/prerm.
+
+set -e
+
+if [ "$1" = "0" ]; then
+    if [ -d /run/systemd/system ]; then
+        systemctl --no-reload disable --now azvpn.service || true
+    fi
+fi
+
+exit 0
