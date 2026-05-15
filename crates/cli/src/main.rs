@@ -10,6 +10,8 @@ mod dns;
 mod error;
 mod groups;
 mod info;
+#[cfg(target_os = "macos")]
+mod install_daemon;
 mod logging;
 mod manager;
 mod me;
@@ -21,7 +23,11 @@ mod whoami;
 pub use error::{Error, Result};
 
 #[derive(Parser)]
-#[command(name = "azvpn", about = "Cross-platform Azure VPN client")]
+#[command(
+    name = "azvpn",
+    version,
+    about = "Cross-platform Azure VPN client"
+)]
 struct Cli {
     #[command(subcommand)]
     command: Command,
@@ -73,6 +79,25 @@ enum Command {
     /// DNS queries — verify split-horizon resolution against the gateway
     #[command(subcommand)]
     Dns(DnsCommand),
+    /// Install the system daemon: writes /Library/LaunchDaemons/<label>.plist
+    /// and bootstraps launchd. Mirrors `tailscaled install-system-daemon` so
+    /// `brew install` doesn't have to dump a multi-step caveats block.
+    /// Requires sudo. macOS only.
+    #[cfg(target_os = "macos")]
+    InstallDaemon {
+        /// Override the azvpnd binary path baked into the plist. Default:
+        /// `<prefix>/libexec/azvpnd` relative to the running azvpn binary.
+        #[arg(long)]
+        daemon: Option<PathBuf>,
+        /// Override the bundled openvpn binary path. Default:
+        /// `<prefix>/libexec/azvpn-openvpn`.
+        #[arg(long)]
+        openvpn: Option<PathBuf>,
+    },
+    /// Boot out the system daemon and remove its launchd plist. Requires
+    /// sudo. Mirrors install-daemon. macOS only.
+    #[cfg(target_os = "macos")]
+    UninstallDaemon,
 }
 
 #[derive(Subcommand)]
@@ -109,6 +134,12 @@ async fn main() {
         Command::Dns(DnsCommand::Lookup { host, via }) => {
             report(dns::lookup(&host, via.as_deref()).await)
         }
+        #[cfg(target_os = "macos")]
+        Command::InstallDaemon { daemon, openvpn } => {
+            report(install_daemon::install(daemon, openvpn))
+        }
+        #[cfg(target_os = "macos")]
+        Command::UninstallDaemon => report(install_daemon::uninstall()),
         Command::Import { path } => {
             tracing::info!(?path, "importing profile");
             eprintln!("not yet implemented");

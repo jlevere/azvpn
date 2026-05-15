@@ -66,7 +66,7 @@
 
         packages = {
           default = azvpn;
-          inherit azvpn;
+          inherit azvpn openvpn-azvpn;
         };
 
         devShells.default = craneLib.devShell {

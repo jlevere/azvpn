@@ -66,6 +66,13 @@ pub enum Error {
     /// `dns lookup` got no A/AAAA records for the host.
     #[error("no answer for {host}")]
     NoDnsAnswer { host: String },
+
+    /// Free-form CLI-side error message. Used sparingly — most errors
+    /// have a typed variant. Convenient escape hatch for one-off
+    /// validation failures (`install-daemon` running without sudo,
+    /// missing binaries, etc.).
+    #[error("{0}")]
+    Other(String),
 }
 
 /// Crate-wide `Result` type. Subcommand modules return `crate::Result<()>`.
