@@ -3,6 +3,10 @@ name: Release
 on:
   push:
     tags: ["v*"]
+  # Manual dispatch so we can produce artifacts for testing without
+  # cutting a real tag — useful when iterating on the packaging
+  # pipeline (Tier 2.x: cargo-deb / cargo-generate-rpm).
+  workflow_dispatch:
 
 permissions:
   contents: write
@@ -23,9 +27,6 @@ jobs:
           - os: macos-latest
             target: aarch64-apple-darwin
             artifact: azvpn-macos-aarch64
-          - os: macos-13
-            target: x86_64-apple-darwin
-            artifact: azvpn-macos-x86_64
           - os: windows-latest
             target: x86_64-pc-windows-msvc
             artifact: azvpn-windows-x86_64
@@ -52,8 +53,43 @@ jobs:
           name: ${{ matrix.artifact }}
           path: ${{ matrix.artifact }}*
 
+  # Patched openvpn binary for Linux .deb / .rpm packaging.
+  #
+  # We bundle a private openvpn at /usr/libexec/azvpn/openvpn rather than
+  # depending on the distro's package because Azure P2S gateways require
+  # USER_PASS_LEN and TLS_CHANNEL_BUF_SIZE bumps to fit AAD bearer tokens
+  # — stock openvpn 2.6 truncates them and the TLS handshake fails. The
+  # patch lives at patches/openvpn-increase-user-pass-len.patch.
+  #
+  # Static (musl) link so one binary works on every supported glibc
+  # without per-distro builds.
+  build-openvpn:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: DeterminateSystems/nix-installer-action@main
+      - uses: DeterminateSystems/magic-nix-cache-action@main
+      - name: Build static openvpn
+        run: nix build .#openvpn-azvpn-static --print-build-logs
+      - name: Stage binary
+        run: |
+          mkdir -p out
+          cp result/sbin/openvpn out/openvpn-azvpn-linux-x86_64 \
+            || cp result/bin/openvpn out/openvpn-azvpn-linux-x86_64
+          chmod +x out/openvpn-azvpn-linux-x86_64
+          file out/openvpn-azvpn-linux-x86_64
+          ./out/openvpn-azvpn-linux-x86_64 --version || true
+      - uses: actions/upload-artifact@v4
+        with:
+          name: openvpn-azvpn-linux-x86_64
+          path: out/openvpn-azvpn-linux-x86_64
+
   release:
-    needs: build
+    needs: [build, build-openvpn]
+    # Only publish a GH release on tag pushes — manual dispatches still
+    # produce artifacts (visible from the run page) but don't create
+    # a draft release out of nowhere.
+    if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     steps:
       - uses: actions/download-artifact@v4

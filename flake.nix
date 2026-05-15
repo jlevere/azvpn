@@ -26,6 +26,26 @@
           ];
         });
 
+        # Statically linked (musl) build of the patched openvpn. Used by
+        # the .deb / .rpm release pipeline so a single binary works on
+        # every glibc version we ship to (Debian 11+, Ubuntu 22.04+,
+        # Fedora 39+, Amazon Linux 2023, RHEL 9). Linux-only — pkgsStatic
+        # on Darwin falls back to dynamic and isn't what we want here.
+        #
+        # PAM + systemd are disabled because (a) linux-pam isn't built
+        # for static targets in nixpkgs (it's fundamentally a dlopen-
+        # based subsystem) and (b) the openvpn child doesn't need
+        # sd_notify — our daemon owns that signal.
+        openvpn-azvpn-static =
+          (pkgs.pkgsStatic.openvpn.override {
+            useSystemd = false;
+            pam = null;
+          }).overrideAttrs (old: {
+            patches = (old.patches or []) ++ [
+              ./patches/openvpn-increase-user-pass-len.patch
+            ];
+          });
+
         src = craneLib.cleanCargoSource ./.;
 
         commonArgs = {
@@ -67,6 +87,8 @@
         packages = {
           default = azvpn;
           inherit azvpn openvpn-azvpn;
+        } // pkgs.lib.optionalAttrs pkgs.stdenv.isLinux {
+          inherit openvpn-azvpn-static;
         };
 
         devShells.default = craneLib.devShell {
