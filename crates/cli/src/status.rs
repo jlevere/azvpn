@@ -36,7 +36,7 @@ fn print(r: &StatusReport) {
             .throughput
             .map(|t| {
                 format!(
-                    "  ({} rx / {} tx, last {}s)",
+                    "  ({}/s rx / {}/s tx, last {}s)",
                     format_size(t.rx_bps, BINARY),
                     format_size(t.tx_bps, BINARY),
                     t.window_secs,
