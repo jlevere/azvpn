@@ -26,6 +26,12 @@ tokio = { workspace = true }
 tokio-util = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
+# Rolling-file logger used on macOS + Windows where the init system
+# captures stdout/stderr to an unbounded file. Linux uses journald,
+# which rotates itself, so this is dead weight there — but the crate
+# is small and target-gating the use sites makes the daemon harder
+# to reason about than just keeping it cross-platform.
+tracing-appender = { workspace = true }
 
 [target.'cfg(unix)'.dependencies]
 uzers = { workspace = true }
@@ -37,8 +43,7 @@ sd-notify = { workspace = true }
 
 # Windows daemon: SCM service shell (windows-service),
 # hibernation detector + admin check + GP refresh (windows-sys),
-# named-pipe SDDL helpers (widestring), and the rolling-file
-# logger that replaces journald on Windows (tracing-appender).
+# named-pipe SDDL helpers (widestring).
 # See docs/windows-plan.md §2.4–§2.8.
 [target.'cfg(target_os = "windows")'.dependencies]
 windows-service = { workspace = true }
@@ -57,7 +62,6 @@ windows-sys = { workspace = true, features = [
     "Win32_NetworkManagement_Ndis",
 ] }
 widestring = { workspace = true }
-tracing-appender = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }

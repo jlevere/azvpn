@@ -115,7 +115,13 @@ fn windows_main_entry() -> ExitCode {
 /// handler in console mode, SCM Stop callback in service mode).
 #[cfg(windows)]
 async fn run_daemon_windows(shutdown: CancellationToken) -> ExitCode {
-    let config = config::Config::from_env();
+    let config = match config::Config::from_env() {
+        Ok(c) => c,
+        Err(e) => {
+            error!(error = %e, "azvpnd: config error — refusing to start");
+            return ExitCode::from(1);
+        }
+    };
     info!(
         pipe = azvpn_ipc::transport::windows::PIPE_PATH,
         openvpn = %config.openvpn_binary.display(),
@@ -226,7 +232,13 @@ async fn accept_loop_windows(
 
 #[cfg(unix)]
 async fn unix_main() -> ExitCode {
-    let config = config::Config::from_env();
+    let config = match config::Config::from_env() {
+        Ok(c) => c,
+        Err(e) => {
+            error!(error = %e, "azvpnd: config error — refusing to start");
+            return ExitCode::from(1);
+        }
+    };
     info!(
         socket = %config.socket_path.display(),
         group = %config.socket_group,
@@ -387,14 +399,15 @@ fn init_tracing() {
         return;
     }
     // Windows has no journald and the SCM eats stdout/stderr for
-    // services. Always set up a rolling-file logger at
-    // `C:\ProgramData\azvpn\logs\daemon.log.<date>` so service-mode
-    // diagnostics aren't a black box. Console mode keeps stderr
-    // output too. Mirrors the Linux journald shape from the user's
-    // perspective: structured durable logs the daemon owns.
-    #[cfg(target_os = "windows")]
+    // services. macOS has no journald either, and launchd captures
+    // stdout/stderr to a single StandardOutPath file that it never
+    // rotates — 900 MB per multi-month uptime, seen in the wild.
+    // On both, route through our own rolling appender so the daemon
+    // owns the rotation policy. Mirrors the Linux journald shape from
+    // the user's perspective: structured durable logs the daemon owns.
+    #[cfg(any(target_os = "windows", target_os = "macos"))]
     {
-        if try_init_windows_file_layer(&directives) {
+        if try_init_file_layer(&directives) {
             return;
         }
     }
@@ -405,18 +418,23 @@ fn init_tracing() {
         .init();
 }
 
-/// Rolling file logger at
-/// `C:\ProgramData\azvpn\logs\daemon.log.<date>`, plus a parallel
-/// stderr layer so console-mode dev still sees output live. Daily
-/// rotation, keep last 7 days. Size-based cap (~50 MB) per plan G.7
-/// is deferred — tracing-appender 0.2 only rotates by time.
+/// Rolling file logger at `<system_log_dir>/daemon.log.<date>`, plus
+/// a parallel stderr layer so console-mode dev still sees output live.
+/// Daily rotation, keep last 7 days — bounds total log size to roughly
+/// a week's worth of daemon output. Size-based cap (~50 MB) per plan
+/// G.7 is deferred — tracing-appender 0.2 only rotates by time.
+///
+/// macOS + Windows share this path because both have init systems
+/// that capture stdout/stderr to an unbounded file (`StandardOutPath`
+/// on launchd; the SCM event log on Windows). Linux uses journald,
+/// which rotates itself.
 ///
 /// The non-blocking worker guard is intentionally leaked so the
 /// background flush thread lives for the daemon's full lifetime;
 /// `set_global_default` runs once and there's no clean place to
 /// hold the guard past it.
-#[cfg(target_os = "windows")]
-fn try_init_windows_file_layer(directives: &str) -> bool {
+#[cfg(any(target_os = "windows", target_os = "macos"))]
+fn try_init_file_layer(directives: &str) -> bool {
     use tracing_appender::rolling::{RollingFileAppender, Rotation};
     use tracing_subscriber::layer::SubscriberExt as _;
     use tracing_subscriber::util::SubscriberInitExt as _;

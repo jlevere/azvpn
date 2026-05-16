@@ -20,41 +20,50 @@ impl Config {
     ///   to the daemon without extra group setup. Override here if
     ///   you ship to a distro using a different convention (`wheel`
     ///   on RHEL/Fedora, etc.).
-    /// - `AZVPND_OPENVPN` — openvpn binary. Explicit override wins; with
-    ///   no override we look next to the running daemon at
+    /// - `AZVPND_OPENVPN` — openvpn binary. Explicit override wins;
+    ///   with no override we look next to the running daemon at
     ///   `<prefix>/libexec/azvpn/openvpn` (`.deb` / `.rpm` layout) or
     ///   `<prefix>/libexec/azvpn-openvpn` (brew layout), so a packaged
-    ///   install ships the patched openvpn without env-fiddling. Final
-    ///   fallback is a `$PATH` lookup of `openvpn`.
-    pub fn from_env() -> Self {
+    ///   install ships the patched openvpn without env-fiddling.
+    ///   **No `$PATH` fallback** — vanilla openvpn has `USER_PASS_LEN
+    ///   = 128` (we patch it to 4096 unconditionally) and silently
+    ///   truncates ~2–3 KB AAD bearer tokens over `auth-user-pass`,
+    ///   leading to opaque gateway-side TLS-handshake failures hours
+    ///   into debugging. Refuse to start without an explicit path.
+    pub fn from_env() -> Result<Self, String> {
         let socket_path = std::env::var_os("AZVPND_SOCKET").map_or_else(
             || PathBuf::from("/var/run/azvpn/azvpnd.sock"),
             PathBuf::from,
         );
         let socket_group =
             std::env::var("AZVPND_GROUP").unwrap_or_else(|_| default_socket_group().into());
-        let openvpn_binary = resolve_openvpn_binary();
-        Self {
+        let openvpn_binary = resolve_openvpn_binary()?;
+        Ok(Self {
             socket_path,
             socket_group,
             openvpn_binary,
-        }
+        })
     }
 }
 
-/// Order: explicit env override → bundled `libexec` binary next to the
-/// daemon → `$PATH` lookup. The libexec step exists so a packaged
-/// install (`.deb` / `.rpm` puts the patched openvpn at
-/// `/usr/libexec/azvpn/openvpn` alongside `/usr/sbin/azvpnd`) Just
-/// Works without the unit having to pin `AZVPND_OPENVPN`.
-fn resolve_openvpn_binary() -> PathBuf {
+/// Order: explicit env override → bundled `libexec` binary next to
+/// the daemon → hard error. **No `$PATH` fallback** — see [`Config::
+/// from_env`] for the `USER_PASS_LEN` rationale.
+fn resolve_openvpn_binary() -> Result<PathBuf, String> {
     if let Some(p) = std::env::var_os("AZVPND_OPENVPN") {
-        return PathBuf::from(p);
+        return Ok(PathBuf::from(p));
     }
     if let Some(p) = bundled_openvpn(std::env::current_exe().ok().as_deref()) {
-        return p;
+        return Ok(p);
     }
-    PathBuf::from("openvpn")
+    Err(
+        "no openvpn binary found — set `AZVPND_OPENVPN=<path>` in the daemon's environment, \
+         or install via the packaged layout so the patched openvpn lands at \
+         `<prefix>/libexec/azvpn-openvpn` (brew) or `<prefix>/libexec/azvpn/openvpn` (.deb). \
+         Do not point this at a system openvpn — vanilla builds truncate AAD bearer tokens \
+         (USER_PASS_LEN=128) and the gateway TLS handshake fails opaquely."
+            .to_owned(),
+    )
 }
 
 /// Per-platform "look next to me" lookup. Unix: package + brew
