@@ -62,6 +62,15 @@ fn main() -> ExitCode {
 /// service-status lifecycle in [`crate::windows::run_as_service`].
 #[cfg(windows)]
 fn windows_main_entry() -> ExitCode {
+    if !crate::windows::is_running_as_admin() {
+        error!(
+            "azvpnd needs admin (BUILTIN\\Administrators or LocalSystem) for wintun, \
+             routes, and NRPT registry writes; run `azvpn install-daemon` to register \
+             us as a LocalSystem SCM service, or relaunch from an elevated shell for \
+             dev iteration"
+        );
+        return ExitCode::from(1);
+    }
     let run_as_service = std::env::args().any(|a| a == "--run-as-service");
     if run_as_service {
         match crate::windows::run_as_service() {

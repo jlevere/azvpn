@@ -11,19 +11,30 @@
 //! inside `service_dispatcher::start` until SCM has told us to stop.
 //!
 //! [`service_main`] builds a tokio runtime, registers a control
-//! handler that bridges `ServiceControl::Stop` into the daemon's
-//! shutdown `CancellationToken`, sets the service to `Running`, and
+//! handler that bridges `ServiceControl::Stop` /
+//! `ServiceControl::Preshutdown` into the daemon's shutdown
+//! `CancellationToken`, sets the service to `Running`, and
 //! `block_on`s [`super::run_daemon_windows`]. On daemon return it
 //! sets `Stopped` and exits.
 //!
 //! Lifecycle currently accepts:
 //!   - `Interrogate` — replies `NoError` with the current state
 //!   - `Stop` — bridged to shutdown
+//!   - `Preshutdown` — bridged to shutdown; identical teardown for
+//!     now (cleanup is fast enough that there's no win in skipping
+//!     it on system shutdown).
 //!
-//! `Preshutdown`, `PowerEvent`, and `SessionChange` are deferred
-//! to W6 per `docs/windows-plan.md` §2.5. The hibernation detector
-//! (Mullvad's pattern) and Preshutdown-vs-Stop distinction land
-//! alongside those events.
+//! `PowerEvent` and `SessionChange` are intentionally NOT accepted.
+//! Mullvad's hibernation detector via `PowerEvent::{Suspend, Resume}`
+//! is famously flaky on Windows — power notifications race
+//! delivery, get debounced by the OS, or arrive after the network
+//! has already re-converged. Tailscale's
+//! `net/netmon/netmon_windows.go` doesn't use them at all; they
+//! trust adapter / route change callbacks (the same APIs `if-watch`
+//! wraps for us) plus a wall-clock-jump detector. Our
+//! `azvpn-core::reachability` already does both, so the marginal
+//! value of adding `PowerEvent` doesn't justify the failure-mode
+//! surface.
 
 use std::ffi::OsString;
 use std::time::Duration;
@@ -65,6 +76,55 @@ pub fn run_as_service() -> std::io::Result<()> {
         .map_err(|e| std::io::Error::other(format!("service_dispatcher::start failed: {e}")))
 }
 
+/// `true` when the current process token is a member of the local
+/// `BUILTIN\Administrators` group. The SCM starts services as
+/// `LocalSystem`, which inherits Administrators membership on every
+/// supported Windows host. `false` for an unprivileged console
+/// process — the daemon needs admin to open utun-equivalents
+/// (wintun), write `HKLM\SYSTEM\...\DnsPolicyConfig`, manage routes
+/// via IpHelper, and install the SCM service — so we refuse to
+/// proceed and point the user at `install-daemon`.
+///
+/// Skipping the SCM path: services that aren't admin would fail at
+/// the first privileged syscall anyway, but the failure mode
+/// (cryptic `Access is denied` from a deep call site) is worse than
+/// a one-line boot warning. Matches `windows-plan.md` §2.8.
+#[allow(unsafe_code)]
+pub fn is_running_as_admin() -> bool {
+    use windows_sys::Win32::Security::{
+        CheckTokenMembership, CreateWellKnownSid, SECURITY_MAX_SID_SIZE, WinBuiltinAdministratorsSid,
+    };
+    let mut sid = [0u8; SECURITY_MAX_SID_SIZE as usize];
+    let mut size: u32 = SECURITY_MAX_SID_SIZE;
+    // SAFETY: `CreateWellKnownSid` writes a SID of at most
+    // `SECURITY_MAX_SID_SIZE` bytes into the supplied buffer. We
+    // pass a writable buffer of exactly that size and a writable
+    // `size` it can update.
+    let ok = unsafe {
+        CreateWellKnownSid(
+            WinBuiltinAdministratorsSid,
+            std::ptr::null_mut(),
+            sid.as_mut_ptr().cast(),
+            &raw mut size,
+        )
+    };
+    if ok == 0 {
+        return false;
+    }
+    let mut is_member: i32 = 0;
+    // SAFETY: token handle null = "use current process token";
+    // `sid` is the buffer we just filled; `is_member` is a writable
+    // output. Returns BOOL (0 == failure).
+    let ok = unsafe {
+        CheckTokenMembership(
+            std::ptr::null_mut(),
+            sid.as_mut_ptr().cast(),
+            &raw mut is_member,
+        )
+    };
+    ok != 0 && is_member != 0
+}
+
 /// SCM-side entry point. The SCM passes any args from
 /// `Set-Service -Arguments` here; we ignore them today — all
 /// configuration comes from `AZVPND_*` env vars (which the
@@ -102,6 +162,17 @@ fn service_main(_args: Vec<OsString>) {
                 shutdown_for_handler.cancel();
                 ServiceControlHandlerResult::NoError
             }
+            ServiceControl::Preshutdown => {
+                // OS is going down. SCM gives us up to the
+                // configured Preshutdown timeout (180s default) to
+                // exit cleanly, vs. ~30s for Stop. Same teardown
+                // path either way — our cleanup is short
+                // (route_manager.clear() + NRPT revert), nothing
+                // worth racing the kernel for.
+                info!("service_main: SCM Preshutdown received; signaling shutdown");
+                shutdown_for_handler.cancel();
+                ServiceControlHandlerResult::NoError
+            }
             _ => ServiceControlHandlerResult::NotImplemented,
         }
     };
@@ -131,7 +202,7 @@ fn service_main(_args: Vec<OsString>) {
     if let Err(e) = report_status(
         &status_handle,
         ServiceState::Running,
-        ServiceControlAccept::STOP,
+        ServiceControlAccept::STOP | ServiceControlAccept::PRESHUTDOWN,
         Duration::ZERO,
     ) {
         warn!(error = %e, "service_main: report Running failed");
