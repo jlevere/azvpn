@@ -22,61 +22,177 @@ mod windows;
 use std::process::ExitCode;
 use std::time::Duration;
 
-#[cfg(unix)]
 use futures::StreamExt as _;
-#[cfg(unix)]
 use tarpc::serde_transport;
-#[cfg(unix)]
 use tarpc::server::{BaseChannel, Channel};
-#[cfg(unix)]
 use tarpc::tokio_serde::formats::Bincode;
-#[cfg(unix)]
 use tarpc::tokio_util::codec::length_delimited::LengthDelimitedCodec;
 #[cfg(unix)]
 use tokio::signal::unix::{SignalKind, signal};
-#[cfg(unix)]
 use tokio_util::sync::CancellationToken;
-#[cfg(unix)]
-use tracing::error;
-use tracing::{info, warn};
+use tracing::{error, info, warn};
 use tracing_subscriber::EnvFilter;
 
-#[cfg(unix)]
 use crate::server::AzvpndServer;
 
-/// How long to wait for the in-progress connection to tear down after
-/// SIGTERM before forcing exit. `launchd` sends SIGKILL ~5s after
-/// SIGTERM, so we have to be done by then.
-#[cfg(unix)]
+/// How long to wait for the in-progress connection to tear down
+/// after shutdown is signaled before forcing exit. `launchd` sends
+/// SIGKILL ~5s after SIGTERM on macOS; Windows SCM enforces the
+/// `wait_hint` we report during `StopPending`. Same value works
+/// for both within margin.
 const SHUTDOWN_GRACE: Duration = Duration::from_secs(4);
 
+#[cfg(unix)]
 #[tokio::main]
 async fn main() -> ExitCode {
     init_tracing();
+    unix_main().await
+}
 
-    #[cfg(unix)]
-    {
-        unix_main().await
-    }
-    #[cfg(windows)]
-    {
-        windows_main()
+#[cfg(windows)]
+fn main() -> ExitCode {
+    init_tracing();
+    windows_main_entry()
+}
+
+/// Windows entry: detect whether SCM started us (with the
+/// `--run-as-service` arg we register at install time) or whether a
+/// user / developer ran us from a console. Both modes ultimately
+/// drive [`run_daemon_windows`]; SCM mode wraps it with the
+/// service-status lifecycle in [`crate::windows::run_as_service`].
+#[cfg(windows)]
+fn windows_main_entry() -> ExitCode {
+    let run_as_service = std::env::args().any(|a| a == "--run-as-service");
+    if run_as_service {
+        match crate::windows::run_as_service() {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(e) => {
+                error!(error = %e, "SCM dispatch failed");
+                ExitCode::from(1)
+            }
+        }
+    } else {
+        // Console mode — dev iteration. Builds our own runtime
+        // because main() is sync on Windows (no #[tokio::main]).
+        let rt = match tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()
+        {
+            Ok(rt) => rt,
+            Err(e) => {
+                error!(error = %e, "failed to build tokio runtime");
+                return ExitCode::from(1);
+            }
+        };
+        let shutdown = CancellationToken::new();
+        let signal_token = shutdown.clone();
+        rt.spawn(async move {
+            if let Err(e) = tokio::signal::ctrl_c().await {
+                warn!(error = %e, "ctrl_c watcher failed");
+            } else {
+                info!("received Ctrl-C");
+            }
+            signal_token.cancel();
+        });
+        rt.block_on(run_daemon_windows(shutdown))
     }
 }
 
-/// Windows W0 stub. The real lifecycle (SCM service shell + named-pipe
-/// IPC + tokio body extracted from `unix_main`) lands in W1.2 / W1.3
-/// per `docs/windows-plan.md`. We return non-zero so a misconfigured
-/// auto-start (running the daemon binary directly without the
-/// `--run-as-service` flag SCM would normally pass) loudly fails
-/// rather than silently exiting clean.
+/// Shared Windows daemon body. Called from console-mode
+/// [`windows_main_entry`] directly, and from the SCM-mode
+/// `service_main` once it's set the service to Running. The
+/// supplied `shutdown` is canceled by whoever called us (Ctrl-C
+/// handler in console mode, SCM Stop callback in service mode).
 #[cfg(windows)]
-fn windows_main() -> ExitCode {
-    warn!(
-        "azvpnd: Windows daemon body is not yet wired (W0 scaffolding); \
-         see docs/windows-plan.md Phase W1 for the planned flow"
+async fn run_daemon_windows(shutdown: CancellationToken) -> ExitCode {
+    let config = config::Config::from_env();
+    info!(
+        pipe = azvpn_ipc::transport::windows::PIPE_PATH,
+        openvpn = %config.openvpn_binary.display(),
+        "azvpnd starting (Windows)"
     );
-    ExitCode::from(1)
+
+    azvpn_core::cleanup::run_at_startup(&azvpn_core::cleanup::default_path()).await;
+
+    let listener = match azvpn_ipc::transport::windows::bind() {
+        Ok(l) => l,
+        Err(e) => {
+            error!(error = %e, "failed to bind named pipe");
+            return ExitCode::from(1);
+        }
+    };
+
+    let server = AzvpndServer::new(config.openvpn_binary);
+
+    // F.1 declarative target state — same shape as unix_main.
+    tokio::spawn(converge::try_converge(server.clone()));
+
+    accept_loop_windows(listener, server.clone(), &shutdown).await;
+
+    info!("shutting down — tearing down any active connection");
+    let cleanup = tokio::time::timeout(SHUTDOWN_GRACE, server.shutdown()).await;
+    if cleanup.is_err() {
+        warn!(timeout = ?SHUTDOWN_GRACE, "shutdown timed out; forcing exit");
+    }
+    ExitCode::SUCCESS
+}
+
+/// Named-pipe accept loop. The handoff pattern is documented in
+/// `tokio::net::windows::named_pipe`: each accept consumes the
+/// current pipe instance, so we must create the next instance
+/// before moving the connected one into the per-connection task,
+/// otherwise the next caller's `connect_client` sees
+/// `ERROR_FILE_NOT_FOUND` until we loop around.
+#[cfg(windows)]
+async fn accept_loop_windows(
+    initial: tokio::net::windows::named_pipe::NamedPipeServer,
+    server: AzvpndServer,
+    shutdown: &CancellationToken,
+) {
+    info!("listening for client connections (named pipe)");
+    let codec_builder = LengthDelimitedCodec::builder();
+    let mut current = initial;
+
+    loop {
+        tokio::select! {
+            biased;
+
+            () = shutdown.cancelled() => {
+                info!("shutdown signaled; closing accept loop");
+                break;
+            }
+
+            connect_res = current.connect() => {
+                if let Err(e) = connect_res {
+                    warn!(error = %e, "named pipe wait-for-client failed; continuing");
+                    continue;
+                }
+
+                // The current instance is now connected. Move it
+                // out and create a fresh instance for the next
+                // accept before we hand the connected one off.
+                let next = match azvpn_ipc::transport::windows::bind_next() {
+                    Ok(n) => n,
+                    Err(e) => {
+                        error!(error = %e, "could not create next pipe instance; halting accept");
+                        break;
+                    }
+                };
+                let connected = std::mem::replace(&mut current, next);
+
+                info!("client accepted on named pipe");
+
+                let framed = codec_builder.new_framed(connected);
+                let transport = serde_transport::new(framed, Bincode::default());
+                let conn_fut = BaseChannel::with_defaults(transport)
+                    .execute(azvpn_ipc::AzvpnApi::serve(server.clone()))
+                    .for_each(|rpc| async move {
+                        tokio::spawn(rpc);
+                    });
+                tokio::spawn(conn_fut);
+            }
+        }
+    }
 }
 
 #[cfg(unix)]

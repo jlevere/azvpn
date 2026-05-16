@@ -12,21 +12,15 @@
 //! "daemon isn't running" message until W1.3 lands the real
 //! transport.
 
-#[cfg(unix)]
 use std::io::ErrorKind;
-#[cfg(unix)]
 use std::path::PathBuf;
 use std::time::Duration;
 
 use azvpn_ipc::{AzvpnApiClient, WIRE_VERSION};
-#[cfg(unix)]
 use tarpc::client::Config;
 use tarpc::context;
-#[cfg(unix)]
 use tarpc::serde_transport;
-#[cfg(unix)]
 use tarpc::tokio_serde::formats::Bincode;
-#[cfg(unix)]
 use tarpc::tokio_util::codec::length_delimited::LengthDelimitedCodec;
 #[cfg(unix)]
 use tokio::net::UnixStream;
@@ -64,18 +58,37 @@ pub async fn connect_to_daemon() -> Result<AzvpnApiClient, Error> {
     Ok(client)
 }
 
-/// Windows W0 stub. W1.3 will use
-/// `tokio::net::windows::named_pipe::ClientOptions::open` against
-/// `azvpn_ipc::transport::windows::PIPE_PATH`. Until then every CLI
-/// subcommand that talks to the daemon fails with the same
-/// "daemon isn't running" shape Unix users see — the diagnostic
-/// the CLI prints already directs them at `install-daemon`.
+/// Windows path: open a client handle on the daemon's named pipe.
+/// `ERROR_FILE_NOT_FOUND` / `ERROR_PIPE_BUSY` are mapped to
+/// [`Error::DaemonNotRunning`] so the user-facing message matches
+/// the Unix "daemon isn't running" surface — pointing them at
+/// `install-daemon` rather than at an opaque Win32 error.
 #[cfg(windows)]
 pub async fn connect_to_daemon() -> Result<AzvpnApiClient, Error> {
-    use std::path::PathBuf;
-    Err(Error::DaemonNotRunning {
-        path: PathBuf::from(azvpn_ipc::transport::windows::PIPE_PATH),
-    })
+    let pipe_path = PathBuf::from(azvpn_ipc::transport::windows::PIPE_PATH);
+    let conn = match azvpn_ipc::transport::windows::connect_client() {
+        Ok(c) => c,
+        Err(e)
+            if e.kind() == ErrorKind::NotFound
+                // ERROR_PIPE_BUSY = 231; mapped onto ErrorKind::ResourceBusy
+                // in newer rustcs, ErrorKind::Other on older. Catch both
+                // by raw_os_error.
+                || e.raw_os_error() == Some(231) =>
+        {
+            return Err(Error::DaemonNotRunning { path: pipe_path });
+        }
+        Err(e) => {
+            return Err(Error::Io(std::io::Error::other(format!(
+                "{}: {e}",
+                pipe_path.display()
+            ))));
+        }
+    };
+    let framed = LengthDelimitedCodec::builder().new_framed(conn);
+    let transport = serde_transport::new(framed, Bincode::default());
+    let client = AzvpnApiClient::new(Config::default(), transport).spawn();
+    check_wire_version(&client).await?;
+    Ok(client)
 }
 
 #[cfg(unix)]
