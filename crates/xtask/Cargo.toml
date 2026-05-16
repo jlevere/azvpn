@@ -34,10 +34,8 @@ flate2 = { version = "1", default-features = false, features = ["rust_backend"] 
 # from the same maintainer (RustCrypto) keeps the dep tree small.
 sha2 = "0.10"
 # Decode the GitHub API response when we PUT a new formula contents
-# (we need the previous file's `sha` to update vs create). Workspace
-# uses serde_json so this matches.
+# (we need the previous file's `sha` to update vs create).
 serde = { workspace = true }
-serde_json = { workspace = true }
 # `reqwest` is already a workspace dep with rustls-tls + json
 # features — reused as-is, no extra system deps.
 reqwest = { workspace = true, features = ["blocking"] }
