@@ -25,11 +25,14 @@ const UNIT_TEMPLATE: &str = include_str!("../../../../packaging/systemd/azvpn.se
 
 /// Canonical install paths — also what the template ships with, so
 /// `render_unit` substitutes against the same string the file already
-/// contains. `DEFAULT_OPENVPN` is the .deb's bundled-patched path, not
-/// vanilla `/usr/sbin/openvpn` — see the template for the
-/// `USER_PASS_LEN` / AAD-truncation rationale.
-const DEFAULT_DAEMON: &str = "/usr/lib/azvpn/azvpnd";
-const DEFAULT_OPENVPN: &str = "/usr/libexec/azvpn/openvpn";
+/// contains. Sourced from [`azvpn_core::layout`] so the systemd
+/// template, cargo-deb assets table, and the daemon's bundled-openvpn
+/// resolver can't drift. The openvpn path is the .deb's namespaced
+/// bundled-patched binary, NEVER vanilla `/usr/sbin/openvpn` — see
+/// the systemd template for the `USER_PASS_LEN` / AAD-truncation
+/// rationale.
+const DEFAULT_DAEMON: &str = azvpn_core::layout::DEB_DAEMON_ABS;
+const DEFAULT_OPENVPN: &str = azvpn_core::layout::DEB_OPENVPN_ABS;
 
 /// `.deb` / `.rpm` install their own unit at this path. If it
 /// exists, the package manager is the source of truth — `install-
