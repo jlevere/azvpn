@@ -16,13 +16,18 @@ serde = { workspace = true }
 tarpc = { workspace = true }
 thiserror = { workspace = true }
 
-# Windows transport (W1.3): named-pipe security attributes built
-# from an SDDL string via
-# `ConvertStringSecurityDescriptorToSecurityDescriptorW`. The
-# transport itself is `tokio::net::windows::named_pipe::*` (built
-# into the tokio dep). No tokio feature flag needed beyond what
-# the workspace already enables.
+# Windows transport (W1.3): named-pipe bind/connect via
+# `tokio::net::windows::named_pipe::*`. The codec stack
+# (LengthDelimitedCodec + Bincode) sits one layer above and stays
+# platform-agnostic.
+#
+# windows-sys is wired (but not yet used) for the SDDL helper that
+# will land alongside non-admin RPC support — sets a
+# `D:(A;;GA;;;BA)(A;;GRGW;;;BU)` ACL via
+# `ConvertStringSecurityDescriptorToSecurityDescriptorW` and
+# passes the result through `ServerOptions::security_attributes`.
 [target.'cfg(target_os = "windows")'.dependencies]
+tokio = { workspace = true }
 windows-sys = { workspace = true, features = [
     "Win32_Foundation",
     "Win32_Security",
