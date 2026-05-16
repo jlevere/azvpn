@@ -1,0 +1,44 @@
+[package]
+name = "xtask"
+version = "0.0.0"
+description = "Internal release-engineering tooling for the azvpn workspace (build tarballs, template Homebrew formula, push to tap). Not a shippable crate."
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+clap = { workspace = true }
+# `anyhow` is the right fit for an xtask: error variants would
+# proliferate fast across half a dozen integration points (cargo,
+# nix, tar, sha256, github api) and we just want a back-trace with
+# context, not match-on-variant programmability. The rest of the
+# workspace uses `thiserror` because it's library code; xtask is
+# a tool, so the conventions diverge intentionally.
+anyhow = "1"
+# Pure-Rust tar + gzip — both small, both no system deps. `tar` is
+# the one from the dtolnay-maintained `tar-rs`. `flate2` defaults
+# to `miniz_oxide` (pure Rust); we explicitly opt out of the
+# zlib-ng feature so we don't drag in a C build.
+tar = "0.4"
+flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
+# SHA-256 of the produced tarball, baked into the Homebrew formula.
+# The workspace already pulls sha1 (for keyring SPI); using sha2
+# from the same maintainer (RustCrypto) keeps the dep tree small.
+sha2 = "0.10"
+# Decode the GitHub API response when we PUT a new formula contents
+# (we need the previous file's `sha` to update vs create). Workspace
+# uses serde_json so this matches.
+serde = { workspace = true }
+serde_json = { workspace = true }
+# `reqwest` is already a workspace dep with rustls-tls + json
+# features — reused as-is, no extra system deps.
+reqwest = { workspace = true, features = ["blocking"] }
+# Base64 the formula body for the GitHub Contents API.
+base64 = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+
+[lints]
+workspace = true
