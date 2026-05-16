@@ -93,26 +93,12 @@ pub struct NrptRule {
 }
 
 /// Generate a fresh string-formatted Windows GUID (with surrounding
-/// braces) via `CoCreateGuid`. Used to name each NRPT subkey.
-pub(crate) fn new_guid_string() -> io::Result<String> {
-    use windows_sys::Win32::System::Com::CoCreateGuid;
-    use windows_sys::core::GUID;
-
-    // SAFETY: `CoCreateGuid` writes a fresh GUID into the pointed-at
-    // memory and returns S_OK on success. We pass a properly-aligned
-    // local that we own.
-    let mut guid: GUID = unsafe { std::mem::zeroed() };
-    let hr = unsafe { CoCreateGuid(&raw mut guid) };
-    if hr < 0 {
-        return Err(io::Error::other(format!(
-            "CoCreateGuid returned HRESULT 0x{hr:x}"
-        )));
-    }
-    let d4 = guid.data4;
-    Ok(format!(
-        "{{{:08X}-{:04X}-{:04X}-{:02X}{:02X}-{:02X}{:02X}{:02X}{:02X}{:02X}{:02X}}}",
-        guid.data1, guid.data2, guid.data3, d4[0], d4[1], d4[2], d4[3], d4[4], d4[5], d4[6], d4[7],
-    ))
+/// braces) used to name each NRPT subkey. Random v4 is sufficient
+/// — these are opaque identifiers we own end-to-end; uniqueness
+/// against other NRPT rule writers (group policy, third-party
+/// agents) is what matters, and 122 bits of entropy gives that.
+pub(crate) fn new_guid_string() -> String {
+    format!("{}", uuid::Uuid::new_v4().braced())
 }
 
 /// Force a Group Policy refresh so freshly-written rules under
@@ -263,7 +249,7 @@ pub(crate) fn build_rules<S>(
     suffixes: &[S],
     servers: &[IpAddr],
     previous_ids: &[String],
-) -> io::Result<(Vec<NrptRule>, Vec<String>)>
+) -> (Vec<NrptRule>, Vec<String>)
 where
     S: AsRef<str>,
 {
@@ -287,7 +273,7 @@ where
         let id = if i < reused {
             previous_ids[i].clone()
         } else {
-            new_guid_string()?
+            new_guid_string()
         };
         rules.push(NrptRule {
             id,
@@ -302,7 +288,7 @@ where
         .skip(num_chunks)
         .cloned()
         .collect::<Vec<_>>();
-    Ok((rules, surplus))
+    (rules, surplus)
 }
 
 /// Set-replace apply: delete surplus owned rules, write the desired
@@ -502,7 +488,7 @@ mod tests {
     fn build_rules_chunks_at_max_per_rule() {
         let suffixes: Vec<String> = (0..120).map(|i| format!("zone-{i}.example.com")).collect();
         let servers = vec!["10.0.0.36".parse().unwrap()];
-        let (rules, surplus) = build_rules(&suffixes, &servers, &[]).unwrap();
+        let (rules, surplus) = build_rules(&suffixes, &servers, &[]);
         assert_eq!(rules.len(), 3); // 50 + 50 + 20
         assert_eq!(rules[0].domains.len(), MAX_DOMAINS_PER_RULE);
         assert_eq!(rules[1].domains.len(), MAX_DOMAINS_PER_RULE);
@@ -514,7 +500,7 @@ mod tests {
     fn build_rules_prepends_leading_dot() {
         let suffixes = vec!["corp.example.com", ".already.dotted.example.com"];
         let servers = vec!["10.0.0.36".parse().unwrap()];
-        let (rules, _) = build_rules(&suffixes, &servers, &[]).unwrap();
+        let (rules, _) = build_rules(&suffixes, &servers, &[]);
         assert_eq!(rules[0].domains[0], ".corp.example.com");
         assert_eq!(rules[0].domains[1], ".already.dotted.example.com");
     }
@@ -523,7 +509,7 @@ mod tests {
     fn build_rules_servers_joined_in_order() {
         let suffixes = vec!["corp.example.com"];
         let servers = vec!["10.0.0.36".parse().unwrap(), "10.0.0.37".parse().unwrap()];
-        let (rules, _) = build_rules(&suffixes, &servers, &[]).unwrap();
+        let (rules, _) = build_rules(&suffixes, &servers, &[]);
         assert_eq!(rules[0].servers, vec!["10.0.0.36", "10.0.0.37"]);
     }
 
@@ -532,7 +518,7 @@ mod tests {
         let suffixes = vec!["a.example.com", "b.example.com"];
         let servers = vec!["10.0.0.36".parse().unwrap()];
         let prev = vec!["{aaa}".to_string()];
-        let (rules, surplus) = build_rules(&suffixes, &servers, &prev).unwrap();
+        let (rules, surplus) = build_rules(&suffixes, &servers, &prev);
         // 2 suffixes fit in one chunk, so 1 rule using the previous GUID.
         assert_eq!(rules.len(), 1);
         assert_eq!(rules[0].id, "{aaa}");
@@ -549,7 +535,7 @@ mod tests {
             "{bbb}".to_string(),
             "{ccc}".to_string(),
         ];
-        let (rules, surplus) = build_rules(&suffixes, &servers, &prev).unwrap();
+        let (rules, surplus) = build_rules(&suffixes, &servers, &prev);
         assert_eq!(rules.len(), 1);
         assert_eq!(rules[0].id, "{aaa}");
         assert_eq!(surplus, vec!["{bbb}".to_string(), "{ccc}".to_string()]);
@@ -560,7 +546,7 @@ mod tests {
         let suffixes: Vec<String> = (0..80).map(|i| format!("z{i}.example.com")).collect();
         let servers = vec!["10.0.0.36".parse().unwrap()];
         let prev = vec!["{aaa}".to_string()]; // only one previous rule
-        let (rules, surplus) = build_rules(&suffixes, &servers, &prev).unwrap();
+        let (rules, surplus) = build_rules(&suffixes, &servers, &prev);
         // 80 suffixes → 2 chunks; reuse `{aaa}` for chunk 0, fresh GUID for chunk 1.
         assert_eq!(rules.len(), 2);
         assert_eq!(rules[0].id, "{aaa}");

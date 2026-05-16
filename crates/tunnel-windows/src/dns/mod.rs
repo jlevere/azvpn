@@ -90,7 +90,7 @@ impl DnsManager {
             }
         };
 
-        let (rules, surplus) = nrpt::build_rules(suffixes, servers, &previous)?;
+        let (rules, surplus) = nrpt::build_rules(suffixes, servers, &previous);
         nrpt::apply_rules(&rules, &surplus, self.write_as_gp)?;
         Ok(())
     }

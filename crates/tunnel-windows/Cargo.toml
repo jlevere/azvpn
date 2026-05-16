@@ -23,12 +23,12 @@ windows-sys = { workspace = true, features = [
     "Win32_System_Registry",
     "Win32_System_GroupPolicy",
     "Win32_Security",
-    # `CoCreateGuid` in nrpt::new_guid_string.
-    "Win32_System_Com",
 ] }
 # Dnscache service-running probe in `nrpt::dnscache_running`.
 windows-service = { workspace = true }
 winreg = { workspace = true }
+# UUID v4 for NRPT rule subkey names. Pure Rust; no Win32 call.
+uuid = { workspace = true }
 
 [lints]
 workspace = true

@@ -128,6 +128,12 @@ winreg = "0.55"
 # UTF-16 marshalling for Win32 calls (`WideCString::from_str`).
 # Required for any string passed across a Win32 API boundary.
 widestring = "1"
+# UUID v4 generation for NRPT rule subkey names. `v4` pulls in
+# `getrandom`; pure-Rust, no Win32 surface, no `unsafe` in our
+# tree (CoCreateGuid was what we used before, this drops it).
+# `fast-rng` swaps to a faster (but still cryptographically OK)
+# PRNG seeded from getrandom.
+uuid = { version = "1", default-features = false, features = ["v4", "fast-rng"] }
 # Rolling-file logger for the daemon on Windows (no journald).
 # Writes to `C:\ProgramData\azvpn\logs\daemon.log` with size-based
 # rotation. Track G.7 prerequisite on Windows.
