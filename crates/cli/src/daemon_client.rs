@@ -1,31 +1,49 @@
 //! Thin tarpc client wrapper. Every CLI subcommand that talks to the
 //! daemon goes through `connect_to_daemon()` so the transport setup
-//! lives in one place (and gets swapped for `interprocess` once
-//! Windows lands).
+//! lives in one place.
+//!
+//! Unix path: connects to a unix-domain socket at
+//! `AZVPND_SOCKET` (default `/var/run/azvpn/azvpnd.sock`).
+//!
+//! Windows path (W1.3): connects to the named pipe at
+//! `\\.\pipe\ProtectedPrefix\Administrators\azvpn\daemon`. For now
+//! (W0 scaffolding) the Windows arm returns `DaemonNotRunning` so
+//! every wired CLI subcommand fails cleanly with the standard
+//! "daemon isn't running" message until W1.3 lands the real
+//! transport.
 
+#[cfg(unix)]
 use std::io::ErrorKind;
+#[cfg(unix)]
 use std::path::PathBuf;
 use std::time::Duration;
 
 use azvpn_ipc::{AzvpnApiClient, WIRE_VERSION};
+#[cfg(unix)]
 use tarpc::client::Config;
 use tarpc::context;
+#[cfg(unix)]
 use tarpc::serde_transport;
+#[cfg(unix)]
 use tarpc::tokio_serde::formats::Bincode;
+#[cfg(unix)]
 use tarpc::tokio_util::codec::length_delimited::LengthDelimitedCodec;
+#[cfg(unix)]
 use tokio::net::UnixStream;
 
 use crate::Error;
 
+#[cfg(unix)]
 const DEFAULT_SOCKET: &str = "/var/run/azvpn/azvpnd.sock";
 
-/// Connect to the daemon. Honors `AZVPND_SOCKET` so dev workflows can
-/// point at a non-root socket without recompiling. After the socket
-/// is up, runs a hard wire-version handshake: any mismatch or RPC
-/// failure refuses the CLI invocation with a reinstall instruction
-/// instead of letting bincode fail mid-decode on a real wire-sensitive
-/// call (which historically surfaced as "connection was already
-/// shutdown").
+/// Connect to the daemon. Honors `AZVPND_SOCKET` on Unix so dev
+/// workflows can point at a non-root socket without recompiling.
+/// After the socket is up, runs a hard wire-version handshake: any
+/// mismatch or RPC failure refuses the CLI invocation with a
+/// reinstall instruction instead of letting bincode fail mid-decode
+/// on a real wire-sensitive call (which historically surfaced as
+/// "connection was already shutdown").
+#[cfg(unix)]
 pub async fn connect_to_daemon() -> Result<AzvpnApiClient, Error> {
     let path = socket_path();
     let conn = UnixStream::connect(&path)
@@ -46,6 +64,21 @@ pub async fn connect_to_daemon() -> Result<AzvpnApiClient, Error> {
     Ok(client)
 }
 
+/// Windows W0 stub. W1.3 will use
+/// `tokio::net::windows::named_pipe::ClientOptions::open` against
+/// `azvpn_ipc::transport::windows::PIPE_PATH`. Until then every CLI
+/// subcommand that talks to the daemon fails with the same
+/// "daemon isn't running" shape Unix users see — the diagnostic
+/// the CLI prints already directs them at `install-daemon`.
+#[cfg(windows)]
+pub async fn connect_to_daemon() -> Result<AzvpnApiClient, Error> {
+    use std::path::PathBuf;
+    Err(Error::DaemonNotRunning {
+        path: PathBuf::from(azvpn_ipc::transport::windows::PIPE_PATH),
+    })
+}
+
+#[cfg(unix)]
 fn socket_path() -> PathBuf {
     std::env::var_os("AZVPND_SOCKET").map_or_else(|| PathBuf::from(DEFAULT_SOCKET), PathBuf::from)
 }
