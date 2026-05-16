@@ -318,6 +318,7 @@ dependencies = [
 name = "azvpn-daemon"
 version = "0.1.0"
 dependencies = [
+ "azvpn-auth",
  "azvpn-core",
  "azvpn-ipc",
  "azvpn-openvpn",

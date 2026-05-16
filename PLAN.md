@@ -353,27 +353,43 @@ solved this by separating *target state* (what the user wants) from
 *actual state* (what's currently true) and having the daemon
 auto-converge on every startup. This is the central addition.
 
-- **F.1 Declarative target state.** New verbs:
-  - `azvpn up [--profile PATH]` — writes a persistent target file
-    (`/var/lib/azvpn/target.json` on Linux, `/Library/Application
-    Support/com.azvpn/target.json` on macOS, atomic temp+rename).
-    Contents: `{ state: "Connected", profile, auth_mode }`. On
-    first `up`, the profile path is required; subsequent `up` uses
-    the stored one.
-  - `azvpn down` — writes `{ state: "Disconnected" }`.
-  - `azvpnd` on every cold start reads the target file. If
-    `state == Connected`, it kicks off a connect via the existing
-    `core::commands::connect::run` pipeline. If `Disconnected`, it
-    sits idle waiting for RPCs.
-  - `connect` / `disconnect` stay as transient one-off verbs (don't
-    touch the target file). Useful for CI, scripted single-shot
-    sessions, debugging.
+- **F.1 Declarative target state.** *Shipped 2026-05-15.*
+  - `azvpn up [--profile PATH]` writes a persistent target file
+    (`/Library/Application Support/com.azvpn/target.json` on macOS,
+    `/var/lib/azvpn/target.json` on Linux, atomic temp+rename).
+    Contents: `{schema_version, state, profile, profile_label,
+    verbose}` with the profile inlined as a snapshot so the daemon's
+    cold-start converge doesn't depend on the user's filesystem.
+    First `up` requires `--profile`; subsequent runs reuse the
+    stored label.
+  - `azvpn down` flips the state to `Disconnected`.
+  - The transient-connect verbs were collapsed into `--ephemeral`
+    flags on `up` / `down` rather than separate verbs. Reasoning:
+    neither Tailscale nor Mullvad keeps a transient mode, and the
+    one-shot use case (CI / debugging) is rare enough that a flag
+    is a better surface than a parallel verb pair.
+  - Daemon-side RT cache at `/Library/Application Support/
+    com.azvpn/auth-cache/` (macOS) / `/var/lib/azvpn/auth-cache/`
+    (Linux), mode 0600 in a 0700 dir. Separate from the user-scope
+    `TokenCache` (keyring-first, used by `whoami`/`me`/`groups`/
+    `manager`/`org`). Daemon owns its own copy because root can't
+    read the user's login keychain — same shape Tailscale and
+    Mullvad both use (root-owned file, not platform-keychain).
+  - On cold start, daemon reads target.json. If `state == Connected`,
+    spawns a converge task that refreshes the stored RT via
+    `RefreshGrant`, mints a fresh AT, and calls
+    `AzvpndServer::start_connection` directly — same path the `up`
+    RPC takes, no user interaction.
+  - WIRE_VERSION 1 → 2 (verb rename) → 3 (`UpRequest.refresh_token`).
   - *References:* Tailscale `ipn/ipnlocal/local.go:2616–2742`
-    (`LocalBackend.Start` reading prefs, line 2742
-    `wantRunning := prefs.WantRunning()`); Mullvad
-    `mullvad-daemon/src/target_state.rs` (file-backed JSON,
-    "default to safe" on corrupt or missing — for us, default is
-    `Disconnected`, opposite of Mullvad's killswitch-default).
+    (`LocalBackend.Start` reading prefs); Mullvad
+    `mullvad-daemon/src/target_state.rs` (file-backed JSON, "default
+    to safe" — we default to `Disconnected`, the work-VPN posture,
+    opposite of Mullvad's killswitch default).
+  - Known limitation: AAD RT rotation drift between user cache and
+    daemon cache is possible — a CLI `whoami`/`me` call could rotate
+    the RT after `up` and leave the daemon's stored RT stale. The
+    next `up` re-syncs. F.9 (pre-emptive refresh) will narrow this.
 
 - **F.2 Streaming state over IPC.** Today our tarpc surface is all
   one-shot (`connect`, `status`, `info`, `pushed`). Add a

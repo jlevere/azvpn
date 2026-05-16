@@ -41,7 +41,9 @@ use serde::{Deserialize, Serialize};
 /// - 1: initial release with `connect`/`disconnect` verbs
 /// - 2: renamed `connect`/`disconnect` → `up`/`down` with
 ///   `ephemeral` flag for F.1 declarative target state
-pub const WIRE_VERSION: u32 = 2;
+/// - 3: `UpRequest.refresh_token` for daemon-side RT cache + reboot
+///   auto-converge
+pub const WIRE_VERSION: u32 = 3;
 
 #[tarpc::service]
 pub trait AzvpnApi {
@@ -106,6 +108,15 @@ pub struct UpRequest {
     /// reboot the daemon stays idle instead of auto-converging.
     /// CI scripts and ad-hoc debugging.
     pub ephemeral: bool,
+    /// AAD refresh token, handed over so the daemon can silently
+    /// refresh the access token on reboot-time auto-converge without
+    /// a user-session interactive flow. `None` for cert-auth profiles
+    /// or when the CLI couldn't obtain an RT (interactive AT-only
+    /// flow). The daemon persists this in its own root-owned cache
+    /// (see [`azvpn-auth::daemon_cache`]), separate from the CLI's
+    /// per-user keyring cache.
+    #[serde(default)]
+    pub refresh_token: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

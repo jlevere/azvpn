@@ -11,6 +11,7 @@
 //!     openvpn / DNS / routes tear down before we exit.
 
 mod config;
+mod converge;
 mod routes;
 mod server;
 mod socket;
@@ -76,6 +77,15 @@ async fn main() -> ExitCode {
     // during init reports startup failure to systemd correctly. No-op
     // (and not even compiled) outside Linux.
     notify_ready();
+
+    // F.1: declarative target state — if the last `azvpn up` was
+    // non-ephemeral, the on-disk target says `Connected` and we try
+    // to bring the tunnel back up without user interaction. Spawned
+    // (not awaited) so the listener starts accepting RPCs
+    // immediately — `azvpn status` works during the converge, and a
+    // concurrent `azvpn up` from the CLI will hit `AlreadyConnected`
+    // cleanly if converge is already in flight.
+    tokio::spawn(converge::try_converge(server.clone()));
 
     accept_loop(listener, server.clone(), &shutdown).await;
 

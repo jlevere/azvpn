@@ -17,6 +17,7 @@
 
 mod auth_code;
 pub mod cloud;
+pub mod daemon_cache;
 mod device_code;
 mod refresh;
 mod token_cache;

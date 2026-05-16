@@ -65,14 +65,15 @@ pub async fn run(
     // transient 5xx) shouldn't stop a legitimate connect.
     crate::captive::warn_if_mediated().await;
 
-    let access_token = ensure_access_token(&resolved.profile, auth_mode).await?;
+    let aad_tokens = ensure_access_token(&resolved.profile, auth_mode).await?;
 
     let client = connect_to_daemon().await?;
 
     let req = UpRequest {
         profile_label: resolved.label,
         profile: resolved.profile,
-        access_token,
+        access_token: aad_tokens.access_token,
+        refresh_token: aad_tokens.refresh_token,
         verbose,
         ephemeral,
     };
@@ -130,9 +131,28 @@ fn resolve_profile(cli_profile: Option<PathBuf>) -> Result<ResolvedProfile> {
     })
 }
 
-/// Resolve a usable AAD access token for the profile. Returns `None`
-/// for certificate / usernamepass / radius profiles (those don't use
-/// AAD — the daemon writes a different auth-user-pass file shape).
+/// AT + RT pair produced by the user-side flow. The daemon needs
+/// both — the AT for the immediate connect, and the RT to stash in
+/// its own cache so a reboot can refresh silently. Cert / username-
+/// pass / radius profiles return both `None`.
+#[derive(Default)]
+struct AadTokens {
+    access_token: Option<String>,
+    refresh_token: Option<String>,
+}
+
+impl AadTokens {
+    fn from_token(t: &Token) -> Self {
+        Self {
+            access_token: Some(t.access_token.clone()),
+            refresh_token: t.refresh_token.clone(),
+        }
+    }
+}
+
+/// Resolve a usable AAD access token (and the matching RT) for the
+/// profile. Returns empty pair for cert / username-pass / radius
+/// profiles (those don't use AAD).
 ///
 /// Cache strategy, in order:
 /// 1. Valid cached access token (with RT for future refreshes) → use it.
@@ -141,9 +161,11 @@ fn resolve_profile(cli_profile: Option<PathBuf>) -> Result<ResolvedProfile> {
 ///
 /// Only step (3) requires the user to do anything; (2) keeps the daily-
 /// driver session-resume path off the browser.
-async fn ensure_access_token(profile: &VpnProfile, auth_mode: AuthMode) -> Result<Option<String>> {
+async fn ensure_access_token(profile: &VpnProfile, auth_mode: AuthMode) -> Result<AadTokens> {
     match profile.clientauth.auth_type {
-        AuthType::Certificate | AuthType::UsernamePass | AuthType::Radius => Ok(None),
+        AuthType::Certificate | AuthType::UsernamePass | AuthType::Radius => {
+            Ok(AadTokens::default())
+        }
         AuthType::Aad => {
             let aad_profile = profile.clientauth.aad.as_ref().ok_or_else(|| {
                 azvpn_core::Error::Other("AAD auth requires <aad> config block".into())
@@ -152,17 +174,17 @@ async fn ensure_access_token(profile: &VpnProfile, auth_mode: AuthMode) -> Resul
             let cache = TokenCache::for_profile(CacheKey::from(&aad_config));
 
             if let Some(cached) = cache.load().filter(|t| t.refresh_token.is_some()) {
-                return Ok(Some(cached.access_token));
+                return Ok(AadTokens::from_token(&cached));
             }
 
             if let Some(rt) = cache.load_refresh_token()
                 && let Some(refreshed) = try_silent_refresh(&aad_config, &cache, &rt).await
             {
-                return Ok(Some(refreshed.access_token));
+                return Ok(AadTokens::from_token(&refreshed));
             }
 
             let token = acquire_interactively(aad_config, &cache, auth_mode).await?;
-            Ok(Some(token.access_token))
+            Ok(AadTokens::from_token(&token))
         }
     }
 }

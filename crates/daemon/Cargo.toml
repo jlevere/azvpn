@@ -13,6 +13,7 @@ name = "azvpnd"
 path = "src/main.rs"
 
 [dependencies]
+azvpn-auth = { workspace = true }
 azvpn-core = { workspace = true }
 azvpn-ipc = { workspace = true }
 azvpn-openvpn = { workspace = true }
