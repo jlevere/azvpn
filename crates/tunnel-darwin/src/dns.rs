@@ -63,7 +63,11 @@ const MAX_SUFFIX_LEN: usize = 253;
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
     #[error("invalid DNS suffix {input:?}: {reason}")]
-    InvalidSuffix { input: String, reason: String },
+    InvalidSuffix {
+        input: String,
+        #[source]
+        reason: InvalidSuffixReason,
+    },
 
     #[error(
         "/etc/resolver/{name} exists but is not managed by azvpn \
@@ -77,6 +81,29 @@ pub enum Error {
         #[source]
         source: std::io::Error,
     },
+}
+
+/// Closed set of reasons a profile-supplied suffix can fail validation.
+/// Carried by [`Error::InvalidSuffix`]; tests assert on the variant so
+/// validation invariants remain checkable without string-sniffing.
+#[derive(Debug, thiserror::Error)]
+pub enum InvalidSuffixReason {
+    #[error("empty after stripping leading dots")]
+    Empty,
+    #[error("longer than 253 chars (RFC 1035 cap)")]
+    TooLong,
+    #[error("contains path-unsafe characters (/, \\, :, NUL, space)")]
+    PathUnsafe,
+    #[error("trailing dot not allowed (use the relative form)")]
+    TrailingDot,
+    #[error("trailing hyphen not allowed (RFC 1035 §2.3.1)")]
+    TrailingHyphen,
+    #[error("not a valid DNS name: {0}")]
+    MalformedDnsName(String),
+    #[error("canonical name is empty")]
+    CanonicalEmpty,
+    #[error("canonical name contains path-unsafe characters")]
+    CanonicalPathUnsafe,
 }
 
 /// Split-horizon DNS guard for macOS. Holds the set of suffix files
@@ -196,45 +223,33 @@ fn cleanup_orphan_dns_in(dir: &Path) -> bool {
             continue;
         }
         let path = entry.path();
-        if has_first_line_prefix(&path, MAGIC_HEADER_PREFIX) {
-            match fs::remove_file(&path) {
-                Ok(()) => {
-                    removed_any = true;
-                    info!(path = %path.display(), "removed orphan /etc/resolver entry");
-                }
-                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-                Err(e) => warn!(
-                    path = %path.display(),
-                    error = %e,
-                    "/etc/resolver orphan removal failed",
-                ),
-            }
+        if has_first_line_prefix(&path, MAGIC_HEADER_PREFIX) && try_remove(&path) {
+            removed_any = true;
+            info!(path = %path.display(), "removed orphan /etc/resolver entry");
         }
     }
     removed_any
 }
 
-/// Strip leading dots, parse + canonicalize via `hickory-proto`,
-/// dedupe via `BTreeSet`. The set is returned so callers can diff
-/// against a prior session. Bare empty raw inputs are skipped (a
-/// profile parser handing back an empty element shouldn't break
-/// the connect); anything that survives the leading-dot strip is
-/// parsed as a DNS name and rejected if it isn't one.
+/// Canonicalize and dedupe a batch of profile-supplied suffixes. The
+/// returned set is what callers diff against a prior session. Raw
+/// empty inputs are skipped (a profile parser handing back an empty
+/// `<dnssuffix/>` shouldn't break the connect); anything non-empty is
+/// validated and rejected if it isn't a usable DNS name.
 fn normalize_suffixes(input: &[&str]) -> Result<BTreeSet<String>, Error> {
     let mut out = BTreeSet::new();
     for raw in input {
         if raw.is_empty() {
             continue;
         }
-        let stripped = raw.trim_start_matches('.');
-        out.insert(canonicalize_suffix(raw, stripped)?);
+        out.insert(canonicalize_suffix(raw)?);
     }
     Ok(out)
 }
 
-/// Parse `stripped` as an RFC-1035 DNS name via `hickory-proto`,
-/// then return its lowercased ASCII form (without the trailing root
-/// dot) for use as an `/etc/resolver/` filename.
+/// Parse `raw` as an RFC-1035 DNS name via `hickory-proto`, returning
+/// the lowercased ASCII form (without the trailing root dot) for use as
+/// an `/etc/resolver/` filename.
 ///
 /// Layered filtering:
 ///
@@ -252,44 +267,45 @@ fn normalize_suffixes(input: &[&str]) -> Result<BTreeSet<String>, Error> {
 /// 4. Post-hickory: same path-unsafe needle check on the canonical
 ///    form, belt-and-suspenders against a future hickory release
 ///    that accepts something new.
-fn canonicalize_suffix(raw: &str, stripped: &str) -> Result<String, Error> {
+fn canonicalize_suffix(raw: &str) -> Result<String, Error> {
     const PATH_UNSAFE: [char; 5] = ['/', '\\', ':', '\0', ' '];
 
-    let invalid = |reason: &str| Error::InvalidSuffix {
-        input: (*raw).to_owned(),
-        reason: reason.to_owned(),
+    let invalid = |reason: InvalidSuffixReason| Error::InvalidSuffix {
+        input: raw.to_owned(),
+        reason,
     };
 
+    let stripped = raw.trim_start_matches('.');
     if stripped.is_empty() {
-        return Err(invalid("empty after stripping leading dots"));
+        return Err(invalid(InvalidSuffixReason::Empty));
     }
     if stripped.len() > MAX_SUFFIX_LEN {
-        return Err(invalid("longer than 253 chars (RFC 1035 cap)"));
+        return Err(invalid(InvalidSuffixReason::TooLong));
     }
     if stripped.contains(PATH_UNSAFE) {
-        return Err(invalid(
-            "contains path-unsafe characters (/, \\, :, NUL, space)",
-        ));
+        return Err(invalid(InvalidSuffixReason::PathUnsafe));
     }
     if stripped.ends_with('.') {
-        return Err(invalid("trailing dot not allowed (use the relative form)"));
+        return Err(invalid(InvalidSuffixReason::TrailingDot));
     }
     if stripped.ends_with('-') {
-        return Err(invalid("trailing hyphen not allowed (RFC 1035 §2.3.1)"));
+        return Err(invalid(InvalidSuffixReason::TrailingHyphen));
     }
 
-    let name =
-        Name::from_ascii(stripped).map_err(|e| invalid(&format!("not a valid DNS name: {e}")))?;
+    let name = Name::from_ascii(stripped)
+        .map_err(|e| invalid(InvalidSuffixReason::MalformedDnsName(e.to_string())))?;
 
     // `to_ascii` returns the canonical absolute form `foo.example.com.`;
-    // strip the root dot for the filename.
-    let canon = name.to_ascii();
-    let canon = canon.strip_suffix('.').unwrap_or(&canon).to_owned();
+    // pop the root dot in place rather than re-cloning.
+    let mut canon = name.to_ascii();
+    if canon.ends_with('.') {
+        canon.pop();
+    }
     if canon.is_empty() {
-        return Err(invalid("canonical name is empty"));
+        return Err(invalid(InvalidSuffixReason::CanonicalEmpty));
     }
     if canon.contains(PATH_UNSAFE) {
-        return Err(invalid("canonical name contains path-unsafe characters"));
+        return Err(invalid(InvalidSuffixReason::CanonicalPathUnsafe));
     }
     Ok(canon)
 }
@@ -353,11 +369,9 @@ fn read_first_line(path: &Path) -> std::io::Result<Option<String>> {
 /// which aren't secret in this threat model (they're already visible
 /// in the routing table and ARP cache).
 fn write_resolver_file(dir: &Path, suffix: &str, servers: &[IpAddr]) -> Result<(), Error> {
-    let mut body =
-        String::with_capacity(MAGIC_HEADER_PREFIX.len() + suffix.len() + 1 + servers.len() * 48);
-    body.push_str(MAGIC_HEADER_PREFIX);
-    body.push_str(suffix);
-    body.push('\n');
+    let header = magic_header(suffix);
+    let mut body = String::with_capacity(header.len() + servers.len() * 48);
+    body.push_str(&header);
     for ip in servers {
         body.push_str("nameserver ");
         body.push_str(&ip.to_string());
@@ -384,48 +398,82 @@ fn write_resolver_file(dir: &Path, suffix: &str, servers: &[IpAddr]) -> Result<(
 }
 
 /// Delete our file at `dir/suffix` if it still has our magic header.
-/// Foreign files (replaced mid-session by a sysadmin or another tool)
-/// are left strictly alone and produce a `warn!` so the operator
-/// notices.
+/// Distinguishes three outcomes via the 3-way [`read_first_line`]
+/// result: file missing → silent (raced with another remover); ours
+/// → delete; foreign → warn and skip. Read errors are also a skip
+/// with a warn so a transient `EACCES` doesn't take a file out.
 fn remove_if_ours(dir: &Path, suffix: &str) {
     let path = dir.join(suffix);
-    if !path.exists() {
-        return;
+    match read_first_line(&path) {
+        Ok(None) => return,
+        Ok(Some(line)) if line.starts_with(MAGIC_HEADER_PREFIX) => {}
+        Ok(Some(_)) => {
+            warn!(path = %path.display(), "/etc/resolver entry no longer ours; leaving alone");
+            return;
+        }
+        Err(e) => {
+            warn!(
+                path = %path.display(),
+                error = %e,
+                "/etc/resolver header read failed; leaving alone",
+            );
+            return;
+        }
     }
-    if !has_first_line_prefix(&path, MAGIC_HEADER_PREFIX) {
-        warn!(
-            path = %path.display(),
-            "/etc/resolver entry no longer ours; leaving alone",
-        );
-        return;
-    }
-    match fs::remove_file(&path) {
-        Ok(()) => info!(suffix = %suffix, "removed /etc/resolver entry"),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-        Err(e) => warn!(
-            path = %path.display(),
-            error = %e,
-            "/etc/resolver entry remove failed",
-        ),
+    if try_remove(&path) {
+        info!(suffix = %suffix, "removed /etc/resolver entry");
     }
 }
 
-/// Convenience wrapper over [`read_first_line`] that swallows
-/// missing-file / IO errors. Returns `false` whenever the file
+/// Convenience wrapper over [`read_first_line`] that swallows the
+/// missing-file/IO distinction. Returns `false` whenever the file
 /// doesn't exist, can't be read, or doesn't start with `prefix`.
+/// Used only by [`cleanup_orphan_dns_in`] where the not-ours and
+/// not-there cases both warrant the same silent skip.
 fn has_first_line_prefix(path: &Path, prefix: &str) -> bool {
     matches!(read_first_line(path), Ok(Some(line)) if line.starts_with(prefix))
+}
+
+/// `fs::remove_file` with the standard "ENOENT is fine; everything
+/// else gets a warn" handling factored out. Returns `true` if the
+/// file was actually removed.
+fn try_remove(path: &Path) -> bool {
+    match fs::remove_file(path) {
+        Ok(()) => true,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => false,
+        Err(e) => {
+            warn!(
+                path = %path.display(),
+                error = %e,
+                "/etc/resolver entry remove failed",
+            );
+            false
+        }
+    }
+}
+
+/// First line of every `/etc/resolver/<suffix>` file we manage —
+/// `MAGIC_HEADER_PREFIX` plus the suffix plus newline. Defined once
+/// so the writer and the test that asserts on it stay in sync.
+fn magic_header(suffix: &str) -> String {
+    format!("{MAGIC_HEADER_PREFIX}{suffix}\n")
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tempfile::TempDir;
 
-    fn guard_in(dir: &Path) -> DnsGuard {
-        DnsGuard {
-            resolver_dir: dir.to_owned(),
+    /// Per-test fixture: a fresh tempdir plus a `DnsGuard` rooted in
+    /// it. Keep the `TempDir` alive for the test scope — dropping it
+    /// nukes the directory before assertions run.
+    fn setup() -> (TempDir, DnsGuard) {
+        let tmp = tempfile::tempdir().unwrap();
+        let guard = DnsGuard {
+            resolver_dir: tmp.path().to_owned(),
             written: BTreeSet::new(),
-        }
+        };
+        (tmp, guard)
     }
 
     fn dns(ip: &str) -> IpAddr {
@@ -434,8 +482,7 @@ mod tests {
 
     #[test]
     fn apply_writes_expected_files() {
-        let tmp = tempfile::tempdir().unwrap();
-        let mut g = guard_in(tmp.path());
+        let (tmp, mut g) = setup();
         g.update(&["example.com", "corp.local"], &[dns("1.2.3.4")])
             .unwrap();
 
@@ -450,8 +497,7 @@ mod tests {
 
     #[test]
     fn reapply_diff_adds_and_removes() {
-        let tmp = tempfile::tempdir().unwrap();
-        let mut g = guard_in(tmp.path());
+        let (tmp, mut g) = setup();
         g.update(&["a.com", "b.com"], &[dns("1.2.3.4")]).unwrap();
         assert!(tmp.path().join("a.com").exists());
         assert!(tmp.path().join("b.com").exists());
@@ -467,8 +513,7 @@ mod tests {
 
     #[test]
     fn reapply_same_set_idempotent() {
-        let tmp = tempfile::tempdir().unwrap();
-        let mut g = guard_in(tmp.path());
+        let (tmp, mut g) = setup();
         g.update(&["a.com"], &[dns("1.2.3.4")]).unwrap();
         let before = fs::read_to_string(tmp.path().join("a.com")).unwrap();
         g.update(&["a.com"], &[dns("1.2.3.4")]).unwrap();
@@ -478,8 +523,7 @@ mod tests {
 
     #[test]
     fn leading_dot_normalized() {
-        let tmp = tempfile::tempdir().unwrap();
-        let mut g = guard_in(tmp.path());
+        let (tmp, mut g) = setup();
         g.update(&[".example.com"], &[dns("1.2.3.4")]).unwrap();
         assert!(tmp.path().join("example.com").exists());
         assert!(!tmp.path().join(".example.com").exists());
@@ -487,8 +531,7 @@ mod tests {
 
     #[test]
     fn duplicate_suffixes_deduped() {
-        let tmp = tempfile::tempdir().unwrap();
-        let mut g = guard_in(tmp.path());
+        let (tmp, mut g) = setup();
         g.update(&["a.com", ".a.com", "a.com"], &[dns("1.2.3.4")])
             .unwrap();
         let entries: Vec<_> = fs::read_dir(tmp.path()).unwrap().collect();
@@ -497,8 +540,7 @@ mod tests {
 
     #[test]
     fn empty_input_is_noop() {
-        let tmp = tempfile::tempdir().unwrap();
-        let mut g = guard_in(tmp.path());
+        let (tmp, mut g) = setup();
         g.update(&[], &[]).unwrap();
         let entries: Vec<_> = fs::read_dir(tmp.path()).unwrap().collect();
         assert!(entries.is_empty());
@@ -506,8 +548,7 @@ mod tests {
 
     #[test]
     fn empty_servers_acts_as_remove() {
-        let tmp = tempfile::tempdir().unwrap();
-        let mut g = guard_in(tmp.path());
+        let (tmp, mut g) = setup();
         g.update(&["a.com"], &[dns("1.2.3.4")]).unwrap();
         assert!(tmp.path().join("a.com").exists());
         g.update(&["a.com"], &[]).unwrap();
@@ -516,26 +557,49 @@ mod tests {
 
     #[test]
     fn path_traversal_rejected() {
-        let tmp = tempfile::tempdir().unwrap();
-        let parent_marker = tmp.path().parent().unwrap().join("evil");
-        let mut g = guard_in(tmp.path());
+        use InvalidSuffixReason::{
+            Empty, MalformedDnsName, PathUnsafe, TrailingDot, TrailingHyphen,
+        };
 
+        let (tmp, mut g) = setup();
+        let parent_marker = tmp.path().parent().unwrap().join("evil");
+
+        // Each input is asserted against the specific variant that
+        // should fire — proves we're not silently routing through the
+        // wrong branch (e.g., `foo\bar` slipping past as
+        // `MalformedDnsName` would mean hickory's backslash-escape
+        // parsing got there before our path-unsafe check, which would
+        // be a regression).
+        //
         // `.bad` is NOT in this list: a single leading dot is
         // intentionally stripped (`.example.com` normalizes to
         // `example.com`), which the `leading_dot_normalized` test
-        // covers. The cases below all fail validation post-strip:
-        // path separators, traversal that normalizes to empty,
-        // leading/trailing hyphen, trailing dot, or non-DNS chars.
-        let bad: &[&str] = &[
-            "../evil", "foo/bar", "foo\\bar", "foo:bar", "foo bar", "..", "-bad", "bad-", "bad.",
-        ];
-        for s in bad {
-            let result = g.update(&[s], &[dns("1.2.3.4")]);
-            assert!(
-                matches!(result, Err(Error::InvalidSuffix { .. })),
-                "expected InvalidSuffix for {s:?}, got {result:?}",
-            );
-        }
+        // covers.
+        let mut check = |input: &str, want: &str| {
+            let result = g.update(&[input], &[dns("1.2.3.4")]);
+            let Err(Error::InvalidSuffix { reason, .. }) = result else {
+                panic!("input {input:?}: expected InvalidSuffix, got {result:?}");
+            };
+            let got = match reason {
+                PathUnsafe => "PathUnsafe",
+                Empty => "Empty",
+                TrailingDot => "TrailingDot",
+                TrailingHyphen => "TrailingHyphen",
+                MalformedDnsName(_) => "MalformedDnsName",
+                other => panic!("input {input:?}: unexpected reason {other:?}"),
+            };
+            assert_eq!(got, want, "input {input:?}: wrong reason variant");
+        };
+
+        check("../evil", "PathUnsafe");
+        check("foo/bar", "PathUnsafe");
+        check("foo\\bar", "PathUnsafe");
+        check("foo:bar", "PathUnsafe");
+        check("foo bar", "PathUnsafe");
+        check("..", "Empty");
+        check("-bad", "MalformedDnsName");
+        check("bad-", "TrailingHyphen");
+        check("bad.", "TrailingDot");
 
         assert!(
             !parent_marker.exists(),
@@ -550,14 +614,13 @@ mod tests {
 
     #[test]
     fn pre_flight_collision_blocks_all_writes() {
-        let tmp = tempfile::tempdir().unwrap();
+        let (tmp, mut g) = setup();
         fs::write(
             tmp.path().join("corp.local"),
             b"# something else\nnameserver 9.9.9.9\n",
         )
         .unwrap();
 
-        let mut g = guard_in(tmp.path());
         let result = g.update(&["corp.local", "ok.local"], &[dns("1.2.3.4")]);
         assert!(matches!(result, Err(Error::Conflict { .. })));
 
@@ -572,8 +635,7 @@ mod tests {
 
     #[test]
     fn foreign_file_left_alone_on_remove() {
-        let tmp = tempfile::tempdir().unwrap();
-        let mut g = guard_in(tmp.path());
+        let (tmp, mut g) = setup();
         g.update(&["a.com"], &[dns("1.2.3.4")]).unwrap();
 
         // External actor swaps the file out for a foreign one.
@@ -595,7 +657,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         fs::write(
             tmp.path().join("ours.local"),
-            format!("{MAGIC_HEADER_PREFIX}ours.local\nnameserver 1.2.3.4\n"),
+            magic_header("ours.local") + "nameserver 1.2.3.4\n",
         )
         .unwrap();
         fs::write(
@@ -619,21 +681,19 @@ mod tests {
 
     #[test]
     fn drop_removes_written_files() {
-        let tmp = tempfile::tempdir().unwrap();
-        {
-            let mut g = guard_in(tmp.path());
-            g.update(&["a.com", "b.com"], &[dns("1.2.3.4")]).unwrap();
-            assert!(tmp.path().join("a.com").exists());
-            assert!(tmp.path().join("b.com").exists());
-        }
+        let (tmp, mut g) = setup();
+        g.update(&["a.com", "b.com"], &[dns("1.2.3.4")]).unwrap();
+        assert!(tmp.path().join("a.com").exists());
+        assert!(tmp.path().join("b.com").exists());
+
+        drop(g);
         assert!(!tmp.path().join("a.com").exists());
         assert!(!tmp.path().join("b.com").exists());
     }
 
     #[test]
     fn length_cap_enforced() {
-        let tmp = tempfile::tempdir().unwrap();
-        let mut g = guard_in(tmp.path());
+        let (_tmp, mut g) = setup();
         let long = "a".repeat(254);
         let result = g.update(&[long.as_str()], &[dns("1.2.3.4")]);
         assert!(matches!(result, Err(Error::InvalidSuffix { .. })));
@@ -641,8 +701,7 @@ mod tests {
 
     #[test]
     fn temp_file_does_not_leak_on_success() {
-        let tmp = tempfile::tempdir().unwrap();
-        let mut g = guard_in(tmp.path());
+        let (tmp, mut g) = setup();
         g.update(&["a.com"], &[dns("1.2.3.4")]).unwrap();
         let names: Vec<String> = fs::read_dir(tmp.path())
             .unwrap()
@@ -661,8 +720,7 @@ mod tests {
 
     #[test]
     fn non_ascii_rejected_punycode_accepted() {
-        let tmp = tempfile::tempdir().unwrap();
-        let mut g = guard_in(tmp.path());
+        let (tmp, mut g) = setup();
 
         let result = g.update(&["münchen.example.com"], &[dns("1.2.3.4")]);
         assert!(matches!(result, Err(Error::InvalidSuffix { .. })));
