@@ -14,6 +14,7 @@ mod config;
 mod converge;
 mod routes;
 mod server;
+#[cfg(unix)]
 mod socket;
 #[cfg(windows)]
 mod windows;
@@ -21,28 +22,65 @@ mod windows;
 use std::process::ExitCode;
 use std::time::Duration;
 
+#[cfg(unix)]
 use futures::StreamExt as _;
+#[cfg(unix)]
 use tarpc::serde_transport;
+#[cfg(unix)]
 use tarpc::server::{BaseChannel, Channel};
+#[cfg(unix)]
 use tarpc::tokio_serde::formats::Bincode;
+#[cfg(unix)]
 use tarpc::tokio_util::codec::length_delimited::LengthDelimitedCodec;
 #[cfg(unix)]
 use tokio::signal::unix::{SignalKind, signal};
+#[cfg(unix)]
 use tokio_util::sync::CancellationToken;
-use tracing::{error, info, warn};
+#[cfg(unix)]
+use tracing::error;
+use tracing::{info, warn};
 use tracing_subscriber::EnvFilter;
 
+#[cfg(unix)]
 use crate::server::AzvpndServer;
 
 /// How long to wait for the in-progress connection to tear down after
 /// SIGTERM before forcing exit. `launchd` sends SIGKILL ~5s after
 /// SIGTERM, so we have to be done by then.
+#[cfg(unix)]
 const SHUTDOWN_GRACE: Duration = Duration::from_secs(4);
 
 #[tokio::main]
 async fn main() -> ExitCode {
     init_tracing();
 
+    #[cfg(unix)]
+    {
+        unix_main().await
+    }
+    #[cfg(windows)]
+    {
+        windows_main()
+    }
+}
+
+/// Windows W0 stub. The real lifecycle (SCM service shell + named-pipe
+/// IPC + tokio body extracted from `unix_main`) lands in W1.2 / W1.3
+/// per `docs/windows-plan.md`. We return non-zero so a misconfigured
+/// auto-start (running the daemon binary directly without the
+/// `--run-as-service` flag SCM would normally pass) loudly fails
+/// rather than silently exiting clean.
+#[cfg(windows)]
+fn windows_main() -> ExitCode {
+    warn!(
+        "azvpnd: Windows daemon body is not yet wired (W0 scaffolding); \
+         see docs/windows-plan.md Phase W1 for the planned flow"
+    );
+    ExitCode::from(1)
+}
+
+#[cfg(unix)]
+async fn unix_main() -> ExitCode {
     let config = config::Config::from_env();
     info!(
         socket = %config.socket_path.display(),
@@ -99,6 +137,7 @@ async fn main() -> ExitCode {
     ExitCode::SUCCESS
 }
 
+#[cfg(unix)]
 async fn accept_loop(
     listener: tokio::net::UnixListener,
     server: AzvpndServer,
@@ -146,6 +185,9 @@ async fn accept_loop(
     }
 }
 
+// Unix-only — Windows W1.2 will wire shutdown to the SCM stop /
+// preshutdown callbacks instead of POSIX signals, so the equivalent
+// lives in `crate::windows` once the lifecycle lands.
 #[cfg(unix)]
 fn spawn_signal_listener(shutdown: CancellationToken) {
     tokio::spawn(async move {
@@ -167,22 +209,6 @@ fn spawn_signal_listener(shutdown: CancellationToken) {
             _ = sigterm.recv() => {
                 info!("received SIGTERM");
             }
-        }
-        shutdown.cancel();
-    });
-}
-
-// Windows has no SIGTERM; the Windows path is just Ctrl-C. We don't
-// have a real Windows daemon yet — this stub exists so `cargo check
-// --target x86_64-pc-windows-msvc` (which CI runs) succeeds. A real
-// Windows service would wire the SCM stop callback here.
-#[cfg(not(unix))]
-fn spawn_signal_listener(shutdown: CancellationToken) {
-    tokio::spawn(async move {
-        if let Err(e) = tokio::signal::ctrl_c().await {
-            warn!(error = %e, "ctrl_c watcher failed");
-        } else {
-            info!("received Ctrl-C");
         }
         shutdown.cancel();
     });
