@@ -57,15 +57,19 @@ fn resolve_openvpn_binary() -> PathBuf {
     PathBuf::from("openvpn")
 }
 
-/// Try `<exe>/../../libexec/azvpn/openvpn` (Linux package layout) then
-/// `<exe>/../../libexec/azvpn-openvpn` (macOS brew layout). Returns the
-/// first that exists. Two `parent()` hops: `/usr/sbin/azvpnd` → `/usr`,
-/// then join `libexec/...`. Returns `None` when there's no usable
-/// `current_exe` (sandboxing, broken `/proc`) — caller falls through
-/// to a `$PATH` lookup.
+/// Try the .deb / .rpm layout first, then the brew layout. Returns
+/// the first candidate that exists. Two `parent()` hops:
+/// `/usr/sbin/azvpnd` → `/usr`, then join `libexec/...`. Returns
+/// `None` when there's no usable `current_exe` (sandboxing, broken
+/// `/proc`) — caller falls through to a `$PATH` lookup. The relative
+/// paths live in [`azvpn_core::layout`] so this stays in sync with
+/// what `azvpn install-daemon` writes into the unit / plist.
 fn bundled_openvpn(exe: Option<&Path>) -> Option<PathBuf> {
     let prefix = exe?.parent()?.parent()?;
-    for rel in ["libexec/azvpn/openvpn", "libexec/azvpn-openvpn"] {
+    for rel in [
+        azvpn_core::layout::DEB_OPENVPN_REL,
+        azvpn_core::layout::BREW_OPENVPN_REL,
+    ] {
         let candidate = prefix.join(rel);
         if candidate.is_file() {
             return Some(candidate);

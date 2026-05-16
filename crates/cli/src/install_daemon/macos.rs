@@ -76,12 +76,14 @@ pub async fn uninstall() -> Result<()> {
 /// we look next to the running `azvpn` binary on the standard layout
 /// (`<prefix>/bin/azvpn` ↔ `<prefix>/libexec/{azvpnd, azvpn-openvpn}`).
 /// Works for both `brew install` (paths resolve under the cellar after
-/// symlink follow) and a manual `install -m 755` layout.
+/// symlink follow) and a manual `install -m 755` layout. The relative
+/// paths are kept in [`azvpn_core::layout`] so this stays in sync with
+/// what the daemon probes at startup.
 fn resolve_paths(daemon: Option<PathBuf>, openvpn: Option<PathBuf>) -> Result<(PathBuf, PathBuf)> {
     let prefix = default_prefix()?;
     Ok((
-        daemon.unwrap_or_else(|| prefix.join("libexec/azvpnd")),
-        openvpn.unwrap_or_else(|| prefix.join("libexec/azvpn-openvpn")),
+        daemon.unwrap_or_else(|| prefix.join(azvpn_core::layout::BREW_DAEMON_REL)),
+        openvpn.unwrap_or_else(|| prefix.join(azvpn_core::layout::BREW_OPENVPN_REL)),
     ))
 }
 
