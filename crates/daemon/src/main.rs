@@ -351,11 +351,88 @@ fn init_tracing() {
     if try_init_journald(&directives) {
         return;
     }
+    // Windows has no journald and the SCM eats stdout/stderr for
+    // services. Always set up a rolling-file logger at
+    // `C:\ProgramData\azvpn\logs\daemon.log.<date>` so service-mode
+    // diagnostics aren't a black box. Console mode keeps stderr
+    // output too. Mirrors the Linux journald shape from the user's
+    // perspective: structured durable logs the daemon owns.
+    #[cfg(target_os = "windows")]
+    {
+        if try_init_windows_file_layer(&directives) {
+            return;
+        }
+    }
     let filter = EnvFilter::try_new(&directives).unwrap_or_else(|_| EnvFilter::new("info"));
     tracing_subscriber::fmt()
         .with_env_filter(filter)
         .compact()
         .init();
+}
+
+/// Rolling file logger at
+/// `C:\ProgramData\azvpn\logs\daemon.log.<date>`, plus a parallel
+/// stderr layer so console-mode dev still sees output live. Daily
+/// rotation, keep last 7 days. Size-based cap (~50 MB) per plan G.7
+/// is deferred — tracing-appender 0.2 only rotates by time.
+///
+/// The non-blocking worker guard is intentionally leaked so the
+/// background flush thread lives for the daemon's full lifetime;
+/// `set_global_default` runs once and there's no clean place to
+/// hold the guard past it.
+#[cfg(target_os = "windows")]
+fn try_init_windows_file_layer(directives: &str) -> bool {
+    use tracing_appender::rolling::{RollingFileAppender, Rotation};
+    use tracing_subscriber::layer::SubscriberExt as _;
+    use tracing_subscriber::util::SubscriberInitExt as _;
+
+    let log_dir = std::path::PathBuf::from(r"C:\ProgramData\azvpn\logs");
+    if let Err(e) = std::fs::create_dir_all(&log_dir) {
+        eprintln!(
+            "azvpnd: could not create log dir {} ({e}); falling back to stderr only",
+            log_dir.display()
+        );
+        return false;
+    }
+
+    let appender = match RollingFileAppender::builder()
+        .rotation(Rotation::DAILY)
+        .filename_prefix("daemon")
+        .filename_suffix("log")
+        .max_log_files(7)
+        .build(&log_dir)
+    {
+        Ok(a) => a,
+        Err(e) => {
+            eprintln!(
+                "azvpnd: rolling appender failed for {} ({e}); falling back to stderr only",
+                log_dir.display()
+            );
+            return false;
+        }
+    };
+
+    let (writer, guard) = tracing_appender::non_blocking(appender);
+    // Hold the worker thread for the rest of the process. Without
+    // this the appender drops at end of init_tracing and the worker
+    // exits, dropping unflushed log lines.
+    std::mem::forget(guard);
+
+    let filter = EnvFilter::try_new(directives).unwrap_or_else(|_| EnvFilter::new("info"));
+    let file_layer = tracing_subscriber::fmt::layer()
+        .with_writer(writer)
+        .with_ansi(false)
+        .compact();
+    let stderr_layer = tracing_subscriber::fmt::layer()
+        .with_writer(std::io::stderr)
+        .compact();
+
+    tracing_subscriber::registry()
+        .with(filter)
+        .with(file_layer)
+        .with(stderr_layer)
+        .init();
+    true
 }
 
 #[cfg(target_os = "linux")]
