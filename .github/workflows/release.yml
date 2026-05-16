@@ -15,61 +15,42 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  # Loose binaries for Linux + Windows — uploaded as standalone
-  # artifacts on the GH release for users who don't want a .deb /
-  # .rpm / installer. macOS is handled by `build-macos` below
-  # because it produces a tarball (CLI + daemon + bundled openvpn)
-  # rather than a bare binary.
+  # Bare Linux CLI binary — used directly by anyone who doesn't want
+  # the .deb / .rpm. macOS is `build-macos`, Windows is `build-msi`;
+  # both produce installer-style artifacts (tarball / MSI) instead of
+  # standalone binaries, because that's what their package managers
+  # consume.
   build:
-    runs-on: ${{ matrix.os }}
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          # ubuntu-22.04 (glibc 2.35) — not ubuntu-latest (24.04 / glibc 2.39).
-          # 22.04's glibc is old enough that the resulting binary runs on
-          # Debian 12 (2.36), Ubuntu 22.04+, RHEL 9 (2.34 — symbol-versioning
-          # still works), Amazon Linux 2023, etc. ubuntu-latest would
-          # produce a binary that apt rejects on Debian 12 with
-          # "libc6 (>= 2.39) but 2.36-9+deb12u13 is to be installed".
-          - os: ubuntu-22.04
-            target: x86_64-unknown-linux-gnu
-            artifact: azvpn-linux-x86_64
-          - os: windows-latest
-            target: x86_64-pc-windows-msvc
-            artifact: azvpn-windows-x86_64
+    runs-on: ubuntu-22.04
+    # ubuntu-22.04 (glibc 2.35) — not ubuntu-latest (24.04 / glibc 2.39).
+    # 22.04's glibc is old enough that the resulting binary runs on
+    # Debian 12 (2.36), Ubuntu 22.04+, RHEL 9 (2.34 — symbol-versioning
+    # still works), Amazon Linux 2023, etc. ubuntu-latest would
+    # produce a binary that apt rejects on Debian 12 with
+    # "libc6 (>= 2.39) but 2.36-9+deb12u13 is to be installed".
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
         with:
-          targets: ${{ matrix.target }}
+          targets: x86_64-unknown-linux-gnu
       - uses: Swatinem/rust-cache@v2
         with:
-          # Include matrix.os in the cache key — the default key keys
-          # on target + rustc + lockfile, NOT the runner OS, so a
-          # cache built on ubuntu-latest (24.04 / glibc 2.39) gets
-          # reused on ubuntu-22.04 (glibc 2.35), then fails to link.
-          key: release-${{ matrix.os }}-${{ matrix.target }}
+          # Include OS in the cache key — the default key keys on
+          # target + rustc + lockfile, NOT the runner OS, so a cache
+          # built on ubuntu-latest (24.04 / glibc 2.39) gets reused on
+          # ubuntu-22.04 (glibc 2.35), then fails to link.
+          key: release-ubuntu-22.04-x86_64-unknown-linux-gnu
       # libdbus-1-dev: the keyring crate's sync-secret-service feature
-      # links to system libdbus on Linux (not pure-Rust like zbus). The
-      # Windows runner picks a native backend and doesn't need it.
+      # links to system libdbus on Linux (not pure-Rust like zbus).
       - name: Install Linux system deps
-        if: startsWith(matrix.os, 'ubuntu')
         run: sudo apt-get update && sudo apt-get install -y libdbus-1-dev pkg-config
-      - run: cargo build --release --target ${{ matrix.target }}
+      - run: cargo build --release --target x86_64-unknown-linux-gnu
       - name: Rename binary
-        shell: bash
-        run: |
-          src="target/${{ matrix.target }}/release/azvpn"
-          if [ "${{ matrix.os }}" = "windows-latest" ]; then
-            mv "${src}.exe" "${{ matrix.artifact }}.exe"
-          else
-            mv "$src" "${{ matrix.artifact }}"
-          fi
+        run: mv target/x86_64-unknown-linux-gnu/release/azvpn azvpn-linux-x86_64
       - uses: actions/upload-artifact@v4
         with:
-          name: ${{ matrix.artifact }}
-          path: ${{ matrix.artifact }}*
+          name: azvpn-linux-x86_64
+          path: azvpn-linux-x86_64
 
   # macOS release tarball — what `brew install jlevere/tap/azvpn`
   # consumes. The whole flow (cargo build, nix build of patched
@@ -104,6 +85,71 @@ jobs:
         with:
           name: azvpn-macos-aarch64
           path: dist/azvpn-*-aarch64-apple-darwin.tar.gz
+
+  # Windows MSI installer — what `scoop install azvpn` (and direct
+  # downloads from the release page) consumes. The build orchestration
+  # — mingw cross-compile via nix → wixl-built MSI → Authenticode
+  # signing via osslsigncode — lives in `cargo xtask release-windows`.
+  # Runs on ubuntu-latest because nix's `pkgsCross.mingwW64` does the
+  # cross-build; no actual Windows runner needed.
+  #
+  # Authenticode signing is conditional on `WINDOWS_SIGNING_CERT_B64`
+  # being set as a repo secret:
+  #
+  #   - WINDOWS_SIGNING_CERT_B64 — base64 of the PEM signing cert
+  #   - WINDOWS_SIGNING_KEY_B64  — base64 of the PEM private key
+  #
+  # `base64 -w0 cert.pem | pbcopy` (or `xclip -sel clip`) gets them
+  # into the secret value at https://github.com/jlevere/azvpn/settings/secrets/actions.
+  # When neither is set the job still runs and uploads an unsigned MSI
+  # — useful for dispatch-run smoke tests before code-signing is set up.
+  build-msi:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.msi.outputs.version }}
+      sha256: ${{ steps.msi.outputs.sha256 }}
+      msi_name: ${{ steps.msi.outputs.msi_name }}
+      signed: ${{ steps.msi.outputs.signed }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: build-msi-ubuntu-latest
+      - uses: DeterminateSystems/nix-installer-action@main
+      - uses: DeterminateSystems/magic-nix-cache-action@main
+      # osslsigncode only needs to be present when we're actually
+      # signing — saves ~5s on the no-secret unsigned-build path.
+      - name: Install osslsigncode
+        if: ${{ secrets.WINDOWS_SIGNING_CERT_B64 != '' }}
+        run: sudo apt-get update && sudo apt-get install -y osslsigncode
+      # Decode the base64 secrets to tempfiles on disk. `umask 077`
+      # makes them mode 0600 — the GH runner is short-lived but it
+      # still doesn't hurt to be tidy with private keys.
+      - name: Stage signing material
+        if: ${{ secrets.WINDOWS_SIGNING_CERT_B64 != '' }}
+        env:
+          CERT_B64: ${{ secrets.WINDOWS_SIGNING_CERT_B64 }}
+          KEY_B64: ${{ secrets.WINDOWS_SIGNING_KEY_B64 }}
+        run: |
+          umask 077
+          mkdir -p /tmp/sign
+          echo "$CERT_B64" | base64 -d > /tmp/sign/cert.pem
+          echo "$KEY_B64" | base64 -d > /tmp/sign/key.pem
+          echo "AZVPN_SIGNING_CERT=/tmp/sign/cert.pem" >> "$GITHUB_ENV"
+          echo "AZVPN_SIGNING_KEY=/tmp/sign/key.pem"   >> "$GITHUB_ENV"
+      # The `SIGN_FLAG` env var is `--sign` when secrets are set,
+      # empty otherwise. Shell unquoted-empty expansion drops it from
+      # the command line so xtask sees plain `release-windows --emit-ci-outputs`.
+      - name: Build MSI
+        id: msi
+        env:
+          SIGN_FLAG: ${{ secrets.WINDOWS_SIGNING_CERT_B64 != '' && '--sign' || '' }}
+        run: cargo xtask release-windows $SIGN_FLAG --emit-ci-outputs
+      - uses: actions/upload-artifact@v4
+        with:
+          name: azvpn-msi-x86_64
+          path: dist/azvpn-*-x86_64-windows.msi
 
   # Patched openvpn binary for Linux .deb / .rpm packaging.
   #
@@ -226,7 +272,7 @@ jobs:
           path: target/generate-rpm/*.rpm
 
   release:
-    needs: [build, build-macos, build-openvpn, build-deb, build-rpm]
+    needs: [build, build-macos, build-msi, build-openvpn, build-deb, build-rpm]
     # Only publish a GH release on tag pushes — manual dispatches still
     # produce artifacts (visible from the run page) but don't create
     # a draft release out of nowhere.
