@@ -248,12 +248,14 @@ checksum = "c08606f8c3cbf4ce6ec8e28fb0014a2c086708fe954eaa885384a6165172e7e8"
 name = "azvpn"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
  "azvpn-auth",
  "azvpn-core",
  "azvpn-ipc",
  "azvpn-profile",
  "base64",
  "clap",
+ "clap-verbosity-flag",
  "hickory-resolver",
  "humansize",
  "humantime",
@@ -263,6 +265,7 @@ dependencies = [
  "reqwest",
  "serde",
  "serde_json",
+ "shadow-rs",
  "tarpc",
  "thiserror 2.0.18",
  "tokio",
@@ -280,18 +283,18 @@ version = "0.1.0"
 dependencies = [
  "azvpn-profile",
  "base64",
- "dirs",
+ "directories",
  "keyring",
  "oauth2",
  "open",
  "reqwest",
+ "secrecy",
  "serde",
  "serde_json",
  "tempfile",
  "thiserror 2.0.18",
  "tokio",
  "tracing",
- "tracing-subscriber",
  "url",
 ]
 
@@ -356,11 +359,11 @@ version = "0.1.0"
 dependencies = [
  "azvpn-openvpn",
  "azvpn-profile",
- "ipnet",
  "serde",
  "tarpc",
  "thiserror 2.0.18",
  "tokio",
+ "uzers",
  "widestring",
  "windows-sys 0.59.0",
 ]
@@ -373,7 +376,6 @@ dependencies = [
  "pem",
  "serde",
  "sha1 0.11.0",
- "tempfile",
  "thiserror 2.0.18",
  "tokio",
  "tracing",
@@ -395,7 +397,6 @@ dependencies = [
  "hickory-proto",
  "tempfile",
  "thiserror 2.0.18",
- "tokio",
  "tracing",
 ]
 
@@ -403,12 +404,10 @@ dependencies = [
 name = "azvpn-tunnel-linux"
 version = "0.1.0"
 dependencies = [
- "async-trait",
  "if-addrs 0.13.4",
  "libc",
  "tempfile",
  "thiserror 2.0.18",
- "tokio",
  "tracing",
  "zbus 5.15.0",
 ]
@@ -418,7 +417,6 @@ name = "azvpn-tunnel-windows"
 version = "0.1.0"
 dependencies = [
  "thiserror 2.0.18",
- "tokio",
  "tracing",
  "uuid",
  "windows-service",
@@ -550,6 +548,8 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a1dce859f0832a7d088c4f1119888ab94ef4b5d6795d1ce05afb7fe159d79f98"
 dependencies = [
  "find-msvc-tools",
+ "jobserver",
+ "libc",
  "shlex",
 ]
 
@@ -631,6 +631,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "clap-verbosity-flag"
+version = "3.0.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9d92b1fab272fe943881b77cc6e920d6543e5b1bfadbd5ed81c7c5a755742394"
+dependencies = [
+ "clap",
+ "log",
+ "tracing-core",
+]
+
+[[package]]
 name = "clap_builder"
 version = "4.6.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -680,6 +691,27 @@ name = "const-oid"
 version = "0.10.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a6ef517f0926dd24a1582492c791b6a4818a4d94e789a334894aa15b0d12f55c"
+
+[[package]]
+name = "const_format"
+version = "0.2.36"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4481a617ad9a412be3b97c5d403fef8ed023103368908b9c50af598ff467cc1e"
+dependencies = [
+ "const_format_proc_macros",
+ "konst",
+]
+
+[[package]]
+name = "const_format_proc_macros"
+version = "0.2.34"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1d57c2eccfb16dbac1f4e61e206105db5820c9d26c3c472bc17c774259ef7744"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "unicode-xid",
+]
 
 [[package]]
 name = "core-foundation"
@@ -835,10 +867,10 @@ dependencies = [
 ]
 
 [[package]]
-name = "dirs"
+name = "directories"
 version = "5.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "44c45a9d03d6676652bcb5e724c7e988de1acad23a711b5217ab9cbecbec2225"
+checksum = "9a49173b84e034382284f27f1af4dcbbd231ffa358c0fe316541a7337f376a35"
 dependencies = [
  "dirs-sys",
 ]
@@ -1183,6 +1215,19 @@ dependencies = [
  "rand_core 0.10.1",
  "wasip2",
  "wasip3",
+]
+
+[[package]]
+name = "git2"
+version = "0.20.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7b88256088d75a56f8ecfa070513a775dd9107f6530ef14919dac831af9cfe2b"
+dependencies = [
+ "bitflags",
+ "libc",
+ "libgit2-sys",
+ "log",
+ "url",
 ]
 
 [[package]]
@@ -1648,6 +1693,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "is_debug"
+version = "1.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1fe266d2e243c931d8190177f20bf7f24eed45e96f39e87dc49a27b32d12d407"
+
+[[package]]
 name = "is_terminal_polyfill"
 version = "1.70.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1710,6 +1761,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "jobserver"
+version = "0.1.34"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9afb3de4395d6b3e67a780b6de64b51c978ecf11cb9a462c66be7d4ca9039d33"
+dependencies = [
+ "getrandom 0.3.4",
+ "libc",
+]
+
+[[package]]
 name = "js-sys"
 version = "0.3.98"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1736,6 +1797,21 @@ dependencies = [
  "windows-sys 0.60.2",
  "zeroize",
 ]
+
+[[package]]
+name = "konst"
+version = "0.2.20"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "128133ed7824fcd73d6e7b17957c5eb7bacb885649bd8c69708b2331a10bcefb"
+dependencies = [
+ "konst_macro_rules",
+]
+
+[[package]]
+name = "konst_macro_rules"
+version = "0.2.19"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a4933f3f57a8e9d9da04db23fb153356ecaf00cbd14aee46279c33dc80925c37"
 
 [[package]]
 name = "lazy_static"
@@ -1765,6 +1841,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "libgit2-sys"
+version = "0.18.4+1.9.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9b26f66f35e1871b22efcf7191564123d2a446ca0538cde63c23adfefa9b15b7"
+dependencies = [
+ "cc",
+ "libc",
+ "libz-sys",
+ "pkg-config",
+]
+
+[[package]]
 name = "libloading"
 version = "0.8.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1787,6 +1875,18 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e02f3bb43d335493c96bf3fd3a321600bf6bd07ed34bc64118e9293bdffea46c"
 dependencies = [
  "libc",
+]
+
+[[package]]
+name = "libz-sys"
+version = "1.1.28"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "fc3a226e576f50782b3305c5ccf458698f92798987f551c6a02efe8276721e22"
+dependencies = [
+ "cc",
+ "libc",
+ "pkg-config",
+ "vcpkg",
 ]
 
 [[package]]
@@ -2136,6 +2236,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "071dfc062690e90b734c0b2273ce72ad0ffa95f0c74596bc250dcfd960262841"
 dependencies = [
  "autocfg",
+]
+
+[[package]]
+name = "num_threads"
+version = "0.1.7"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5c7398b9c8b70908f6371f47ed36737907c87c52af34c268fed0bf0ceb92ead9"
+dependencies = [
+ "libc",
 ]
 
 [[package]]
@@ -2802,6 +2911,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "secrecy"
+version = "0.10.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e891af845473308773346dc847b2c23ee78fe442e0472ac50e22a18a93d3ae5a"
+dependencies = [
+ "serde",
+ "zeroize",
+]
+
+[[package]]
 name = "secret-service"
 version = "4.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2970,6 +3089,19 @@ dependencies = [
  "cfg-if",
  "cpufeatures 0.2.17",
  "digest 0.10.7",
+]
+
+[[package]]
+name = "shadow-rs"
+version = "1.7.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3c798acfc78a69c7b038adde44084d8df875555b091da42c90ae46257cdcc41a"
+dependencies = [
+ "const_format",
+ "git2",
+ "is_debug",
+ "time",
+ "tzdb",
 ]
 
 [[package]]
@@ -3224,7 +3356,9 @@ checksum = "743bd48c283afc0388f9b8827b976905fb217ad9e647fae3a379a9283c4def2c"
 dependencies = [
  "deranged",
  "itoa",
+ "libc",
  "num-conv",
+ "num_threads",
  "powerfmt",
  "serde_core",
  "time-core",
@@ -3532,6 +3666,32 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "40ce102ab67701b8526c123c1bab5cbe42d7040ccfd0f64af1a385808d2f43de"
 
 [[package]]
+name = "tz-rs"
+version = "0.7.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4fc6c929ffa10fb34f4a3c7e9a73620a83ef2e85e47f9ec3381b8289e6762f42"
+
+[[package]]
+name = "tzdb"
+version = "0.7.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "56d4e985b6dda743ae7fd4140c28105316ffd75bc58258ee6cc12934e3eb7a0c"
+dependencies = [
+ "iana-time-zone",
+ "tz-rs",
+ "tzdb_data",
+]
+
+[[package]]
+name = "tzdb_data"
+version = "0.2.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "125a0a63c4bd75c73f61863463cb400db4b1aa5039b203b0ee1d628a7e3dabb2"
+dependencies = [
+ "tz-rs",
+]
+
+[[package]]
 name = "uds_windows"
 version = "1.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3612,6 +3772,12 @@ name = "valuable"
 version = "0.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ba73ea9cf16a25df0c8caa16c51acb937d5712a8429db78a3ee29d5dcacd3a65"
+
+[[package]]
+name = "vcpkg"
+version = "0.2.15"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "accd4ea62f7bb7a82fe23066fb0957d48ef677f6eeb8215f372f52e48bb32426"
 
 [[package]]
 name = "version_check"
@@ -4289,7 +4455,6 @@ dependencies = [
  "flate2",
  "reqwest",
  "serde",
- "serde_json",
  "sha2",
  "tar",
  "tempfile",

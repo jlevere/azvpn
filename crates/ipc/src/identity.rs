@@ -15,11 +15,14 @@
 //!   `/tmp/tailscale/ipn/ipnauth/ipnauth_windows.go:78–101` is the
 //!   reference; this is a Rust port of the same pattern.
 //!
-//! - **Unix**: `SO_PEERCRED` (Linux) / `LOCAL_PEERCRED` (macOS)
-//!   returns uid/gid/pid. Not yet wired through — tracked as the
-//!   second half of `G.1` in `PLAN.md`. The cross-platform
-//!   [`ClientIdentity`] enum carries the Unix variant for forward
-//!   compatibility.
+//! - **Unix**: `tokio::net::UnixStream::peer_cred()` (`SO_PEERCRED`
+//!   on Linux, `getpeereid` + `LOCAL_PEEREPID` on macOS) returns
+//!   uid/gid/pid. Admin is "uid==0 OR primary gid matches the
+//!   daemon's socket group OR socket group appears in supplementary
+//!   groups" — matching the kernel's own admission check on the
+//!   socket's file ACL, so the inner gate parallels the outer one
+//!   without breaking the working `azvpn up` UX where the user is a
+//!   non-root member of `admin` (macOS) / `sudo` (Linux).
 //!
 //! The fetched [`ClientIdentity`] is stashed on the per-connection
 //! tarpc server clone (`AzvpndServer::with_identity`); RPC handlers
@@ -37,10 +40,8 @@ pub enum ClientIdentity {
     #[cfg(target_os = "windows")]
     Windows(WindowsClientIdentity),
 
-    /// Unix peer identified via `SO_PEERCRED` / `LOCAL_PEERCRED`.
-    /// Reserved for the Linux/macOS half of G.1; today the Unix
-    /// accept path logs peer creds but doesn't enforce authorization
-    /// per-RPC.
+    /// Unix peer captured via `peer_cred` + NSS group lookup; see
+    /// [`fetch_unix_identity`] for the admission rule.
     #[cfg(unix)]
     Unix(UnixClientIdentity),
 }
@@ -48,14 +49,15 @@ pub enum ClientIdentity {
 impl ClientIdentity {
     /// `true` when the caller has effective admin authority — admin
     /// group member on Windows (after UAC linked-token resolution),
-    /// uid==0 on Unix. Used by [`AzvpndServer::require_admin`].
+    /// `is_admin` precomputed against the socket group on Unix. Used
+    /// by [`AzvpndServer::require_admin`].
     #[must_use]
     pub fn is_admin(&self) -> bool {
         match self {
             #[cfg(target_os = "windows")]
             Self::Windows(w) => w.is_admin,
             #[cfg(unix)]
-            Self::Unix(u) => u.uid == 0,
+            Self::Unix(u) => u.is_admin,
         }
     }
 
@@ -70,7 +72,16 @@ impl ClientIdentity {
                 None => format!("sid={} (admin={})", w.sid, w.is_admin),
             },
             #[cfg(unix)]
-            Self::Unix(u) => format!("uid={} gid={} pid={}", u.uid, u.gid, u.pid),
+            Self::Unix(u) => {
+                let pid = u.pid.map_or_else(|| "?".to_owned(), |p| p.to_string());
+                match &u.user_name {
+                    Some(name) => format!(
+                        "{name} (uid={}, gid={}, pid={pid}, admin={})",
+                        u.uid, u.gid, u.is_admin
+                    ),
+                    None => format!("uid={} gid={} pid={pid} admin={}", u.uid, u.gid, u.is_admin),
+                }
+            }
         }
     }
 }
@@ -113,40 +124,58 @@ pub struct WindowsClientIdentity {
     pub session_id: u32,
 }
 
-/// Unix-side peer identity. Forward-declared; the Unix accept path
-/// in `daemon::main::accept_loop` already reads peer creds but
-/// doesn't yet populate this struct — landing alongside Track G.1's
-/// Unix half.
+/// Unix peer captured at IPC accept time. See [`fetch_unix_identity`]
+/// for how each field is populated and the admin admission rule.
 #[cfg(unix)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UnixClientIdentity {
     pub uid: u32,
+    /// Primary GID. Supplementary groups are consulted by
+    /// `fetch_unix_identity` for the admin check but not stored.
     pub gid: u32,
-    pub pid: u32,
+    /// Audit-only — the peer may have `exec`'d since accept. `Option`
+    /// because tokio leaves room for platforms that lack pid in
+    /// peercred; on Linux + macOS it's always `Some`.
+    pub pid: Option<i32>,
+    /// Best-effort NSS lookup; `None` if the uid isn't in NSS.
+    pub user_name: Option<String>,
+    pub is_admin: bool,
 }
 
-/// Failure modes for the Windows identity fetch. Each maps to a
-/// specific reason the kernel refused us a usable token — all are
-/// treated as "refuse the connection" by the accept loop.
-#[cfg(target_os = "windows")]
+/// Failure modes for the identity fetch. Each maps to a specific
+/// reason the kernel / userspace refused us a usable identity —
+/// all are treated as "refuse the connection" by the accept loop.
 #[derive(Debug, thiserror::Error)]
 pub enum IdentityError {
+    #[cfg(target_os = "windows")]
     #[error("ImpersonateNamedPipeClient failed: {0}")]
     Impersonate(std::io::Error),
+    #[cfg(target_os = "windows")]
     #[error("OpenThreadToken (post-impersonation) failed: {0}")]
     OpenThreadToken(std::io::Error),
+    #[cfg(target_os = "windows")]
     #[error("GetTokenInformation({class}) failed: {source}")]
     TokenInfo {
         class: &'static str,
         #[source]
         source: std::io::Error,
     },
+    #[cfg(target_os = "windows")]
     #[error("CheckTokenMembership failed: {0}")]
     CheckMembership(std::io::Error),
+    #[cfg(target_os = "windows")]
     #[error("ConvertSidToStringSidW failed: {0}")]
     SidToString(std::io::Error),
+    #[cfg(target_os = "windows")]
     #[error("CreateWellKnownSid(BUILTIN\\Administrators) failed: {0}")]
     WellKnownSid(std::io::Error),
+    /// `SO_PEERCRED` / `LOCAL_PEERCRED` not available — typically
+    /// only happens if the file descriptor isn't actually a unix
+    /// socket (shouldn't be reachable in practice from the accept
+    /// loop, but kept as a failure mode rather than a panic).
+    #[cfg(unix)]
+    #[error("peer_cred() failed: {0}")]
+    PeerCred(std::io::Error),
 }
 
 /// Fetch the caller's identity from a connected named-pipe handle.
@@ -483,6 +512,61 @@ fn check_membership(
     Ok(is_member != 0)
 }
 
+/// Fetch the caller's identity from a connected unix-socket stream.
+/// Synchronous: one `getsockopt` (peer creds) plus a libc NSS
+/// roundtrip for user name and supplementary groups. NSS can touch
+/// sssd / LDAP on a domain-joined host, so this can block; call
+/// it once per accepted connection (the accept loop is the natural
+/// caller) and stash the result, rather than re-running per RPC.
+///
+/// `socket_group_gid` is the GID we treat as "admin" for the inner
+/// gate. Pass the same group whose membership the socket file ACL
+/// already enforces (the daemon resolves this from
+/// `AZVPND_GROUP` at startup) — the inner gate then parallels the
+/// outer one and survives a future ACL loosening.
+///
+/// On success, returns a fully-populated [`UnixClientIdentity`]
+/// with `is_admin` precomputed. NSS failures degrade gracefully:
+/// `user_name` becomes `None` and supplementary-group lookup is
+/// skipped, but `is_admin` still reflects the uid==0 / primary-gid
+/// signals. Only a failed `peer_cred()` call (which would mean we
+/// were handed something that isn't actually a unix socket) refuses
+/// the connection.
+#[cfg(unix)]
+pub fn fetch_unix_identity(
+    stream: &tokio::net::UnixStream,
+    socket_group_gid: u32,
+) -> Result<UnixClientIdentity, IdentityError> {
+    let cred = stream.peer_cred().map_err(IdentityError::PeerCred)?;
+    let uid = cred.uid();
+    let gid = cred.gid();
+    let pid = cred.pid();
+
+    let user = uzers::get_user_by_uid(uid);
+    let user_name = user
+        .as_ref()
+        .and_then(|u| u.name().to_str().map(str::to_owned));
+
+    // Short-circuit the supplementary-group NSS call when uid==0 or
+    // the primary gid already matches — `User::groups()` on a domain-
+    // joined host can take a slow sssd/LDAP roundtrip, and we don't
+    // need it if the cheaper signals already say admin.
+    let is_admin = uid == 0
+        || gid == socket_group_gid
+        || user
+            .as_ref()
+            .and_then(uzers::User::groups)
+            .is_some_and(|gs| gs.iter().any(|g| g.gid() == socket_group_gid));
+
+    Ok(UnixClientIdentity {
+        uid,
+        gid,
+        pid,
+        user_name,
+        is_admin,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -540,24 +624,53 @@ mod tests {
     }
 
     #[cfg(unix)]
-    #[test]
-    fn unix_root_is_admin() {
-        let id = ClientIdentity::Unix(UnixClientIdentity {
-            uid: 0,
-            gid: 0,
-            pid: 1234,
-        });
-        assert!(id.is_admin());
+    fn unix(uid: u32, gid: u32, is_admin: bool, name: Option<&str>) -> ClientIdentity {
+        ClientIdentity::Unix(UnixClientIdentity {
+            uid,
+            gid,
+            pid: Some(1234),
+            user_name: name.map(str::to_owned),
+            is_admin,
+        })
     }
 
     #[cfg(unix)]
     #[test]
-    fn unix_non_root_is_not_admin() {
+    fn unix_admin_flag_drives_is_admin() {
+        // The enum-level `is_admin()` just reflects the precomputed
+        // field — caller-side membership math happens inside
+        // `fetch_unix_identity`.
+        assert!(unix(0, 0, true, Some("root")).is_admin());
+        assert!(!unix(1000, 1000, false, Some("alice")).is_admin());
+        // Non-root caller flagged admin by the fetcher (e.g. primary
+        // gid matched the socket group) still reads as admin here.
+        assert!(unix(1000, 80, true, Some("alice")).is_admin());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn unix_display_includes_username_and_admin() {
+        let s = unix(1000, 80, true, Some("alice")).display();
+        assert!(s.contains("alice"));
+        assert!(s.contains("uid=1000"));
+        assert!(s.contains("gid=80"));
+        assert!(s.contains("pid=1234"));
+        assert!(s.contains("admin=true"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn unix_display_handles_missing_name_and_pid() {
         let id = ClientIdentity::Unix(UnixClientIdentity {
             uid: 1000,
             gid: 1000,
-            pid: 5678,
+            pid: None,
+            user_name: None,
+            is_admin: false,
         });
-        assert!(!id.is_admin());
+        let s = id.display();
+        assert!(s.starts_with("uid="));
+        assert!(s.contains("pid=?"));
+        assert!(s.contains("admin=false"));
     }
 }

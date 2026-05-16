@@ -78,6 +78,14 @@ impl Default for TargetState {
 }
 
 impl TargetState {
+    /// `true` iff the user's last expressed intent is to be connected.
+    /// Used by status / info commands to render "daemon should be
+    /// trying" when the live session is absent.
+    #[must_use]
+    pub fn is_connected_intent(&self) -> bool {
+        matches!(self.state, State::Connected)
+    }
+
     /// Load from disk. Missing, unreadable, unparseable, or
     /// future-versioned files all return [`TargetState::default`]
     /// (state `Disconnected`). The reasoning: we're a work-VPN —
@@ -152,18 +160,7 @@ fn tmp_path(path: &Path) -> PathBuf {
 /// only writer) and world-readable for status display.
 #[must_use]
 pub fn default_path() -> PathBuf {
-    #[cfg(target_os = "macos")]
-    {
-        PathBuf::from("/Library/Application Support/com.azvpn/target.json")
-    }
-    #[cfg(target_os = "linux")]
-    {
-        PathBuf::from("/var/lib/azvpn/target.json")
-    }
-    #[cfg(target_os = "windows")]
-    {
-        PathBuf::from(r"C:\ProgramData\azvpn\target.json")
-    }
+    azvpn_auth::paths::system_state_dir().join("target.json")
 }
 
 #[cfg(test)]

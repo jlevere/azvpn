@@ -14,6 +14,15 @@
 //!   etc. — those stay in the daemon),
 //! - future GUI / mobile clients only need to depend on `azvpn-ipc`.
 
+//! Wire types live here. AAD tokens cross the IPC channel as plain
+//! `String` rather than `SecretString` because `secrecy` 0.10
+//! deliberately omits `Serialize` (the "you can't accidentally
+//! serialize a secret" guarantee). Tokens get wrapped back into
+//! `SecretString` at the daemon and CLI ends of the wire, just outside
+//! the IPC handler. The wire itself isn't a `Debug`-leak surface
+//! (tarpc / bincode don't print payload bytes); the type discipline
+//! lives in the in-memory layers above this one.
+
 use std::net::{IpAddr, SocketAddr};
 
 pub use azvpn_openvpn::{AddrFamily, Ifconfig, PushOptions, PushedRoute};
@@ -240,11 +249,13 @@ pub enum IpcError {
     #[error("io: {0}")]
     Io(String),
     /// RPC requires admin context; caller doesn't have it. The
-    /// daemon checks the IPC peer's identity (Windows: SID +
-    /// `BUILTIN\Administrators` membership after UAC linked-token
-    /// resolution; Unix: TBD) at accept time and gates mutating
-    /// RPCs (`up`, `down`) behind admin status. Caller string is
-    /// for the user-facing error; it never carries secret material.
+    /// daemon checks the IPC peer's identity at accept time
+    /// (Windows: SID + `BUILTIN\Administrators` membership after
+    /// UAC linked-token resolution; Unix: `SO_PEERCRED` /
+    /// `LOCAL_PEERCRED` plus an NSS check against the daemon's
+    /// configured socket group) and gates mutating RPCs (`up`,
+    /// `down`) behind admin status. Caller string is for the
+    /// user-facing error; it never carries secret material.
     #[error("operation `{operation}` requires admin; caller={caller}")]
     PermissionDenied { operation: String, caller: String },
     #[error("{0}")]

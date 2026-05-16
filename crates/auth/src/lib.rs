@@ -20,6 +20,7 @@ mod cache_shared;
 pub mod cloud;
 pub mod daemon_cache;
 mod device_code;
+pub mod paths;
 mod refresh;
 mod token_cache;
 
@@ -27,6 +28,7 @@ use std::time::{Duration, SystemTime};
 
 use oauth2::basic::BasicTokenResponse;
 use oauth2::{DeviceAuthorizationUrl, TokenResponse, TokenUrl};
+pub use secrecy::{ExposeSecret, SecretString};
 
 /// Microsoft Entra ID's public `OAuth2` authority. Sovereign clouds
 /// (`GCC-H`, `USGov`, China 21Vianet) have their own — we only target
@@ -72,9 +74,11 @@ impl From<&BasicTokenResponse> for Token {
         // conservative default than panic.
         let expires_in = t.expires_in().unwrap_or_else(|| Duration::from_hours(1));
         Self {
-            access_token: t.access_token().secret().to_owned(),
+            access_token: SecretString::from(t.access_token().secret().to_owned()),
             expires_at: SystemTime::now() + expires_in,
-            refresh_token: t.refresh_token().map(|r| r.secret().to_owned()),
+            refresh_token: t
+                .refresh_token()
+                .map(|r| SecretString::from(r.secret().to_owned())),
         }
     }
 }
@@ -82,7 +86,7 @@ impl From<&BasicTokenResponse> for Token {
 pub use auth_code::AuthCodeFlow;
 pub use device_code::{DeviceCodeFlow, DeviceCodePrompt};
 pub use refresh::{ARM_RESOURCE, GRAPH_RESOURCE, RefreshGrant};
-pub use token_cache::{CacheKey, TokenCache};
+pub use token_cache::{CacheAttempt, CacheKey, TokenCache};
 
 /// Crate-wide `Result` type.
 pub type Result<T> = std::result::Result<T, Error>;
@@ -155,6 +159,16 @@ impl AadConfig {
     pub fn client_id(&self) -> &str {
         self.application_id.as_deref().unwrap_or(&self.audience)
     }
+
+    /// OAuth scope string for the gateway audience — `<audience>/.default
+    /// offline_access`. Same shape every flow uses (device-code, auth-
+    /// code, refresh-token grant, daemon-side silent refresh), so it
+    /// lives on `AadConfig` rather than being re-formatted at each
+    /// call site.
+    #[must_use]
+    pub fn default_scope(&self) -> String {
+        format!("{}/.default offline_access", self.audience)
+    }
 }
 
 impl From<&azvpn_profile::AadConfig> for AadConfig {
@@ -186,12 +200,16 @@ pub fn aad_cache_key(profile: &azvpn_profile::VpnProfile) -> Option<CacheKey> {
 
 #[derive(Debug, Clone)]
 pub struct Token {
-    pub access_token: String,
+    /// Bearer access token. `SecretString` prevents accidental
+    /// Debug-leak ('[REDACTED]' in formatted output) and zeroes on
+    /// drop; call `.expose_secret()` at the use site (HTTP header,
+    /// openvpn `auth-user-pass` write, etc.) for the raw value.
+    pub access_token: SecretString,
     pub expires_at: SystemTime,
     /// Long-lived refresh token returned when the original scope included
     /// `offline_access`. Used to acquire access tokens for other audiences
     /// (Microsoft Graph, ARM, etc.) without re-prompting the user.
-    pub refresh_token: Option<String>,
+    pub refresh_token: Option<SecretString>,
 }
 
 impl Token {

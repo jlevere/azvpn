@@ -13,6 +13,7 @@
 mod config;
 mod converge;
 mod routes;
+mod rt_refresh;
 mod server;
 #[cfg(unix)]
 mod socket;
@@ -133,8 +134,8 @@ async fn run_daemon_windows(shutdown: CancellationToken) -> ExitCode {
 
     let server = AzvpndServer::new(config.openvpn_binary);
 
-    // F.1 declarative target state — same shape as unix_main.
     tokio::spawn(converge::try_converge(server.clone()));
+    tokio::spawn(rt_refresh::run(shutdown.clone()));
 
     accept_loop_windows(listener, server.clone(), &shutdown).await;
 
@@ -240,8 +241,8 @@ async fn unix_main() -> ExitCode {
     // install set has surprising failure modes. Best-effort.
     azvpn_core::cleanup::run_at_startup(&azvpn_core::cleanup::default_path()).await;
 
-    let listener = match socket::bind(&config) {
-        Ok(l) => l,
+    let (listener, socket_group_gid) = match socket::bind(&config) {
+        Ok(pair) => pair,
         Err(e) => {
             error!(error = %e, "failed to bind socket");
             return ExitCode::from(1);
@@ -262,16 +263,14 @@ async fn unix_main() -> ExitCode {
     // (and not even compiled) outside Linux.
     notify_ready();
 
-    // F.1: declarative target state — if the last `azvpn up` was
-    // non-ephemeral, the on-disk target says `Connected` and we try
-    // to bring the tunnel back up without user interaction. Spawned
-    // (not awaited) so the listener starts accepting RPCs
+    // Spawned (not awaited) so the listener starts accepting RPCs
     // immediately — `azvpn status` works during the converge, and a
-    // concurrent `azvpn up` from the CLI will hit `AlreadyConnected`
+    // concurrent `azvpn up` from the CLI hits `AlreadyConnected`
     // cleanly if converge is already in flight.
     tokio::spawn(converge::try_converge(server.clone()));
+    tokio::spawn(rt_refresh::run(shutdown.clone()));
 
-    accept_loop(listener, server.clone(), &shutdown).await;
+    accept_loop(listener, server.clone(), socket_group_gid, &shutdown).await;
 
     info!("shutting down — tearing down any active connection");
     let cleanup = tokio::time::timeout(SHUTDOWN_GRACE, server.shutdown()).await;
@@ -285,6 +284,7 @@ async fn unix_main() -> ExitCode {
 async fn accept_loop(
     listener: tokio::net::UnixListener,
     server: AzvpndServer,
+    socket_group_gid: u32,
     shutdown: &CancellationToken,
 ) {
     info!("listening for client connections");
@@ -308,18 +308,25 @@ async fn accept_loop(
                     }
                 };
 
-                // Filesystem ACL on the socket (root:admin mode 0660) is
-                // the primary gate; logging peer creds gives us an audit
-                // trail and a hook for finer-grained policy later.
-                match conn.peer_cred() {
-                    Ok(cred) => info!(uid = cred.uid(), gid = cred.gid(), "client accepted"),
-                    Err(e) => warn!(error = %e, "peer_cred unavailable; continuing"),
-                }
+                // Identify before handoff so `require_admin` has a
+                // caller on every RPC. NSS can block the loop here;
+                // the outer file ACL already restricts who connects.
+                let identity =
+                    match azvpn_ipc::identity::fetch_unix_identity(&conn, socket_group_gid) {
+                        Ok(id) => id,
+                        Err(e) => {
+                            warn!(error = %e, "peer identity probe failed; refusing connection");
+                            continue;
+                        }
+                    };
+                let client_identity = azvpn_ipc::ClientIdentity::Unix(identity);
+                info!(client = %client_identity.display(), "client accepted on unix socket");
+                let server_for_conn = server.with_identity(client_identity);
 
                 let framed = codec_builder.new_framed(conn);
                 let transport = serde_transport::new(framed, Bincode::default());
                 let conn_fut = BaseChannel::with_defaults(transport)
-                    .execute(azvpn_ipc::AzvpnApi::serve(server.clone()))
+                    .execute(azvpn_ipc::AzvpnApi::serve(server_for_conn))
                     .for_each(|rpc| async move {
                         tokio::spawn(rpc);
                     });
@@ -414,7 +421,7 @@ fn try_init_windows_file_layer(directives: &str) -> bool {
     use tracing_subscriber::layer::SubscriberExt as _;
     use tracing_subscriber::util::SubscriberInitExt as _;
 
-    let log_dir = std::path::PathBuf::from(r"C:\ProgramData\azvpn\logs");
+    let log_dir = azvpn_auth::paths::system_log_dir();
     if let Err(e) = std::fs::create_dir_all(&log_dir) {
         eprintln!(
             "azvpnd: could not create log dir {} ({e}); falling back to stderr only",

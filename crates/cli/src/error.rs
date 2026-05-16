@@ -27,6 +27,9 @@ pub enum Error {
     /// at the CLI's auth-resolution boundary.
     #[error("profile: {0}")]
     Profile(#[from] azvpn_profile::Error),
+    /// Profile store — registry/import/list/remove failures.
+    #[error("{0}")]
+    ProfileStore(#[from] crate::profile_store::Error),
 
     // ---------- shared infrastructure ----------
     #[error("io: {0}")]
@@ -79,7 +82,7 @@ pub enum Error {
     // ---------- CLI-local failure modes ----------
     /// `whoami` got a cache miss — no entry in the keyring (or 0600
     /// file on platforms without one).
-    #[error("no cached token (run `azvpn connect` once)")]
+    #[error("no cached token — run `azvpn login` to sign in")]
     NoCachedToken,
 
     /// JWT layout / claim extraction failed (used by `whoami`).

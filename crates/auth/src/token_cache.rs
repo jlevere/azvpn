@@ -5,11 +5,20 @@
 //! commands that don't know the active profile (`azvpn me`, `azvpn
 //! whoami`) resolve the right cache.
 //!
-//! The keyring backend uses the platform-native credential store
-//! (Keychain / Credential Manager / Secret Service). On systems without
-//! a keyring backend available (typical for headless servers — Amazon
-//! Linux, Alpine, Docker, CI), we fall back to atomic 0600 files in
-//! the user's XDG state directory.
+//! The keyring backend uses the platform-native credential store on
+//! Linux (Secret Service) and Windows (Credential Manager). On macOS
+//! we deliberately skip the system Keychain and write to mode-0600
+//! files under the user's state directory (`~/Library/Application
+//! Support/azvpn/`). Reason: macOS Keychain ACLs are scoped per-binary
+//! by code signature; an unsigned development binary prompts for a
+//! password per item it touches, and "Always Allow" doesn't survive a
+//! rebuild. The 0600 file gives the same threat-model protection
+//! (another user can't read it; a process running as you already
+//! can). Tailscale and Mullvad take the same posture.
+//!
+//! On systems without a keyring backend available (typical for headless
+//! servers — Amazon Linux, Alpine, Docker, CI), we fall back to the
+//! same 0600 file shape in the user's XDG state directory.
 
 use std::path::PathBuf;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -20,9 +29,7 @@ use serde::{Deserialize, Serialize};
 use tracing::{info, warn};
 
 use crate::cache_shared::{CachedToken, write_atomic_private};
-use crate::{Error, Token};
-
-const SERVICE: &str = "com.jlevere.azvpn";
+use crate::{Error, SecretString, Token};
 
 /// Legacy single-entry account name from before per-profile cache keys
 /// landed. Only touched by the migration path.
@@ -113,45 +120,56 @@ trait KeyStoreBackend: Send + Sync {
     fn kind(&self) -> &'static str;
 }
 
-struct KeyringBackend;
+#[cfg(not(target_os = "macos"))]
+mod keyring_backend {
+    use super::{BackendError, KeyStoreBackend, LEGACY_ACCOUNT};
 
-impl KeyringBackend {
-    /// `keyring::Entry::new` only constructs an in-memory handle, so
-    /// a getter call is the only way to confirm the backend is alive;
-    /// `NoEntry` is the happy path here (backend reachable, no value).
-    fn probe() -> Result<Self, keyring::Error> {
-        let entry = keyring::Entry::new(SERVICE, LEGACY_ACCOUNT)?;
-        match entry.get_password() {
-            Ok(_) | Err(keyring::Error::NoEntry) => Ok(Self),
-            Err(e) => Err(e),
+    use crate::paths::BUNDLE_ID as SERVICE;
+
+    pub(super) struct KeyringBackend;
+
+    impl KeyringBackend {
+        /// `keyring::Entry::new` only constructs an in-memory handle,
+        /// so a getter call is the only way to confirm the backend is
+        /// alive; `NoEntry` is the happy path here (backend reachable,
+        /// no value).
+        pub(super) fn probe() -> Result<Self, keyring::Error> {
+            let entry = keyring::Entry::new(SERVICE, LEGACY_ACCOUNT)?;
+            match entry.get_password() {
+                Ok(_) | Err(keyring::Error::NoEntry) => Ok(Self),
+                Err(e) => Err(e),
+            }
+        }
+    }
+
+    impl KeyStoreBackend for KeyringBackend {
+        fn load(&self, slot: &str) -> Option<String> {
+            let entry = keyring::Entry::new(SERVICE, slot).ok()?;
+            entry.get_password().ok()
+        }
+
+        fn save(&self, slot: &str, data: &str) -> Result<(), BackendError> {
+            let entry = keyring::Entry::new(SERVICE, slot)?;
+            entry.set_password(data)?;
+            Ok(())
+        }
+
+        fn remove(&self, slot: &str) -> Result<(), BackendError> {
+            let entry = keyring::Entry::new(SERVICE, slot)?;
+            match entry.delete_credential() {
+                Ok(()) | Err(keyring::Error::NoEntry) => Ok(()),
+                Err(e) => Err(e.into()),
+            }
+        }
+
+        fn kind(&self) -> &'static str {
+            "keyring"
         }
     }
 }
 
-impl KeyStoreBackend for KeyringBackend {
-    fn load(&self, slot: &str) -> Option<String> {
-        let entry = keyring::Entry::new(SERVICE, slot).ok()?;
-        entry.get_password().ok()
-    }
-
-    fn save(&self, slot: &str, data: &str) -> Result<(), BackendError> {
-        let entry = keyring::Entry::new(SERVICE, slot)?;
-        entry.set_password(data)?;
-        Ok(())
-    }
-
-    fn remove(&self, slot: &str) -> Result<(), BackendError> {
-        let entry = keyring::Entry::new(SERVICE, slot)?;
-        match entry.delete_credential() {
-            Ok(()) | Err(keyring::Error::NoEntry) => Ok(()),
-            Err(e) => Err(e.into()),
-        }
-    }
-
-    fn kind(&self) -> &'static str {
-        "keyring"
-    }
-}
+#[cfg(not(target_os = "macos"))]
+use keyring_backend::KeyringBackend;
 
 struct FileBackend {
     dir: PathBuf,
@@ -192,6 +210,21 @@ impl KeyStoreBackend for FileBackend {
     }
 }
 
+/// macOS Keychain prompts per-item-per-unsigned-binary; see the
+/// module doc. Skip the probe (which itself would prompt) and go
+/// straight to the file backend.
+#[cfg(target_os = "macos")]
+fn pick_backend() -> Box<dyn KeyStoreBackend> {
+    let file = FileBackend::at_default_dir();
+    info!(
+        backend = "file",
+        dir = %file.dir.display(),
+        "token cache backend ready"
+    );
+    Box::new(file)
+}
+
+#[cfg(not(target_os = "macos"))]
 fn pick_backend() -> Box<dyn KeyStoreBackend> {
     match KeyringBackend::probe() {
         Ok(b) => {
@@ -215,6 +248,40 @@ pub struct TokenCache {
     backend: Box<dyn KeyStoreBackend>,
     key: CacheKey,
     slot: String,
+}
+
+/// Result of a single cache read.
+#[derive(Debug)]
+pub enum CacheAttempt {
+    /// AT is still within the 1-minute skew margin; use it directly.
+    Fresh(Token),
+    /// AT expired (or absent), but a refresh token is on file; the
+    /// caller should run a silent refresh-token grant.
+    RefreshOnly(SecretString),
+    /// Nothing usable on disk — caller falls through to interactive.
+    Empty,
+}
+
+impl CacheAttempt {
+    /// `Some(token)` only on the `Fresh` arm. Convenience for the
+    /// "I just want the cached AT" caller.
+    #[must_use]
+    pub fn fresh(self) -> Option<Token> {
+        match self {
+            Self::Fresh(t) => Some(t),
+            _ => None,
+        }
+    }
+
+    /// `Some(rt)` on either `Fresh` (with RT field set) or `RefreshOnly`.
+    #[must_use]
+    pub fn refresh_token(self) -> Option<SecretString> {
+        match self {
+            Self::Fresh(t) => t.refresh_token,
+            Self::RefreshOnly(rt) => Some(rt),
+            Self::Empty => None,
+        }
+    }
 }
 
 impl TokenCache {
@@ -273,32 +340,46 @@ impl TokenCache {
     }
 
     pub fn load(&self) -> Option<Token> {
-        let cached = self.load_cached()?;
-        let expires_at = UNIX_EPOCH + Duration::from_secs(cached.expires_at_epoch);
-        if expires_at <= SystemTime::now() + Duration::from_mins(1) {
-            info!("cached token expired");
-            return None;
-        }
-        info!(
-            has_refresh = cached.refresh_token.is_some(),
-            "using cached token"
-        );
-        Some(cached.into())
+        self.load_attempt().fresh()
     }
 
     /// Read just the refresh token without expiry-checking the access
     /// token. Refresh tokens have a much longer lifetime than access
     /// tokens — they outlive the access token by design.
-    pub fn load_refresh_token(&self) -> Option<String> {
-        self.load_cached()?.refresh_token
+    pub fn load_refresh_token(&self) -> Option<SecretString> {
+        self.load_attempt().refresh_token()
+    }
+
+    /// Single backend read that returns both the access-token-if-fresh
+    /// branch and the refresh-token branch. Callers like `auth_flow`
+    /// that try fresh-then-refresh otherwise pay for two backend reads
+    /// (two keychain round-trips on macOS).
+    pub fn load_attempt(&self) -> CacheAttempt {
+        let Some(cached) = self.load_cached() else {
+            return CacheAttempt::Empty;
+        };
+        let expires_at = UNIX_EPOCH + Duration::from_secs(cached.expires_at_epoch);
+        if expires_at > SystemTime::now() + Duration::from_mins(1) {
+            info!(
+                has_refresh = cached.refresh_token.is_some(),
+                "using cached token"
+            );
+            return CacheAttempt::Fresh(cached.into());
+        }
+        info!("cached token expired");
+        cached
+            .refresh_token
+            .map_or(CacheAttempt::Empty, |rt| {
+                CacheAttempt::RefreshOnly(SecretString::from(rt))
+            })
     }
 
     /// Read the raw access token without expiry filtering. Callers that
     /// inspect JWT claims (tid, appid, upn) want the token even when
     /// expired — the claims are stable across refreshes and a fresh
     /// access token isn't needed for static introspection.
-    pub fn load_access_token(&self) -> Option<String> {
-        Some(self.load_cached()?.access_token)
+    pub fn load_access_token(&self) -> Option<SecretString> {
+        Some(SecretString::from(self.load_cached()?.access_token))
     }
 
     fn load_cached(&self) -> Option<CachedToken> {
@@ -336,7 +417,7 @@ impl TokenCache {
     #[must_use]
     pub fn save_refresh_result(&self, mut token: Token, previous_rt: &str) -> Token {
         if token.refresh_token.is_none() {
-            token.refresh_token = Some(previous_rt.to_owned());
+            token.refresh_token = Some(SecretString::from(previous_rt.to_owned()));
         }
         self.save(&token);
         token
@@ -441,22 +522,16 @@ fn read_legacy_file() -> Option<String> {
     std::fs::read_to_string(&path).ok()
 }
 
-/// `state_dir()` honors `XDG_STATE_HOME` on Linux; macOS / Windows fall
-/// back to `data_local_dir()`.
-///
-/// # Panics
-/// If the platform exposes neither — not the case on macOS, Linux, or
-/// Windows.
+/// Per-platform user-scope state directory; see
+/// [`crate::paths::user_state_dir`] for the shape.
 fn default_state_dir() -> PathBuf {
-    dirs::state_dir()
-        .or_else(dirs::data_local_dir)
-        .expect("platform provides a per-user state/data dir")
-        .join("azvpn")
+    crate::paths::user_state_dir()
 }
 
 #[cfg(all(test, unix))]
 mod tests {
     use super::*;
+    use crate::ExposeSecret as _;
     use std::os::unix::fs::PermissionsExt as _;
 
     fn test_key() -> CacheKey {
@@ -466,37 +541,43 @@ mod tests {
         )
     }
 
+    /// `&SecretString -> &str` shorthand for asserting on token values.
+    fn expose(s: &SecretString) -> &str {
+        s.expose_secret()
+    }
+
+    fn tok(at: &str, rt: Option<&str>) -> Token {
+        Token {
+            access_token: SecretString::from(at.to_owned()),
+            expires_at: SystemTime::now() + Duration::from_hours(1),
+            refresh_token: rt.map(|s| SecretString::from(s.to_owned())),
+        }
+    }
+
     #[test]
     fn file_backend_round_trip() {
         let dir = tempfile::tempdir().unwrap();
         let cache = TokenCache::with_file_at(dir.path(), test_key());
-
-        let token = Token {
-            access_token: "at".into(),
-            expires_at: SystemTime::now() + Duration::from_hours(1),
-            refresh_token: Some("rt".into()),
-        };
-        cache.save(&token);
+        cache.save(&tok("at", Some("rt")));
 
         let loaded = cache.load().unwrap();
-        assert_eq!(loaded.access_token, "at");
-        assert_eq!(loaded.refresh_token.as_deref(), Some("rt"));
+        assert_eq!(expose(&loaded.access_token), "at");
+        assert_eq!(loaded.refresh_token.as_ref().map(expose), Some("rt"));
     }
 
     #[test]
     fn file_backend_returns_none_for_expired_token() {
         let dir = tempfile::tempdir().unwrap();
         let cache = TokenCache::with_file_at(dir.path(), test_key());
-
-        let token = Token {
-            access_token: "at".into(),
-            expires_at: SystemTime::now() - Duration::from_hours(1),
-            refresh_token: Some("rt".into()),
-        };
+        let mut token = tok("at", Some("rt"));
+        token.expires_at = SystemTime::now() - Duration::from_hours(1);
         cache.save(&token);
         assert!(cache.load().is_none());
         // Refresh token survives expiry by design.
-        assert_eq!(cache.load_refresh_token().as_deref(), Some("rt"));
+        assert_eq!(
+            cache.load_refresh_token().as_ref().map(expose),
+            Some("rt")
+        );
     }
 
     #[test]
@@ -504,11 +585,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let key = test_key();
         let cache = TokenCache::with_file_at(dir.path(), key.clone());
-        cache.save(&Token {
-            access_token: "at".into(),
-            expires_at: SystemTime::now() + Duration::from_hours(1),
-            refresh_token: Some("rt".into()),
-        });
+        cache.save(&tok("at", Some("rt")));
 
         let backend = FileBackend {
             dir: dir.path().to_owned(),
@@ -525,19 +602,11 @@ mod tests {
         let cache_a = TokenCache::with_file_at(dir.path(), a.clone());
         let cache_b = TokenCache::with_file_at(dir.path(), b.clone());
 
-        cache_a.save(&Token {
-            access_token: "at-A".into(),
-            expires_at: SystemTime::now() + Duration::from_hours(1),
-            refresh_token: Some("rt-A".into()),
-        });
-        cache_b.save(&Token {
-            access_token: "at-B".into(),
-            expires_at: SystemTime::now() + Duration::from_hours(1),
-            refresh_token: Some("rt-B".into()),
-        });
+        cache_a.save(&tok("at-A", Some("rt-A")));
+        cache_b.save(&tok("at-B", Some("rt-B")));
 
-        assert_eq!(cache_a.load().unwrap().access_token, "at-A");
-        assert_eq!(cache_b.load().unwrap().access_token, "at-B");
+        assert_eq!(expose(&cache_a.load().unwrap().access_token), "at-A");
+        assert_eq!(expose(&cache_b.load().unwrap().access_token), "at-B");
         // Last save wins for the pointer.
         let backend = FileBackend {
             dir: dir.path().to_owned(),
@@ -549,35 +618,23 @@ mod tests {
     fn save_refresh_result_preserves_rt_when_aad_does_not_rotate() {
         let dir = tempfile::tempdir().unwrap();
         let cache = TokenCache::with_file_at(dir.path(), test_key());
-
-        let refreshed = Token {
-            access_token: "new-at".into(),
-            expires_at: SystemTime::now() + Duration::from_hours(1),
-            refresh_token: None,
-        };
-        let saved = cache.save_refresh_result(refreshed, "original-rt");
-        assert_eq!(saved.refresh_token.as_deref(), Some("original-rt"));
+        let saved = cache.save_refresh_result(tok("new-at", None), "original-rt");
+        assert_eq!(saved.refresh_token.as_ref().map(expose), Some("original-rt"));
 
         let loaded = cache.load().unwrap();
-        assert_eq!(loaded.access_token, "new-at");
-        assert_eq!(loaded.refresh_token.as_deref(), Some("original-rt"));
+        assert_eq!(expose(&loaded.access_token), "new-at");
+        assert_eq!(loaded.refresh_token.as_ref().map(expose), Some("original-rt"));
     }
 
     #[test]
     fn save_refresh_result_keeps_rotated_rt() {
         let dir = tempfile::tempdir().unwrap();
         let cache = TokenCache::with_file_at(dir.path(), test_key());
-
-        let refreshed = Token {
-            access_token: "new-at".into(),
-            expires_at: SystemTime::now() + Duration::from_hours(1),
-            refresh_token: Some("rotated-rt".into()),
-        };
-        let saved = cache.save_refresh_result(refreshed, "original-rt");
-        assert_eq!(saved.refresh_token.as_deref(), Some("rotated-rt"));
+        let saved = cache.save_refresh_result(tok("new-at", Some("rotated-rt")), "original-rt");
+        assert_eq!(saved.refresh_token.as_ref().map(expose), Some("rotated-rt"));
 
         let loaded = cache.load().unwrap();
-        assert_eq!(loaded.refresh_token.as_deref(), Some("rotated-rt"));
+        assert_eq!(loaded.refresh_token.as_ref().map(expose), Some("rotated-rt"));
     }
 
     /// Forge a JWT-ish access token containing `tid` and `aud` so the

@@ -94,7 +94,7 @@ impl AuthCodeFlow {
             "loopback ready for OAuth callback"
         );
 
-        let scope = format!("{}/.default offline_access", self.config.audience);
+        let scope = self.config.default_scope();
         let (pkce_challenge, pkce_verifier) = PkceCodeChallenge::new_random_sha256();
 
         let mut authorize = self

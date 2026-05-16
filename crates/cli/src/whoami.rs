@@ -4,7 +4,7 @@
 
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use azvpn_auth::TokenCache;
+use azvpn_auth::{ExposeSecret, TokenCache};
 use base64::Engine as _;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use jiff::Timestamp;
@@ -45,7 +45,7 @@ fn load_claims() -> Result<Claims> {
     let access = TokenCache::last_used()
         .and_then(|c| c.load_access_token())
         .ok_or(Error::NoCachedToken)?;
-    decode_claims(&access)
+    decode_claims(access.expose_secret())
 }
 
 fn decode_claims(jwt: &str) -> Result<Claims> {

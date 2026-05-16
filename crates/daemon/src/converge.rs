@@ -15,7 +15,7 @@
 //! F.3 will eventually add a longer-interval retry loop so the
 //! daemon keeps trying instead of giving up after one attempt.
 
-use azvpn_auth::{AadConfig, RefreshGrant, aad_cache_key, daemon_cache::DaemonTokenCache};
+use azvpn_auth::{SecretString, aad_cache_key, daemon_cache::DaemonTokenCache};
 use azvpn_core::target::{self, State, TargetState};
 use azvpn_profile::AuthType;
 use tracing::{info, warn};
@@ -79,34 +79,16 @@ pub async fn try_converge(server: AzvpndServer) {
 /// keyring cache, which the daemon can't read.
 async fn acquire_access_token(
     profile: &azvpn_profile::VpnProfile,
-) -> Result<Option<String>, String> {
-    match profile.clientauth.auth_type {
-        AuthType::Certificate | AuthType::UsernamePass | AuthType::Radius => Ok(None),
-        AuthType::Aad => {
-            let key = aad_cache_key(profile)
-                .ok_or_else(|| "AAD profile missing <aad> config block".to_owned())?;
-            let cache = DaemonTokenCache::for_profile(&key);
-            let rt = cache
-                .load_refresh_token()
-                .ok_or_else(|| "no stored refresh token in daemon cache".to_owned())?;
-
-            let aad_profile = profile
-                .clientauth
-                .aad
-                .as_ref()
-                .ok_or_else(|| "AAD profile missing <aad> config block".to_owned())?;
-            let aad_config = AadConfig::from(aad_profile);
-
-            let grant = RefreshGrant::new(&aad_config.tenant_id, aad_config.client_id())
-                .map_err(|e| format!("refresh-grant init: {e}"))?;
-            let scope = format!("{}/.default offline_access", aad_config.audience);
-
-            let token = grant
-                .exchange(&rt, &scope)
-                .await
-                .map_err(|e| format!("RT exchange failed: {e}"))?;
-            let refreshed = cache.save_refresh_result(token, &rt);
-            Ok(Some(refreshed.access_token))
-        }
+) -> Result<Option<SecretString>, String> {
+    if !matches!(profile.clientauth.auth_type, AuthType::Aad) {
+        return Ok(None);
     }
+    let key = aad_cache_key(profile)
+        .ok_or_else(|| "AAD profile missing <aad> config block".to_owned())?;
+    let cache = DaemonTokenCache::for_profile(&key);
+    let token = cache
+        .silent_refresh(profile)
+        .await
+        .map_err(|e| e.to_string())?;
+    Ok(Some(token.access_token))
 }
