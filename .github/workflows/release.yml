@@ -121,6 +121,13 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           key: build-msi-ubuntu-latest
+      # xtask transitively depends on `azvpn-core` → `azvpn-auth` →
+      # `keyring`'s sync-secret-service feature → `libdbus-sys`, which
+      # needs `libdbus-1-dev` + pkg-config to link on Linux. The macOS
+      # and Windows keyring backends are pure-FFI to system frameworks
+      # so this only bites Linux runners that compile xtask.
+      - name: Install Linux system deps
+        run: sudo apt-get update && sudo apt-get install -y libdbus-1-dev pkg-config
       - uses: DeterminateSystems/nix-installer-action@main
       - uses: DeterminateSystems/magic-nix-cache-action@main
       # osslsigncode only needs to be present when we're actually
@@ -320,6 +327,10 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           key: publish-formula-ubuntu
+      # Same Linux libdbus dep as build-msi: xtask transitively pulls
+      # in libdbus-sys via azvpn-core → azvpn-auth → keyring.
+      - name: Install Linux system deps
+        run: sudo apt-get update && sudo apt-get install -y libdbus-1-dev pkg-config
       # Mint a short-lived installation access token scoped to just
       # the tap repo. `owner` + `repositories` narrow the token below
       # the App's full installation reach — defence in depth.
