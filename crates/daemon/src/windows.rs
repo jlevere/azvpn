@@ -92,7 +92,8 @@ pub fn run_as_service() -> std::io::Result<()> {
 #[allow(unsafe_code)]
 pub fn is_running_as_admin() -> bool {
     use windows_sys::Win32::Security::{
-        CheckTokenMembership, CreateWellKnownSid, SECURITY_MAX_SID_SIZE, WinBuiltinAdministratorsSid,
+        CheckTokenMembership, CreateWellKnownSid, SECURITY_MAX_SID_SIZE,
+        WinBuiltinAdministratorsSid,
     };
     let mut sid = [0u8; SECURITY_MAX_SID_SIZE as usize];
     let mut size: u32 = SECURITY_MAX_SID_SIZE;
