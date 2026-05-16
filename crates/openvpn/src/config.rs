@@ -36,6 +36,22 @@ fn hex_lower(bytes: &[u8]) -> String {
     out
 }
 
+/// openvpn-friendly path rendering. On Windows the config parser
+/// treats single backslashes inside an unquoted value as shell
+/// escape sequences (`\n`, `\t`, ...), rejecting any path like
+/// `C:\WINDOWS\SystemTemp\.tmpXXX` with a "Bad backslash usage"
+/// error. openvpn 2.x accepts forward slashes interchangeably on
+/// Windows, so we swap. On Unix this is a no-op — POSIX paths
+/// don't contain backslashes.
+fn normalize_path(path: &Path) -> String {
+    let s = path.display().to_string();
+    if cfg!(target_os = "windows") {
+        s.replace('\\', "/")
+    } else {
+        s
+    }
+}
+
 // DigiCert Global Root G2 — the CA used by Azure VPN P2S gateways.
 const DIGICERT_GLOBAL_ROOT_G2: &str = "\
 -----BEGIN CERTIFICATE-----
@@ -144,9 +160,10 @@ impl<'a> ConfigBuilder<'a> {
         // driver missing, TLS chain rejection — is lost. Tell
         // openvpn to write its own log to a file we own. Same
         // path on Unix would conflict with journald / launchd's
-        // capture, so this is Windows-only.
+        // capture, so this is Windows-only. Forward slashes per
+        // the path-quoting note on auth-user-pass below.
         #[cfg(target_os = "windows")]
-        writeln!(config, "log \"C:\\\\ProgramData\\\\azvpn\\\\logs\\\\openvpn.log\"").unwrap();
+        writeln!(config, "log C:/ProgramData/azvpn/logs/openvpn.log").unwrap();
         writeln!(config).unwrap();
 
         writeln!(
@@ -158,7 +175,14 @@ impl<'a> ConfigBuilder<'a> {
         .unwrap();
         writeln!(config, "management-hold").unwrap();
         if let Some(path) = self.auth_user_pass_file {
-            writeln!(config, "auth-user-pass {}", path.display()).unwrap();
+            // openvpn's config parser treats single backslashes as
+            // shell-escapes (`\n`, `\t`, etc.). On Windows the
+            // tempfile path is `C:\WINDOWS\SystemTemp\...` which
+            // trips that parse and rejects the whole config with
+            // "Bad backslash ('\') usage". openvpn 2.x accepts
+            // forward slashes interchangeably with backslashes on
+            // Windows, so we normalize the path before emitting.
+            writeln!(config, "auth-user-pass {}", normalize_path(path)).unwrap();
         }
         writeln!(config).unwrap();
 
