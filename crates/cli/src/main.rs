@@ -9,7 +9,7 @@ mod down;
 mod error;
 mod groups;
 mod info;
-#[cfg(any(target_os = "macos", target_os = "linux"))]
+#[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
 mod install_daemon;
 mod logging;
 mod manager;
