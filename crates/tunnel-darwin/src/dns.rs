@@ -46,20 +46,12 @@ impl Default for DnsGuard {
 }
 
 impl DnsGuard {
-    /// Construct an inert guard. Call [`apply`](Self::apply) (or the
-    /// `DnsManager` trait method) to install settings.
+    /// Construct an inert guard. Call [`update`](Self::update) (or the
+    /// `DnsManager::apply` trait method, which forwards to `update`)
+    /// to install settings.
     #[must_use]
     pub const fn new() -> Self {
         Self { store: None }
-    }
-
-    /// Construct *and* install — kept as a convenience for tests; the
-    /// canonical flow is `new()` + `apply()` through the `DnsManager`
-    /// trait.
-    pub fn install(suffixes: &[&str], dns_servers: &[IpAddr]) -> Result<Self, Error> {
-        let mut guard = Self::new();
-        guard.update(suffixes, dns_servers)?;
-        Ok(guard)
     }
 
     /// Overwrite the live `SCDynamicStore` entry to match the given suffixes
@@ -143,17 +135,16 @@ pub fn cleanup_orphan_dns() -> bool {
 
 fn write_dns_dict(
     store: &SCDynamicStore,
-    domains: &[String],
+    domains: &[CFString],
     dns_servers: &[IpAddr],
 ) -> Result<(), Error> {
     let addrs: Vec<CFString> = dns_servers
         .iter()
         .map(|ip| CFString::new(&ip.to_string()))
         .collect();
-    let domain_strs: Vec<CFString> = domains.iter().map(|s| CFString::new(s)).collect();
 
     let addrs_array = CFArray::from_CFTypes(&addrs);
-    let domains_array = CFArray::from_CFTypes(&domain_strs);
+    let domains_array = CFArray::from_CFTypes(domains);
     let no_search = CFNumber::from(1i32);
 
     let dict: CFDictionary<CFString, CFType> = CFDictionary::from_CFType_pairs(&[
@@ -180,11 +171,17 @@ fn write_dns_dict(
     Ok(())
 }
 
-fn prepare_match_domains(suffixes: &[&str]) -> Vec<String> {
+/// Normalize profile-supplied suffixes into Core Foundation strings
+/// ready to hand to `SCDynamicStore`. Strips leading dots
+/// (`.corp.example.com` → `corp.example.com`) and drops anything
+/// that's empty after the strip. One pass — no intermediate Vec of
+/// owned `String`s.
+fn prepare_match_domains(suffixes: &[&str]) -> Vec<CFString> {
     suffixes
         .iter()
-        .map(|s| s.trim_start_matches('.').to_owned())
+        .map(|s| s.trim_start_matches('.'))
         .filter(|s| !s.is_empty())
+        .map(CFString::new)
         .collect()
 }
 
@@ -192,27 +189,40 @@ fn prepare_match_domains(suffixes: &[&str]) -> Vec<String> {
 mod tests {
     use super::*;
 
+    fn domains_as_strings(suffixes: &[&str]) -> Vec<String> {
+        prepare_match_domains(suffixes)
+            .iter()
+            .map(ToString::to_string)
+            .collect()
+    }
+
     #[test]
     fn prepare_match_domains_strips_leading_dots() {
-        let out = prepare_match_domains(&[".example.com", "foo.com", "..bar.net"]);
-        assert_eq!(out, vec!["example.com", "foo.com", "bar.net"]);
+        assert_eq!(
+            domains_as_strings(&[".example.com", "foo.com", "..bar.net"]),
+            vec!["example.com", "foo.com", "bar.net"],
+        );
     }
 
     #[test]
     fn prepare_match_domains_drops_empty_after_strip() {
-        let out = prepare_match_domains(&[".", ".example.com", "", "..."]);
-        assert_eq!(out, vec!["example.com"]);
+        assert_eq!(
+            domains_as_strings(&[".", ".example.com", "", "..."]),
+            vec!["example.com"],
+        );
     }
 
     #[test]
-    fn empty_inputs_produce_inert_guard() {
-        let guard = DnsGuard::install(&[], &[]).unwrap();
+    fn empty_inputs_leave_guard_inert() {
+        let mut guard = DnsGuard::new();
+        guard.update(&[], &[]).unwrap();
         assert!(guard.store.is_none());
     }
 
     #[test]
-    fn missing_servers_produce_inert_guard() {
-        let guard = DnsGuard::install(&[".example.com"], &[]).unwrap();
+    fn missing_servers_leave_guard_inert() {
+        let mut guard = DnsGuard::new();
+        guard.update(&[".example.com"], &[]).unwrap();
         assert!(guard.store.is_none());
     }
 }
