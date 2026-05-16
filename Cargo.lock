@@ -259,7 +259,7 @@ dependencies = [
  "hickory-resolver",
  "humansize",
  "humantime",
- "if-addrs 0.13.4",
+ "if-addrs",
  "jiff",
  "open",
  "reqwest",
@@ -404,7 +404,7 @@ dependencies = [
 name = "azvpn-tunnel-linux"
 version = "0.1.0"
 dependencies = [
- "if-addrs 0.13.4",
+ "if-addrs",
  "libc",
  "tempfile",
  "thiserror 2.0.18",
@@ -1588,16 +1588,6 @@ dependencies = [
 
 [[package]]
 name = "if-addrs"
-version = "0.13.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "69b2eeee38fef3aa9b4cc5f1beea8a2444fc00e7377cafae396de3f5c2065e24"
-dependencies = [
- "libc",
- "windows-sys 0.59.0",
-]
-
-[[package]]
-name = "if-addrs"
 version = "0.15.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c0a05c691e1fae256cf7013d99dad472dc52d5543322761f83ec8d47eab40d2b"
@@ -1616,7 +1606,7 @@ dependencies = [
  "core-foundation 0.9.4",
  "fnv",
  "futures",
- "if-addrs 0.15.0",
+ "if-addrs",
  "ipnet",
  "log",
  "netlink-packet-core 0.8.1",

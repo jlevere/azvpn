@@ -116,7 +116,7 @@ zbus = { version = "5", default-features = false, features = ["tokio"] }
 # matching the openvpn-assigned tunnel IP. Pure-Rust binding;
 # cross-platform so it also works for any future macOS/Windows code
 # that needs the same.
-if-addrs = "0.13"
+if-addrs = "0.15"
 
 # ─── Windows-only deps (workspace pins; consumed via per-crate
 # `[target.'cfg(target_os = "windows")']` blocks) ────────────────
