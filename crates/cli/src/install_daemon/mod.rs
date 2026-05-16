@@ -44,23 +44,51 @@ pub async fn install(daemon: Option<PathBuf>, openvpn: Option<PathBuf>) -> Resul
     }
 }
 
-/// Stop + remove the daemon for the current platform.
-pub async fn uninstall() -> Result<()> {
+/// Stop + remove the daemon for the current platform. With
+/// `purge = true`, also wipes daemon-owned state (cached tokens,
+/// target-state file, log files, runtime socket dir) — useful when
+/// renaming/uninstalling cleanly. Defaults to off so re-installs
+/// preserve user credentials.
+pub async fn uninstall(purge: bool) -> Result<()> {
     #[cfg(target_os = "macos")]
     {
-        macos::uninstall().await
+        macos::uninstall().await?;
     }
     #[cfg(target_os = "linux")]
     {
-        linux::uninstall().await
+        linux::uninstall().await?;
     }
     #[cfg(target_os = "windows")]
     {
-        windows::uninstall().await
+        windows::uninstall().await?;
     }
     #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
     {
-        Err(other("uninstall-daemon is not supported on this platform"))
+        return Err(other("uninstall-daemon is not supported on this platform"));
+    }
+
+    if purge {
+        purge_daemon_state();
+    }
+    Ok(())
+}
+
+/// Best-effort wipe of daemon-owned state. Each removal logs its
+/// outcome so the operator can see what actually went; nothing here
+/// short-circuits — purge is supposed to be thorough, not picky.
+fn purge_daemon_state() {
+    let targets = [
+        azvpn_auth::paths::system_state_dir(),
+        azvpn_auth::paths::system_log_dir(),
+        #[cfg(unix)]
+        PathBuf::from("/var/run/azvpn"),
+    ];
+    for path in targets {
+        match std::fs::remove_dir_all(&path) {
+            Ok(()) => eprintln!("purged {}", path.display()),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => eprintln!("could not purge {} ({e})", path.display()),
+        }
     }
 }
 
@@ -137,3 +165,20 @@ pub(super) fn resolve_binary(
 pub(super) fn other(msg: impl Into<String>) -> Error {
     Error::Core(CoreError::Other(msg.into()))
 }
+
+/// Canonical "you just installed the daemon, here's what to do next"
+/// block. Shared by the macOS launchd path, the Linux systemd path,
+/// the Homebrew formula's `caveats`, and the MSI finish screen. One
+/// source of truth so the four channels can't drift.
+///
+/// Printed to stderr by `install-daemon` (CLI-side) and reproduced
+/// verbatim in `packaging/homebrew/azvpn.rb` and the MSI README.
+pub(super) const NEXT_STEPS_BANNER: &str = "\
+daemon installed. Next:
+  1. download your Azure profile XML
+     (portal.azure.com → Virtual Network Gateway → Point-to-site →
+      \"Download VPN client\", then unzip and grab AzureVpnProfile.xml)
+  2. azvpn profile import <path-to-AzureVpnProfile.xml>
+  3. azvpn login
+  4. azvpn up
+";

@@ -45,16 +45,39 @@ class Azvpn < Formula
 
   def caveats
     <<~EOS
-      One-time daemon bootstrap (writes the launchd plist and starts it):
+      Next:
+        1. sudo azvpn install-daemon
+           (one-time: writes the launchd plist and starts the daemon;
+            idempotent so re-run after every `brew upgrade azvpn` to
+            point the unit at the new binary)
+        2. Download your Azure profile XML from the Azure portal
+           (Virtual Network Gateway → Point-to-site → "Download VPN
+            client"; unzip and grab AzureVpnProfile.xml)
+        3. azvpn profile import <path-to-AzureVpnProfile.xml>
+        4. azvpn login
+        5. azvpn up
 
-        sudo azvpn install-daemon
+      The CLI talks to the daemon over a UNIX socket — no sudo needed
+      for day-to-day commands. To tear it all down:
 
-      Verify with `azvpn status` (no sudo needed; the CLI talks to the
-      daemon over a UNIX socket). To remove the daemon later:
-
-        sudo azvpn uninstall-daemon
+        sudo azvpn uninstall-daemon            # stops + removes the daemon
+        sudo azvpn uninstall-daemon --purge    # also wipes profiles + cached tokens
+        brew uninstall azvpn                   # removes the binaries
     EOS
   end
+
+  # `brew uninstall --zap` deep-cleans everything we plant outside the
+  # cellar — the launchd plist, the daemon's system-state dir, log
+  # dir, and the runtime socket dir. The dedicated `uninstall-daemon`
+  # path (which talks to launchctl) still runs first via the caveats;
+  # zap is the safety net for "I already removed the brew cellar but
+  # forgot to uninstall-daemon."
+  zap trash: [
+    "/Library/LaunchDaemons/com.jlevere.azvpn.daemon.plist",
+    "/Library/Application Support/com.jlevere.azvpn",
+    "/Library/Logs/com.jlevere.azvpn",
+    "/var/run/azvpn",
+  ]
 
   test do
     assert_match version.to_s, shell_output("#{bin}/azvpn --version")
