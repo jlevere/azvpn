@@ -55,7 +55,7 @@ tracing-journald = "0.3"
 # Linux-only — `sd_notify(READY=1)` after the daemon's socket is bound.
 # Needed because the systemd unit uses Type=notify; without the
 # ready signal systemd flags startup as failed after the timeout.
-sd-notify = "0.4"
+sd-notify = "0.5"
 thiserror = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
