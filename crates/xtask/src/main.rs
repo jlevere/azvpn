@@ -42,6 +42,8 @@ enum Cmd {
     ReleaseMacos(commands::release_macos::Args),
     /// Build the Windows release MSI (cross-compiled via nix, wixl).
     ReleaseWindows(commands::release_windows::Args),
+    /// Authenticode-sign an MSI via osslsigncode (Linux-native, no Wine).
+    SignMsi(commands::sign_msi::Args),
     /// Template the Homebrew formula with a release's version + sha256
     /// and (optionally) push it to the configured tap.
     PublishFormula(commands::publish_formula::Args),
@@ -52,6 +54,7 @@ fn main() -> anyhow::Result<()> {
     match cli.cmd {
         Cmd::ReleaseMacos(args) => commands::release_macos::run(args),
         Cmd::ReleaseWindows(args) => commands::release_windows::run(args),
+        Cmd::SignMsi(args) => commands::sign_msi::run(args),
         Cmd::PublishFormula(args) => commands::publish_formula::run(args),
     }
 }
