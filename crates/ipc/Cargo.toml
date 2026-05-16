@@ -33,6 +33,9 @@ windows-sys = { workspace = true, features = [
     "Win32_Security",
     "Win32_Security_Authorization",
     "Win32_System_Pipes",
+    # `GetCurrentThread` for the impersonation/OpenThreadToken cycle
+    # in `identity::fetch_pipe_identity`.
+    "Win32_System_Threading",
 ] }
 widestring = { workspace = true }
 
