@@ -10,7 +10,6 @@ publish.workspace = true
 
 [dependencies]
 thiserror = { workspace = true }
-tokio = { workspace = true }
 tracing = { workspace = true }
 
 # All payload deps are Windows-only. The crate as a whole is
