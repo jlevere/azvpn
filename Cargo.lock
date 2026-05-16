@@ -378,7 +378,7 @@ dependencies = [
 name = "azvpn-tunnel-darwin"
 version = "0.1.0"
 dependencies = [
- "system-configuration",
+ "tempfile",
  "thiserror 2.0.18",
  "tokio",
  "tracing",
