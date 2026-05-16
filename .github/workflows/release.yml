@@ -246,13 +246,17 @@ jobs:
   # release's version + sha256 and PUT it into jlevere/homebrew-tap
   # so `brew install jlevere/tap/azvpn` resolves the new tarball.
   #
-  # Needs a fine-grained PAT at the org level (not the default
-  # GITHUB_TOKEN — that scope is per-repo, can't write to the tap).
+  # Auth is via a GitHub App installation token (no PAT rotation pain).
   # Setup:
-  #   1. Generate fine-grained PAT at https://github.com/settings/tokens
-  #      with `Contents: read & write` scoped to `jlevere/homebrew-tap`.
-  #   2. Add as `HOMEBREW_TAP_TOKEN` repo secret at
-  #      https://github.com/jlevere/azvpn/settings/secrets/actions.
+  #   1. Have a GitHub App with `Contents: read & write` permission.
+  #   2. Install it on BOTH `jlevere/azvpn` (so this workflow can mint
+  #      tokens) and `jlevere/homebrew-tap` (so the token has push
+  #      access there).
+  #   3. Add two repo secrets at
+  #      https://github.com/jlevere/azvpn/settings/secrets/actions:
+  #        - HOMEBREW_TAP_APP_ID    = the App's numeric ID
+  #        - HOMEBREW_TAP_APP_KEY   = the App's private key (.pem)
+  # The default `GITHUB_TOKEN` is per-repo; can't reach the tap.
   # `needs: release` so we don't push a formula pointing at a tarball
   # URL that doesn't exist yet.
   publish-formula:
@@ -265,9 +269,19 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           key: publish-formula-ubuntu
+      # Mint a short-lived installation access token scoped to just
+      # the tap repo. `owner` + `repositories` narrow the token below
+      # the App's full installation reach — defence in depth.
+      - uses: actions/create-github-app-token@v1
+        id: app-token
+        with:
+          app-id: ${{ secrets.HOMEBREW_TAP_APP_ID }}
+          private-key: ${{ secrets.HOMEBREW_TAP_APP_KEY }}
+          owner: jlevere
+          repositories: homebrew-tap
       - name: Push templated formula to tap
         env:
-          HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+          HOMEBREW_TAP_TOKEN: ${{ steps.app-token.outputs.token }}
         run: |
           cargo xtask publish-formula \
             --version "${{ needs.build-macos.outputs.version }}" \
