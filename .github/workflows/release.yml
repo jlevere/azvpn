@@ -105,6 +105,12 @@ jobs:
   # — useful for dispatch-run smoke tests before code-signing is set up.
   build-msi:
     runs-on: ubuntu-latest
+    # GHA disallows `secrets.*` references inside step-level `if:`
+    # — they're only allowed in `env:`, `with:`, and run-script
+    # bodies. So we materialize "have signing material?" into a
+    # job-env string ("true"/"false") and gate steps on `env.*`.
+    env:
+      HAS_SIGNING: ${{ secrets.WINDOWS_SIGNING_CERT_B64 != '' }}
     outputs:
       version: ${{ steps.msi.outputs.version }}
       sha256: ${{ steps.msi.outputs.sha256 }}
@@ -121,13 +127,13 @@ jobs:
       # osslsigncode only needs to be present when we're actually
       # signing — saves ~5s on the no-secret unsigned-build path.
       - name: Install osslsigncode
-        if: ${{ secrets.WINDOWS_SIGNING_CERT_B64 != '' }}
+        if: env.HAS_SIGNING == 'true'
         run: sudo apt-get update && sudo apt-get install -y osslsigncode
       # Decode the base64 secrets to tempfiles on disk. `umask 077`
       # makes them mode 0600 — the GH runner is short-lived but it
       # still doesn't hurt to be tidy with private keys.
       - name: Stage signing material
-        if: ${{ secrets.WINDOWS_SIGNING_CERT_B64 != '' }}
+        if: env.HAS_SIGNING == 'true'
         env:
           CERT_B64: ${{ secrets.WINDOWS_SIGNING_CERT_B64 }}
           KEY_B64: ${{ secrets.WINDOWS_SIGNING_KEY_B64 }}
@@ -138,13 +144,13 @@ jobs:
           echo "$KEY_B64" | base64 -d > /tmp/sign/key.pem
           echo "AZVPN_SIGNING_CERT=/tmp/sign/cert.pem" >> "$GITHUB_ENV"
           echo "AZVPN_SIGNING_KEY=/tmp/sign/key.pem"   >> "$GITHUB_ENV"
-      # The `SIGN_FLAG` env var is `--sign` when secrets are set,
-      # empty otherwise. Shell unquoted-empty expansion drops it from
+      # `SIGN_FLAG` expands to `--sign` when signing material was
+      # staged, empty otherwise. Shell empty-expansion drops it from
       # the command line so xtask sees plain `release-windows --emit-ci-outputs`.
       - name: Build MSI
         id: msi
         env:
-          SIGN_FLAG: ${{ secrets.WINDOWS_SIGNING_CERT_B64 != '' && '--sign' || '' }}
+          SIGN_FLAG: ${{ env.HAS_SIGNING == 'true' && '--sign' || '' }}
         run: cargo xtask release-windows $SIGN_FLAG --emit-ci-outputs
       - uses: actions/upload-artifact@v4
         with:
