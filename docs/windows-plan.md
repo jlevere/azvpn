@@ -583,6 +583,15 @@ azvpn version
 azvpn connect --profile C:\Users\Administrator\.config\azvpn\profiles\vwan-pla-cus.xml
 Get-DnsClientNrptPolicy
 
+# Canonical tunnel-up smoke test: rtalab-b is an internal corp app
+# only reachable through the gateway's split-DNS. Pre-VPN it
+# fails DNS / SSL; post-VPN it returns 200 and resolves to a
+# private 10.x address. Confirmed working from the macOS host
+# baseline (2026-05-15: code=200, resolve=10.2.100.7).
+$r = Invoke-WebRequest "https://rtalab-b.stg-rome.remotethreat.com/" -UseBasicParsing
+Write-Output "code=$($r.StatusCode)"
+Resolve-DnsName rtalab-b.stg-rome.remotethreat.com -Type A
+
 # Split-DNS working
 Resolve-DnsName some-internal-host.<our-suffix>       # → gateway DNS
 Resolve-DnsName google.com                            # → ISP DNS
