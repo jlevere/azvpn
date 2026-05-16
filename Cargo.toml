@@ -104,7 +104,7 @@ secrecy = { version = "0.10", features = ["serde"] }
 # produces OS-idiomatic per-app paths: bundle-ID-shaped subdirs on
 # macOS (`com.jlevere.azvpn`), `<vendor>/<app>` on Windows, XDG basedir
 # on Linux. Replaces hand-rolled `~/Library/Application Support/<X>` etc.
-directories = "5"
+directories = "6"
 # Pure-Rust D-Bus. No libdbus-1 C dep (sidesteps the cross-compile
 # pain we hit with libdbus-sys). Tokio-native via `tokio` feature.
 # Used by tunnel-linux to talk to systemd-resolved + systemd1 over
