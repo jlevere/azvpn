@@ -35,6 +35,19 @@ pub use error::{Error, Result};
     version = build::PKG_VERSION,
     long_version = build::CLAP_LONG_VERSION,
     about = "Cross-platform Azure VPN client",
+    long_about = "\
+Cross-platform Azure VPN client.
+
+Talks to the `azvpnd` system daemon over a UNIX socket (named pipe on
+Windows). The daemon owns the tunnel, DNS, and route lifecycle; the
+CLI is unprivileged and just sends RPCs.
+
+First-time setup:
+  sudo azvpn install-daemon               # installs + starts azvpnd
+  azvpn profile import <profile.xml>      # register an Azure profile XML
+  azvpn login                             # authenticate against Entra ID
+  azvpn up                                # bring the tunnel up
+",
 )]
 struct Cli {
     #[command(subcommand)]
@@ -135,7 +148,13 @@ enum Command {
     /// Stop and remove the system daemon installed by install-daemon.
     /// Requires sudo.
     #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
-    UninstallDaemon,
+    UninstallDaemon {
+        /// Also wipe daemon-owned state: cached tokens, target-state
+        /// file, log directory, runtime socket dir. Default off so a
+        /// later `install-daemon` resumes with the existing session.
+        #[arg(long)]
+        purge: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -223,7 +242,7 @@ async fn dispatch(command: Command, openvpn_verbose: bool) -> anyhow::Result<()>
             install_daemon::install(daemon, openvpn).await?;
         }
         #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
-        Command::UninstallDaemon => install_daemon::uninstall().await?,
+        Command::UninstallDaemon { purge } => install_daemon::uninstall(purge).await?,
     }
     Ok(())
 }

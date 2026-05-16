@@ -13,7 +13,7 @@ use std::path::{Path, PathBuf};
 use tracing::debug;
 use zbus::zvariant::OwnedObjectPath;
 
-use super::{check_executable, require_root, resolve_binary};
+use super::{NEXT_STEPS_BANNER, check_executable, require_root, resolve_binary};
 use crate::Result;
 
 const UNIT_NAME: &str = "azvpn.service";
@@ -25,12 +25,29 @@ const UNIT_TEMPLATE: &str = include_str!("../../../../packaging/systemd/azvpn.se
 
 /// Canonical install paths — also what the template ships with, so
 /// `render_unit` substitutes against the same string the file already
-/// contains.
+/// contains. `DEFAULT_OPENVPN` is the .deb's bundled-patched path, not
+/// vanilla `/usr/sbin/openvpn` — see the template for the
+/// `USER_PASS_LEN` / AAD-truncation rationale.
 const DEFAULT_DAEMON: &str = "/usr/lib/azvpn/azvpnd";
-const DEFAULT_OPENVPN: &str = "/usr/sbin/openvpn";
+const DEFAULT_OPENVPN: &str = "/usr/libexec/azvpn/openvpn";
+
+/// `.deb` / `.rpm` install their own unit at this path. If it
+/// exists, the package manager is the source of truth — `install-
+/// daemon` overwriting `/etc/systemd/system/azvpn.service` would
+/// leave two units with the same name (the `/etc/` copy winning by
+/// systemd precedence) and a future `apt remove` orphans our copy.
+const PACKAGED_UNIT_PATH: &str = "/lib/systemd/system/azvpn.service";
 
 pub async fn install(daemon: Option<PathBuf>, openvpn: Option<PathBuf>) -> Result<()> {
     require_root("install-daemon")?;
+
+    if Path::new(PACKAGED_UNIT_PATH).exists() {
+        return Err(super::other(format!(
+            "{PACKAGED_UNIT_PATH} already exists — this system is package-managed; \
+             use the package manager instead:\n  \
+             sudo systemctl enable --now azvpn"
+        )));
+    }
 
     let daemon = resolve_binary(daemon, "azvpnd", PathBuf::from(DEFAULT_DAEMON));
     let openvpn = resolve_binary(openvpn, "azvpn-openvpn", PathBuf::from(DEFAULT_OPENVPN));
@@ -64,7 +81,8 @@ pub async fn install(daemon: Option<PathBuf>, openvpn: Option<PathBuf>) -> Resul
         .await?;
     debug!(?job, "systemd accepted StartUnit");
 
-    eprintln!("daemon enabled and started — try `azvpn status`");
+    eprintln!();
+    eprint!("{NEXT_STEPS_BANNER}");
     Ok(())
 }
 

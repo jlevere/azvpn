@@ -31,16 +31,32 @@ case "$1" in
             systemctl daemon-reload || true
         fi
 
+        # Restart the daemon on upgrade so the new binary takes
+        # effect immediately. First-install case: the unit isn't
+        # enabled yet (the message below tells the user to do it),
+        # so try-restart is a no-op. Upgrade case: enabled+active,
+        # try-restart picks up the new ExecStart.
+        if [ -d /run/systemd/system ]; then
+            systemctl try-restart azvpn.service || true
+        fi
+
         # User has to be in the group AND re-login for the
         # supplementary group set to take effect. Print the hint at
         # configure time so it's the last thing the user sees from
         # `apt install`.
         cat <<EOF
 
-azvpn installed. To finish setup:
+azvpn installed. Next:
 
-    sudo usermod -aG azvpn \$USER          # log out + back in after
-    sudo systemctl enable --now azvpn      # start the daemon
+    sudo usermod -aG azvpn \$USER                 # add yourself, then re-login
+    sudo systemctl enable --now azvpn             # start the daemon
+
+    # 1. Download Azure profile XML from the portal
+    #    (Virtual Network Gateway → Point-to-site → "Download VPN client",
+    #     unzip and grab AzureVpnProfile.xml)
+    # 2. azvpn profile import <path-to-AzureVpnProfile.xml>
+    # 3. azvpn login
+    # 4. azvpn up
 
 Verify with:
 

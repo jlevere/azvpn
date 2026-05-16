@@ -331,6 +331,8 @@
           cp -r ${openvpn-azvpn-win64-bundle}/. staging/openvpn/
           cp ${azvpn-windows-cross}/bin/azvpn.exe staging/azvpn.exe
           cp ${azvpn-windows-cross}/bin/azvpnd.exe staging/azvpnd.exe
+          cp ${./packaging/windows/msi/README-FIRSTRUN.txt} \
+             staging/README-FIRSTRUN.txt
 
           # wixl -D substitutions for the placeholders in azvpn.wxs.
           # Paths are absolute (staging is the cwd for wixl) so the
@@ -341,6 +343,7 @@
             -D Version=0.1.0 \
             -D AzvpnExe=$PWD/staging/azvpn.exe \
             -D AzvpndExe=$PWD/staging/azvpnd.exe \
+            -D ReadmeFirstRun=$PWD/staging/README-FIRSTRUN.txt \
             -D OpenvpnBundleDir=$PWD/staging/openvpn \
             -o $out \
             ${./packaging/windows/msi/azvpn.wxs}

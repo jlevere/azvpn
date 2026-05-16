@@ -139,6 +139,23 @@
                          Action="set" />
           </Component>
 
+          <!--
+            First-run guide installed alongside the binaries. Silent
+            MSI install has no place to surface a finish-screen
+            message; the README is the discoverable channel. A future
+            UI-mode MSI (or a Start Menu shortcut) can open this in
+            Notepad on install; for now operators find it at
+            C:\Program Files\azvpn\README-FIRSTRUN.txt.
+          -->
+          <Component Id="FirstRunReadme"
+                     Guid="0D1C3D9F-1F0F-4D89-9B7C-2B14B6EBA9B0"
+                     Win64="yes">
+            <File Id="ReadmeFirstRunFile"
+                  Name="README-FIRSTRUN.txt"
+                  Source="$(var.ReadmeFirstRun)"
+                  KeyPath="yes" />
+          </Component>
+
           <Directory Id="OPENVPNDIR" Name="openvpn">
             <!--
               openvpn bundle: our patched openvpn.exe + the three
@@ -208,6 +225,7 @@
       <ComponentRef Id="AzvpnCli" />
       <ComponentRef Id="AzvpndDaemon" />
       <ComponentRef Id="AzvpnOnPath" />
+      <ComponentRef Id="FirstRunReadme" />
       <ComponentRef Id="OpenvpnBundle" />
       <ComponentRef Id="AzvpnLogsDirComponent" />
     </Feature>

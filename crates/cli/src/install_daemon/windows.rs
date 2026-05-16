@@ -26,7 +26,7 @@ use windows_service::service::{
 };
 use windows_service::service_manager::{ServiceManager, ServiceManagerAccess};
 
-use super::other;
+use super::{NEXT_STEPS_BANNER, other};
 use crate::Result;
 
 /// SCM service name. Matches `daemon::windows::SERVICE_NAME`.
@@ -129,6 +129,8 @@ pub async fn install(daemon: Option<PathBuf>, openvpn: Option<PathBuf>) -> Resul
         .map_err(|e| other(format!("start service: {e}")))?;
 
     tracing::info!(name = SERVICE_NAME, "service installed and started");
+    eprintln!();
+    eprint!("{NEXT_STEPS_BANNER}");
     Ok(())
 }
 

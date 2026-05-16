@@ -1,14 +1,18 @@
 #!/bin/sh
-# prerm — runs before the .deb's files are removed. We stop the
-# service explicitly because cargo-deb's #DEBHELPER# splice ended up
-# empty for our `enable=false / start=false` config; without this,
-# `apt remove azvpn` leaves a running daemon orphaned (the unit file
-# vanishes but the process keeps going).
+# prerm — runs before the .deb's files are removed.
+#
+# Stop on `remove`/`deconfigure` so `apt remove azvpn` doesn't leave a
+# running daemon orphaned (the unit file vanishes but the process
+# keeps going). On `upgrade` we deliberately leave the old daemon
+# running — the new files unpack underneath it, then postinst's
+# try-restart swaps in the new binary in one motion. Stopping on
+# upgrade would create an unnecessary tunnel-down window between
+# prerm and postinst.
 
 set -e
 
 case "$1" in
-    remove|upgrade|deconfigure)
+    remove|deconfigure)
         if [ -d /run/systemd/system ]; then
             systemctl stop azvpn.service || true
         fi

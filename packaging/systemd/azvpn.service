@@ -45,10 +45,19 @@ RestartSec=5
 # state before systemd escalates to SIGKILL.
 TimeoutStopSec=10s
 
-# `AZVPND_OPENVPN` pins the openvpn binary path; unset → looked up on
-# $PATH. On a packaged install the distro's `openvpn` package is the
-# right thing.
-Environment=AZVPND_OPENVPN=/usr/sbin/openvpn
+# `AZVPND_OPENVPN` pins the openvpn binary path. Substituted at install
+# time by `azvpn install-daemon` to whatever it resolved (sibling
+# `azvpn-openvpn`, explicit `--openvpn <path>`, or the canonical
+# `/usr/libexec/azvpn/openvpn` from the .deb / .rpm layout).
+#
+# **NOT `/usr/sbin/openvpn`.** Vanilla distro openvpn has
+# `USER_PASS_LEN=128` unless built `--with-pkcs11` (which bumps it to
+# 4096). AAD bearer tokens are 2–3 KB JWTs over `auth-user-pass`; a
+# vanilla openvpn silently truncates the password and the gateway
+# fails the TLS handshake opaquely. We patch our bundled openvpn
+# (`patches/openvpn-increase-user-pass-len.patch`) and ship it at the
+# path below.
+Environment=AZVPND_OPENVPN=/usr/libexec/azvpn/openvpn
 # `adm` group is the Debian/Ubuntu convention for users who can read
 # system logs and similar; matches "sudoers-ish on a desktop install"
 # without requiring a dedicated azvpn group. Override per-distro.
