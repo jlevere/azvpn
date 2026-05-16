@@ -1,0 +1,215 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  azvpn Windows installer (WiX 3 schema).
+
+  This file is consumed by `wixl` (from nixpkgs's `msitools`),
+  Linux-native and pure-deterministic — no Wine, no .NET, no
+  Windows host required. wixl tracks WiX 3 closely enough that
+  this same source would also compile under candle.exe + light.exe
+  on a Windows machine, if we ever needed to.
+
+  Component GUIDs in this file MUST be stable across builds — they
+  are used by Windows Installer to track which files belong to a
+  given component for upgrade / repair / uninstall. Regenerating
+  them silently breaks every previously-installed copy. The
+  UpgradeCode is similarly stable (regenerating it would make
+  major-upgrade detection miss our prior install and stack two
+  copies side-by-side).
+
+  Product Id="*" auto-generates a per-build GUID — that's correct
+  for ProductCode, which differs across versions.
+
+  Authenticode signing of the produced .msi happens *outside* this
+  file (`osslsigncode sign` in CI), so signing tooling isn't a
+  build-time dependency of the derivation.
+-->
+<Wix xmlns="http://schemas.microsoft.com/wix/2006/wi">
+  <Product Id="*"
+           Name="azvpn"
+           Language="1033"
+           Version="$(var.Version)"
+           Manufacturer="azvpn"
+           UpgradeCode="DA2FE37A-CF2A-423E-BC35-E5FB7F72BF64">
+
+    <Package InstallerVersion="500"
+             Compressed="yes"
+             InstallScope="perMachine"
+             Platform="x64"
+             Description="Cross-platform Azure VPN client"
+             Comments="https://github.com/jlevere/azvpn" />
+
+    <!--
+      MajorUpgrade auto-removes the older version before installing
+      the newer one. RemoveFeatures="ALL" means component refcounts
+      from the old install are cleared cleanly. The DowngradeError
+      makes accidentally installing an older MSI on top of newer
+      fail loudly instead of silently breaking the install.
+    -->
+    <MajorUpgrade Schedule="afterInstallInitialize"
+                  AllowSameVersionUpgrades="yes"
+                  DowngradeErrorMessage="A newer version of azvpn is already installed." />
+
+    <MediaTemplate EmbedCab="yes" CompressionLevel="high" />
+
+    <Directory Id="TARGETDIR" Name="SourceDir">
+      <Directory Id="ProgramFiles64Folder">
+        <Directory Id="INSTALLDIR" Name="azvpn">
+
+          <!--
+            azvpn CLI. KeyPath on the .exe means MSI tracks repair /
+            uninstall against this single file's presence.
+          -->
+          <Component Id="AzvpnCli"
+                     Guid="19581640-41A2-48ED-9755-36612EC91C3F"
+                     Win64="yes">
+            <File Id="AzvpnCliExe"
+                  Name="azvpn.exe"
+                  Source="$(var.AzvpnExe)"
+                  KeyPath="yes" />
+          </Component>
+
+          <!--
+            azvpn daemon, installed as a Windows service.
+            ServiceInstall registers with the SCM at install time;
+            ServiceControl handles start/stop lifecycle.
+
+            Account=LocalSystem because the daemon needs:
+              - NRPT add/remove (HKLM\System\CurrentControlSet
+                \Services\Dnscache\Parameters\DnsPolicyConfig)
+              - Wintun device create (requires SeLoadDriverPrivilege)
+              - openvpn child spawn under same privilege
+            All of which only LocalSystem reliably has.
+
+            ErrorControl="ignore" so a stuck service doesn't keep
+            the OS from booting if the daemon is broken.
+          -->
+          <Component Id="AzvpndDaemon"
+                     Guid="406D37CB-E92F-4F8E-B511-D6587FD1AD70"
+                     Win64="yes">
+            <File Id="AzvpndExe"
+                  Name="azvpnd.exe"
+                  Source="$(var.AzvpndExe)"
+                  KeyPath="yes" />
+            <!--
+              The `Arguments` attribute below passes the
+              run-as-service flag to azvpnd. Critical: azvpnd
+              dispatches between console mode and SCM mode by
+              looking for that flag in argv. Without it the binary
+              falls through to console mode, never calls
+              StartServiceCtrlDispatcher, SCM times out after ~30s
+              waiting for SERVICE_RUNNING, and msiexec rolls the
+              install back with 1603.
+            -->
+            <ServiceInstall Id="AzvpndService"
+                            Type="ownProcess"
+                            Vital="yes"
+                            Name="azvpnd"
+                            DisplayName="azvpn daemon"
+                            Description="Azure VPN client daemon — manages openvpn child, NRPT split-DNS, and named-pipe IPC."
+                            Arguments="--run-as-service"
+                            Start="auto"
+                            Account="LocalSystem"
+                            ErrorControl="ignore"
+                            Interactive="no" />
+            <ServiceControl Id="ControlAzvpnd"
+                            Name="azvpnd"
+                            Start="install"
+                            Stop="both"
+                            Remove="uninstall"
+                            Wait="yes" />
+          </Component>
+
+          <!--
+            Add `C:\Program Files\azvpn` to system PATH so users can
+            type `azvpn …` from any shell. Part="last" so we don't
+            shadow anything else. System="yes" sets HKLM PATH (not
+            HKCU) — applies to all users, which matches the
+            machine-wide install scope.
+          -->
+          <Component Id="AzvpnOnPath"
+                     Guid="CC232EA1-9100-4302-871B-3989AEA7B8BC"
+                     Win64="yes">
+            <CreateFolder />
+            <Environment Id="AzvpnInstallDirOnPath"
+                         Name="PATH"
+                         Value="[INSTALLDIR]"
+                         Part="last"
+                         Permanent="no"
+                         System="yes"
+                         Action="set" />
+          </Component>
+
+          <Directory Id="OPENVPNDIR" Name="openvpn">
+            <!--
+              openvpn bundle: our patched openvpn.exe + the three
+              runtime DLLs it imports + WireGuard LLC's signed
+              wintun.dll.
+
+              KeyPath on openvpn.exe; the DLLs are component
+              children. Refusing to re-sign the DLLs (especially
+              wintun.dll) is critical — Authenticode chains break
+              if we touch the binary.
+            -->
+            <Component Id="OpenvpnBundle"
+                       Guid="9ED41537-F36E-48F2-B158-A7E873372D42"
+                       Win64="yes">
+              <File Id="OpenvpnExe"
+                    Name="openvpn.exe"
+                    Source="$(var.OpenvpnBundleDir)/openvpn.exe"
+                    KeyPath="yes" />
+              <File Id="LibCryptoDll"
+                    Name="libcrypto-3-x64.dll"
+                    Source="$(var.OpenvpnBundleDir)/libcrypto-3-x64.dll" />
+              <File Id="LibSslDll"
+                    Name="libssl-3-x64.dll"
+                    Source="$(var.OpenvpnBundleDir)/libssl-3-x64.dll" />
+              <File Id="LibLzo2Dll"
+                    Name="liblzo2-2.dll"
+                    Source="$(var.OpenvpnBundleDir)/liblzo2-2.dll" />
+              <File Id="WintunDll"
+                    Name="wintun.dll"
+                    Source="$(var.OpenvpnBundleDir)/wintun.dll" />
+            </Component>
+          </Directory>
+        </Directory>
+      </Directory>
+
+      <!--
+        ProgramData log dir created with default ACL. The daemon
+        writes to `C:\ProgramData\azvpn\logs\daemon.<date>.log` and
+        will mkdir_all on first start anyway, but creating it at
+        install time means the rolling file appender's first event
+        doesn't race with directory creation under restrictive
+        environments.
+      -->
+      <Directory Id="CommonAppDataFolder">
+        <Directory Id="AzvpnProgramData" Name="azvpn">
+          <Directory Id="AzvpnLogsDir" Name="logs">
+            <Component Id="AzvpnLogsDirComponent"
+                       Guid="78A82B33-3B6B-4C92-A8A7-1FE2F3D34B6A"
+                       Win64="yes">
+              <CreateFolder />
+              <RemoveFolder Id="RemoveLogsDirOnUninstall"
+                            On="uninstall" />
+              <RegistryValue Root="HKLM"
+                             Key="Software\azvpn"
+                             Name="LogsDirCreated"
+                             Type="integer"
+                             Value="1"
+                             KeyPath="yes" />
+            </Component>
+          </Directory>
+        </Directory>
+      </Directory>
+    </Directory>
+
+    <Feature Id="Main" Title="azvpn" Level="1" Display="expand"
+             Description="azvpn CLI, daemon service, and bundled openvpn / wintun.">
+      <ComponentRef Id="AzvpnCli" />
+      <ComponentRef Id="AzvpndDaemon" />
+      <ComponentRef Id="AzvpnOnPath" />
+      <ComponentRef Id="OpenvpnBundle" />
+      <ComponentRef Id="AzvpnLogsDirComponent" />
+    </Feature>
+  </Product>
+</Wix>
