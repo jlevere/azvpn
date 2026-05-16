@@ -43,6 +43,13 @@ pub struct Args {
     /// can still be exercised.
     #[arg(long)]
     pub skip_host_check: bool,
+
+    /// Append `version=`, `sha256=`, `tarball_name=` lines to the
+    /// `$GITHUB_OUTPUT` file so a downstream CI job can consume them
+    /// without a shell-parsing step. No-op when `$GITHUB_OUTPUT` is
+    /// unset (i.e. running locally).
+    #[arg(long)]
+    pub emit_ci_outputs: bool,
 }
 
 pub fn run(args: Args) -> Result<()> {
@@ -52,6 +59,14 @@ pub fn run(args: Args) -> Result<()> {
     if !args.skip_host_check {
         require_host_arm64_macos()?;
     }
+
+    // CI-only sanity check: when GitHub Actions has fired this run on
+    // a tag push, the tag name (`v0.1.0`) MUST match the version we
+    // just read from Cargo.toml. Otherwise the produced tarball gets
+    // uploaded to `releases/download/v0.2.0/azvpn-0.1.0-…tar.gz` and
+    // the formula points at a URL that doesn't exist. Cheap belt
+    // against a forgotten version bump.
+    verify_tag_matches_version(&version)?;
 
     let dist = args.output.unwrap_or_else(|| root.join("dist"));
     fs::create_dir_all(&dist).with_context(|| format!("create {}", dist.display()))?;
@@ -97,6 +112,8 @@ pub fn run(args: Args) -> Result<()> {
     let sha = sha256_hex(&tarball)?;
     let size_bytes = fs::metadata(&tarball)?.len();
 
+    let tarball_name = format!("{stage_dir_name}.tar.gz");
+
     println!();
     println!("==> done");
     println!("   tarball: {}", tarball.display());
@@ -105,9 +122,38 @@ pub fn run(args: Args) -> Result<()> {
     println!();
     println!("Next step:");
     println!(
-        "   cargo xtask publish-formula --version {version} --sha256 {sha} \\\n     --tarball-url https://github.com/jlevere/azvpn/releases/download/v{version}/{stage_dir_name}.tar.gz",
+        "   cargo xtask publish-formula --version {version} --sha256 {sha} \\\n     --tarball-url https://github.com/jlevere/azvpn/releases/download/v{version}/{tarball_name}",
     );
 
+    if args.emit_ci_outputs {
+        emit_ci_outputs(&version, &sha, &tarball_name)?;
+    }
+
+    Ok(())
+}
+
+/// Append `version=`, `sha256=`, `tarball_name=` lines to whatever
+/// file `$GITHUB_OUTPUT` points at. That's GitHub Actions' contract
+/// for a step setting outputs — anything written to that file
+/// becomes `${{ steps.<id>.outputs.<key> }}` for subsequent steps
+/// / jobs. No-op when the env var is missing so the same `--emit-ci-outputs`
+/// invocation runs harmlessly outside CI (e.g. during `cargo run`).
+fn emit_ci_outputs(version: &str, sha: &str, tarball_name: &str) -> Result<()> {
+    use std::io::Write as _;
+
+    let Some(path) = std::env::var_os("GITHUB_OUTPUT") else {
+        eprintln!("--emit-ci-outputs: GITHUB_OUTPUT not set, skipping");
+        return Ok(());
+    };
+    let path = PathBuf::from(path);
+    let mut file = fs::OpenOptions::new()
+        .append(true)
+        .create(true)
+        .open(&path)
+        .with_context(|| format!("open {} for append", path.display()))?;
+    writeln!(file, "version={version}")?;
+    writeln!(file, "sha256={sha}")?;
+    writeln!(file, "tarball_name={tarball_name}")?;
     Ok(())
 }
 
@@ -163,6 +209,32 @@ fn tarball_layout(root: &Path, nix_link: &Path, stage: &Path) -> Vec<StagedFile>
             is_binary: false,
         },
     ]
+}
+
+/// Compare `$GITHUB_REF_NAME` against the workspace version on tag
+/// pushes. Silent when not in CI or when the ref is a branch — those
+/// are local builds / non-tag dispatches where mismatch is expected
+/// (the manual-dispatch case is supposed to produce artifacts for an
+/// unreleased Cargo.toml version).
+fn verify_tag_matches_version(version: &str) -> Result<()> {
+    let Some(ref_type) = std::env::var_os("GITHUB_REF_TYPE") else {
+        return Ok(());
+    };
+    if ref_type != "tag" {
+        return Ok(());
+    }
+    let Some(ref_name) = std::env::var_os("GITHUB_REF_NAME") else {
+        return Ok(());
+    };
+    let ref_name = ref_name.to_string_lossy().into_owned();
+    let tag_version = ref_name.strip_prefix('v').unwrap_or(&ref_name);
+    if tag_version != version {
+        bail!(
+            "tag {ref_name:?} doesn't match crates/cli/Cargo.toml version {version:?} — \
+             bump the Cargo.toml version before tagging",
+        );
+    }
+    Ok(())
 }
 
 fn require_host_arm64_macos() -> Result<()> {
