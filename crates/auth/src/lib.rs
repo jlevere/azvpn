@@ -16,6 +16,7 @@
 //!   `me` / `groups` / `manager` / `org` commands.
 
 mod auth_code;
+mod cache_shared;
 pub mod cloud;
 pub mod daemon_cache;
 mod device_code;
@@ -166,6 +167,21 @@ impl From<&azvpn_profile::AadConfig> for AadConfig {
             enable_groups: profile.enablegrouptoken.unwrap_or(false),
         }
     }
+}
+
+/// Derive the AAD cache key for a profile. `None` for non-AAD
+/// profiles — cert / username-pass / radius auth doesn't have a
+/// refresh token to cache. Lifts the `VpnProfile → CacheKey`
+/// mapping into the auth crate where `AadConfig` and `CacheKey`
+/// both live, so the daemon and CLI can share one resolver.
+#[must_use]
+pub fn aad_cache_key(profile: &azvpn_profile::VpnProfile) -> Option<CacheKey> {
+    if profile.clientauth.auth_type != azvpn_profile::AuthType::Aad {
+        return None;
+    }
+    let aad_profile = profile.clientauth.aad.as_ref()?;
+    let config = AadConfig::from(aad_profile);
+    Some(CacheKey::from(&config))
 }
 
 #[derive(Debug, Clone)]

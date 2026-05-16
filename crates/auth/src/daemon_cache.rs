@@ -21,9 +21,9 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use serde::{Deserialize, Serialize};
 use tracing::{info, warn};
 
+use crate::cache_shared::{CachedToken, write_atomic_private};
 use crate::{CacheKey, Token};
 
 /// Where the daemon stores its per-profile token caches. Created with
@@ -42,40 +42,6 @@ pub fn default_dir() -> PathBuf {
     #[cfg(target_os = "windows")]
     {
         PathBuf::from(r"C:\ProgramData\azvpn\auth-cache")
-    }
-}
-
-#[derive(Serialize, Deserialize)]
-struct CachedToken {
-    access_token: String,
-    expires_at_epoch: u64,
-    #[serde(default)]
-    refresh_token: Option<String>,
-}
-
-impl From<&Token> for CachedToken {
-    fn from(t: &Token) -> Self {
-        use std::time::UNIX_EPOCH;
-        Self {
-            access_token: t.access_token.clone(),
-            expires_at_epoch: t
-                .expires_at
-                .duration_since(UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_secs(),
-            refresh_token: t.refresh_token.clone(),
-        }
-    }
-}
-
-impl From<CachedToken> for Token {
-    fn from(c: CachedToken) -> Self {
-        use std::time::{Duration, UNIX_EPOCH};
-        Self {
-            access_token: c.access_token,
-            expires_at: UNIX_EPOCH + Duration::from_secs(c.expires_at_epoch),
-            refresh_token: c.refresh_token,
-        }
     }
 }
 
@@ -134,7 +100,7 @@ impl DaemonTokenCache {
                 return;
             }
         };
-        match write_private(&self.path, data.as_bytes()) {
+        match write_atomic_private(&self.path, data.as_bytes(), Some(0o700)) {
             Ok(()) => info!(
                 path = %self.path.display(),
                 "daemon auth cache: persisted token",
@@ -160,50 +126,6 @@ impl DaemonTokenCache {
         self.save(&token);
         token
     }
-}
-
-/// Atomic-private write: tempfile → fsync → rename, mode 0600 on
-/// Unix, with the parent directory created at mode 0700 if missing.
-/// Duplicates `token_cache::write_private` rather than `pub(crate)`-
-/// ing it because the daemon-cache path enforces stricter directory
-/// permissions (the user-cache path is under `XDG_STATE_HOME` which
-/// is already user-private; this one is system-wide and must keep
-/// other users out by directory mode alone).
-fn write_private(path: &Path, data: &[u8]) -> std::io::Result<()> {
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)?;
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt as _;
-            let perms = fs::Permissions::from_mode(0o700);
-            // Best-effort: set_permissions on the directory. If it
-            // fails (e.g., already exists with different perms set
-            // by an admin), we don't unwind — file mode 0600 is
-            // still load-bearing.
-            let _ = fs::set_permissions(parent, perms);
-        }
-    }
-    let tmp = path.with_extension("tmp");
-
-    #[cfg(unix)]
-    {
-        use std::io::Write as _;
-        use std::os::unix::fs::OpenOptionsExt as _;
-        let mut f = fs::OpenOptions::new()
-            .write(true)
-            .create(true)
-            .truncate(true)
-            .mode(0o600)
-            .open(&tmp)?;
-        f.write_all(data)?;
-        f.sync_all()?;
-    }
-    #[cfg(not(unix))]
-    {
-        fs::write(&tmp, data)?;
-    }
-
-    fs::rename(&tmp, path)
 }
 
 #[cfg(test)]

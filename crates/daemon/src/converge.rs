@@ -15,12 +15,12 @@
 //! F.3 will eventually add a longer-interval retry loop so the
 //! daemon keeps trying instead of giving up after one attempt.
 
-use azvpn_auth::{AadConfig, RefreshGrant, daemon_cache::DaemonTokenCache};
+use azvpn_auth::{AadConfig, RefreshGrant, aad_cache_key, daemon_cache::DaemonTokenCache};
 use azvpn_core::target::{self, State, TargetState};
 use azvpn_profile::AuthType;
 use tracing::{info, warn};
 
-use crate::server::{AzvpndServer, aad_cache_key};
+use crate::server::AzvpndServer;
 
 /// Read target state and, if the user wants `Connected`, attempt to
 /// converge. Runs as a background task spawned from `main` so the

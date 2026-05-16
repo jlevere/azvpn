@@ -6,7 +6,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use azvpn_auth::{AadConfig, CacheKey, Token, daemon_cache::DaemonTokenCache};
+use azvpn_auth::{Token, aad_cache_key, daemon_cache::DaemonTokenCache};
 use azvpn_core::commands::connect::{self, ConnectOptions, ConnectionStatus};
 use azvpn_core::metrics::ConnectionMetrics;
 use azvpn_core::target::{self, State as TargetState, TargetState as Target};
@@ -15,7 +15,6 @@ use azvpn_ipc::{
     UpRequest, VpnProfile,
 };
 use azvpn_openvpn::VpnState;
-use azvpn_profile::AuthType;
 use tarpc::context::Context;
 use tokio::sync::{Mutex, watch};
 use tokio_util::sync::CancellationToken;
@@ -193,39 +192,8 @@ impl AzvpnApi for AzvpndServer {
         // `ephemeral` so CI scripts can run one-shot connects
         // without poisoning the persisted state.
         if !req.ephemeral {
-            let target = Target {
-                schema_version: target::SCHEMA_VERSION,
-                state: TargetState::Connected,
-                profile: Some(req.profile.clone()),
-                profile_label: Some(req.profile_label.clone()),
-                verbose: req.verbose,
-            };
-            let target_path = target::default_path();
-            if let Err(e) = target.save(&target_path) {
-                // Don't fail the up call — the user wants the tunnel
-                // up; we just can't persist intent. Surface as a
-                // warning so a later `azvpn status` can show it.
-                error!(
-                    path = %target_path.display(),
-                    error = %e,
-                    "failed to persist target state; daemon won't auto-converge after reboot",
-                );
-            }
-
-            // Save the RT to the daemon's own cache so a reboot can
-            // refresh silently without going through the user's
-            // browser. The RT belongs to a specific AAD profile;
-            // cert-auth profiles pass `None` and we skip.
-            if let Some(rt) = req.refresh_token.as_deref()
-                && let Some(key) = aad_cache_key(&req.profile)
-            {
-                let token = Token {
-                    access_token: req.access_token.clone().unwrap_or_default(),
-                    expires_at: SystemTime::now() + Duration::from_hours(1),
-                    refresh_token: Some(rt.to_owned()),
-                };
-                DaemonTokenCache::for_profile(&key).save(&token);
-            }
+            save_target_best_effort(&target_from_up(&req));
+            stash_daemon_rt(&req);
         }
 
         self.start_connection(
@@ -242,19 +210,12 @@ impl AzvpnApi for AzvpndServer {
         // doesn't leave us re-converging to a tunnel the user just
         // told us they don't want. The disconnect signal goes out
         // after — even if the file write fails, we still tear down.
+        // Profile snapshot stays so `azvpn up` (no `--profile`) after
+        // a `down`/`up` cycle works.
         if !req.ephemeral {
-            let target_path = target::default_path();
-            let mut target = Target::load(&target_path);
-            // Profile snapshot stays so `azvpn up` (no --profile)
-            // works after a `down`/`up` cycle.
+            let mut target = Target::load(&target::default_path());
             target.state = TargetState::Disconnected;
-            if let Err(e) = target.save(&target_path) {
-                error!(
-                    path = %target_path.display(),
-                    error = %e,
-                    "failed to persist target state on down",
-                );
-            }
+            save_target_best_effort(&target);
         }
 
         let active = self.state.active.lock().await;
@@ -339,14 +300,49 @@ fn current_local_ip(conn: &ActiveConnection) -> Option<IpAddr> {
     }
 }
 
-/// Derive the AAD cache key for a profile. `None` for non-AAD profiles
-/// — cert / username-pass / radius profiles don't have a refresh token
-/// to cache.
-pub fn aad_cache_key(profile: &VpnProfile) -> Option<CacheKey> {
-    if profile.clientauth.auth_type != AuthType::Aad {
-        return None;
+/// Persist the AAD refresh token into the daemon-scope cache so a
+/// reboot-time converge can refresh silently without going through
+/// the user's browser. No-op for cert / username-pass / radius
+/// profiles, or when the request didn't carry an RT (interactive
+/// flow that only returned an AT).
+fn stash_daemon_rt(req: &UpRequest) {
+    let (Some(rt), Some(key)) = (req.refresh_token.as_deref(), aad_cache_key(&req.profile)) else {
+        return;
+    };
+    let token = Token {
+        access_token: req.access_token.clone().unwrap_or_default(),
+        expires_at: SystemTime::now() + Duration::from_hours(1),
+        refresh_token: Some(rt.to_owned()),
+    };
+    DaemonTokenCache::for_profile(&key).save(&token);
+}
+
+/// Build the desired target-state record for an `Up` request, ready
+/// to persist via [`Target::save`]. Pure construction — keeps the RPC
+/// handler short and reusable shape ready for unit tests if F.3 lands
+/// retry orchestration that needs to synthesize one of these.
+fn target_from_up(req: &UpRequest) -> Target {
+    Target {
+        schema_version: target::SCHEMA_VERSION,
+        state: TargetState::Connected,
+        profile: Some(req.profile.clone()),
+        profile_label: Some(req.profile_label.clone()),
+        verbose: req.verbose,
     }
-    let aad_profile = profile.clientauth.aad.as_ref()?;
-    let config = AadConfig::from(aad_profile);
-    Some(CacheKey::from(&config))
+}
+
+/// Atomically rewrite `target.json` and log a warning on failure
+/// instead of returning the error — failures here don't prevent the
+/// user's intended operation (the daemon should still bring the
+/// tunnel up / down even if persistence fails), they just mean the
+/// next reboot won't auto-converge correctly.
+fn save_target_best_effort(target: &Target) {
+    let path = target::default_path();
+    if let Err(e) = target.save(&path) {
+        error!(
+            path = %path.display(),
+            error = %e,
+            "failed to persist target state",
+        );
+    }
 }
