@@ -12,13 +12,16 @@ use std::io::Write as _;
 use std::path::Path;
 use std::time::{Duration, UNIX_EPOCH};
 
+use secrecy::{ExposeSecret as _, SecretString};
 use serde::{Deserialize, Serialize};
 
 use crate::Token;
 
 /// JSON shape used by both caches. Identical-bytes-on-disk in either
 /// scope so a future cross-scope migration (or shared debugging tool)
-/// doesn't have to dispatch on origin.
+/// doesn't have to dispatch on origin. Tokens deserialize to plain
+/// `String` (the wire format), then we wrap them in `SecretString` at
+/// the [`Token`] boundary.
 #[derive(Serialize, Deserialize)]
 pub(crate) struct CachedToken {
     pub(crate) access_token: String,
@@ -30,13 +33,16 @@ pub(crate) struct CachedToken {
 impl From<&Token> for CachedToken {
     fn from(token: &Token) -> Self {
         Self {
-            access_token: token.access_token.clone(),
+            access_token: token.access_token.expose_secret().to_owned(),
             expires_at_epoch: token
                 .expires_at
                 .duration_since(UNIX_EPOCH)
                 .unwrap_or_default()
                 .as_secs(),
-            refresh_token: token.refresh_token.clone(),
+            refresh_token: token
+                .refresh_token
+                .as_ref()
+                .map(|s| s.expose_secret().to_owned()),
         }
     }
 }
@@ -44,9 +50,9 @@ impl From<&Token> for CachedToken {
 impl From<CachedToken> for Token {
     fn from(cached: CachedToken) -> Self {
         Self {
-            access_token: cached.access_token,
+            access_token: SecretString::from(cached.access_token),
             expires_at: UNIX_EPOCH + Duration::from_secs(cached.expires_at_epoch),
-            refresh_token: cached.refresh_token,
+            refresh_token: cached.refresh_token.map(SecretString::from),
         }
     }
 }

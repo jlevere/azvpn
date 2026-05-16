@@ -72,7 +72,7 @@ impl DeviceCodeFlow {
 
     #[instrument(skip_all, fields(tenant = %self.config.tenant_id))]
     pub async fn start(&self) -> Result<DeviceCodePrompt, Error> {
-        let scope = format!("{}/.default offline_access", self.config.audience);
+        let scope = self.config.default_scope();
 
         let mut request = self
             .client

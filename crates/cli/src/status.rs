@@ -1,8 +1,11 @@
 //! `azvpn status` — talks to the daemon over tarpc and renders the
-//! returned `StatusReport`. No filesystem snooping.
+//! returned `StatusReport`. When the daemon reports no active
+//! connection, falls back to the on-disk target state so the user
+//! sees whether the daemon is *supposed* to be connecting.
 
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use azvpn_core::target::{self, TargetState};
 use azvpn_ipc::StatusReport;
 use humansize::{BINARY, format_size};
 
@@ -12,12 +15,34 @@ use crate::daemon_client::connect_to_daemon;
 pub async fn run() -> Result<()> {
     let client = connect_to_daemon().await?;
     let report = client.status(tarpc::context::current()).await??;
-    let Some(r) = report else {
-        println!("not connected");
-        return Ok(());
-    };
-    print(&r);
+    if let Some(r) = report {
+        print(&r);
+    } else {
+        print_disconnected();
+    }
     Ok(())
+}
+
+fn print_disconnected() {
+    println!("not connected");
+    print_target_intent("target: ", "profile:");
+}
+
+/// If the on-disk target is `Connected`, render the "daemon idle or
+/// retrying" hint plus the stored profile label. Shared between
+/// `status` and `info`; each caller picks its own column-width prefix
+/// (`status` uses 8-char labels, `info` uses 10-char).
+pub(crate) fn print_target_intent(target_prefix: &str, profile_prefix: &str) {
+    let target = TargetState::load(&target::default_path());
+    if !target.is_connected_intent() {
+        return;
+    }
+    let label = target
+        .profile_label
+        .as_deref()
+        .unwrap_or("(stored profile)");
+    println!("{target_prefix} Connected — daemon idle or retrying");
+    println!("{profile_prefix} {label}");
 }
 
 fn print(r: &StatusReport) {

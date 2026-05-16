@@ -50,26 +50,31 @@ platform's native package manager.
 
 | Capability | macOS | Linux | Windows |
 |---|---|---|---|
-| AAD device-code auth | shipped | shipped | n/a (auth crate is platform-agnostic) |
+| AAD device-code auth | shipped | shipped | shipped |
 | Refresh-token cache | shipped (file, mode 0600) | shipped | shipped |
 | Graph queries (`me`/`groups`/`org`/`manager`) | shipped | shipped | shipped |
 | Profile XML parse | shipped | shipped | shipped |
-| OpenVPN child wrap + mgmt iface | shipped | shipped | shipped (logic; not exercised) |
-| TUN device | via openvpn `utun` | via openvpn `tun` | not started (no `wintun`) |
-| Split-horizon DNS | shipped via `SCDynamicStore` | shipped via systemd-resolved + `/etc/resolv.conf` fallback | not started (NRPT) |
-| Route apply | shipped via `net-route` netlink/PF_ROUTE | shipped | not started |
+| OpenVPN child wrap + mgmt iface | shipped | shipped | shipped |
+| TUN device | via openvpn `utun` | via openvpn `tun` | shipped (wintun) |
+| Split-horizon DNS | shipped via `/etc/resolver/` | shipped via systemd-resolved + `/etc/resolv.conf` fallback | shipped (NRPT registry) |
+| Route apply | shipped via `net-route` netlink/PF_ROUTE | shipped | shipped (winipcfg) |
 | Captive-portal pre-flight | shipped | shipped | shipped |
-| Reachability / sleep-wake watcher | shipped (`SCDynamicStore`) | shipped (rtnetlink + time-jump detector) | not started |
-| Daemon (`azvpnd`) + tarpc IPC | shipped (launchd) | shipped (systemd) | not started (no SCM service) |
-| `install-daemon` self-installer | shipped | shipped | not started |
-| Static `openvpn` 2.6.x in our flake | yes | yes (`pkgsStatic`) | not yet |
+| Reachability / sleep-wake watcher | shipped (`SCNetworkReachability`) | shipped (rtnetlink + time-jump detector) | shipped (`NotifyIpInterfaceChange` via if-watch) |
+| Daemon (`azvpnd`) + tarpc IPC | shipped (launchd, unix socket) | shipped (systemd, unix socket) | shipped (SCM service, named pipe) |
+| Per-RPC IPC peercred authz (G.1) | shipped | shipped | shipped |
+| `install-daemon` self-installer | shipped | shipped | shipped |
+| Static `openvpn` 2.6.x in our flake | yes | yes (`pkgsStatic`) | yes (`pkgsCross.mingwW64`) |
 | Cleanup-on-crash manifest | shipped | shipped | shipped |
+| Declarative target state (F.1) | shipped | shipped | shipped |
+| Wire-version handshake (G.14) | shipped | shipped | shipped |
+| Pre-emptive AAD RT refresh (F.9) | shipped | shipped | shipped |
+| `azvpn login` first-class verb (F.10) | shipped | shipped | shipped |
 | Cert-auth (`AuthType::Certificate`) | **not started** | **not started** | **not started** |
 | HA failover (`secondaryProfileName`) | **blocked on test data** | blocked | blocked |
 | Broker auth (CompanyPortal / WAM) | not started | n/a | not started |
-| Packaging | Homebrew tap (tarball) | `.deb` via cargo-deb | not started |
-| Code-signed binaries | not done (unsigned tarball) | not applicable | not started |
-| CI matrix | macOS + Linux green | green | not in matrix |
+| Packaging | Homebrew tap (tarball) | `.deb` via cargo-deb | MSI (WiX via xtask) |
+| Code-signed binaries | not done (unsigned tarball) | not applicable | shipped (Authenticode, `xtask sign-msi`) |
+| CI matrix | green | green | green (build-msi job) |
 
 Distribution targets per existing memory: aarch64-apple-darwin and
 x86_64/aarch64-linux. No macOS Intel.
@@ -211,91 +216,50 @@ What the official client does that we don't yet:
 
 ### C. Windows tunnel
 
-The largest single chunk of remaining work. Everything Windows-shaped
-lives here. Items annotated with concrete prior-art file pointers we
-should read before writing our own version.
+*Shipped (merged in `5cb8985`, exercised live on jackson-dev).*
+Track preserved here as a record of what landed and where; the open
+Windows-shaped polish lives in tracks A (push-directive tail), F
+(set-and-forget), G (production hardening).
 
-**See [`docs/windows-plan.md`](docs/windows-plan.md) for the concrete
-phased plan, build target, crate inventory, and jackson-dev test
-loop. The C.* list below is the summary; the doc is the working
-plan.**
+What shipped under C:
 
-- **C.1** `wintun` crate for the TUN driver. Drop-in;
-  Microsoft-signed kernel side. *Reference:* Mullvad's
-  `talpid-tunnel/src/tun_provider/` wraps the third-party `tun` crate
-  on Windows — they don't publish their own, so the upstream `wintun`
-  or `tun` crate is the right starting point.
-- **C.2** NRPT (Name Resolution Policy Table) for split-horizon DNS
-  — the macOS `<dnssuffix>` bug fix translated to Windows.
-  *Reference:* `/tmp/tailscale/net/dns/nrpt_windows.go`. They write
-  registry directly via `golang.org/x/sys/windows/registry` (no WMI,
-  no PowerShell) to two paths:
-  `HKLM\SYSTEM\CurrentControlSet\Services\Dnscache\Parameters\DnsPolicyConfig`
-  (local) and `SOFTWARE\Policies\Microsoft\Windows NT\DNSClient\DnsPolicyConfig`
-  (Group Policy). They auto-detect which path to use, generate one
-  GUID per rule, track rule IDs in a custom `NRPTRuleIDs` value for
-  clean removal, and chunk at 50 domains per rule
-  (`nrptMaxDomainsPerRule`). Refresh via `gp.RefreshMachinePolicy(true)`
-  with an `isGPRefreshPending` flag to suppress re-detection feedback.
-  GP-change watch via `gp.NewChangeWatcher()`. *Alternate approach
-  worth noting:* Mullvad's `talpid-dns/src/windows/` does **not** use
-  NRPT — they set primary-interface DNS via three strategies
-  (`iphlpapi::SetInterfaceDnsSettings`, netsh CLI, TCP/IP registry)
-  with an `auto.rs` selector. Different design choice; if NRPT
-  bites us, falling to per-interface DNS is the documented retreat.
-- **C.3** Cert-by-thumbprint via `windows-sys` Crypt32
-  (`CertFindCertificateInStore` with `CERT_FIND_HASH`). Reuses B.1
-  Tier B work. No tailscale prior art — they're WireGuard-only.
-- **C.4** SCM service registration. **Use Mullvad's
-  `windows-service-rs` crate** (0.8.x on crates.io, dual MIT/Apache-2.0).
-  Saves ~200 lines of `windows-sys::Services` boilerplate per app.
-  Surface: `service_dispatcher::start(name, ffi_main)`,
-  `define_windows_service!` macro, `service_control_handler::register`
-  with closure handlers for
-  `ServiceControl::{Stop, Preshutdown, PowerEvent, SessionChange, Interrogate}`,
-  and `ServiceManager`/`Service` for install/uninstall via SCM.
-  *Reference pattern:* Mullvad's own `mullvad-daemon/src/system_service.rs`
-  — they treat `Preshutdown` (OS shutting down) and `Stop`
-  (user/recovery) differently for restart-recovery semantics; spawn
-  a `HibernationDetector` for `PowerEvent::{Suspend, Resume}` to
-  reset state across sleep. We should mirror that distinction in
-  `azvpnd`. *Also:* Tailscale's `cmd/tailscaled/install_windows.go`
-  has a nice recovery-actions setup — escalating delays (1s, 4s, 9s
-  …) via `mgr.RecoveryAction`, worth copying.
-- **C.5** `install-daemon` Windows path. Built on C.4. The
-  `tailscale`-style "CLI subcommand writes the service registration"
-  pattern we already use for launchd/systemd just needs a Windows
-  arm. Idempotent rerun for upgrades.
-- **C.6** Reachability / sleep-wake on Windows. *Reference:*
-  `/tmp/tailscale/net/netmon/netmon_windows.go` — subscribe via
-  `winipcfg.RegisterUnicastAddressChangeCallback` and
-  `RegisterRouteChangeCallback`; each callback hands off to a
-  goroutine over a buffered channel to avoid deadlocks (Rust
-  translation: callback `send`s to a `tokio::sync::mpsc`). They
-  carry a dummy `noDeadlockTicker` (5000h interval) just so the
-  runtime sees scheduled work — Rust's tokio doesn't need that, but
-  the callback-hand-off discipline does translate. *Mullvad
-  alternative:* `talpid-routing/src/windows/default_route_monitor.rs`
-  uses the same `Notify*Change` family plus `NotifyIpInterfaceChange`.
-  Both are good references; pick whichever maps cleaner to our
-  reachability-watcher shape.
-- **C.7** WiX (MSI) or NSIS installer. *Reference:* Tailscale's open
-  tree doesn't include their MSI build (closed-source); their
-  `clientupdate_windows.go` invokes `msiexec` with
-  `TS_UPDATE_WIN_MSI` and verifies Authenticode via
-  `authenticode.Verify()` checking subject `"Tailscale Inc."`. We
-  follow the same shape: WiX `.wxs`, embedded Authenticode manifest
-  (`cmd/tailscaled/windows-manifest.xml` is a good shape
-  reference), signed with our own cert.
-- **C.8** Static openvpn for Windows. The flake currently builds
-  static openvpn 2.6.x for Linux via `pkgsStatic`; Windows likely
-  needs a native MinGW path. Defer until the rest of C is in flight
-  — fall back to a system `openvpn.exe` on `$PATH` until then.
+- **C.1 wintun TUN driver** — via the `wintun` crate.
+- **C.2 NRPT split-horizon DNS** — `crates/tunnel-windows/src/dns/nrpt.rs`
+  writes registry rules under
+  `HKLM\SYSTEM\CurrentControlSet\Services\Dnscache\Parameters\DnsPolicyConfig`,
+  tracks GUIDs for clean removal, mirrors Tailscale's pattern. The
+  retreat to per-interface DNS (Mullvad's `iphlpapi::SetInterfaceDnsSettings`
+  fallback) hasn't been needed — keep it documented in case NRPT
+  bites later.
+- **C.3 Cert-by-thumbprint** — **not yet**, intentionally; ships with
+  B.1 Tier B when cert-auth lands.
+- **C.4 SCM service registration** — via Mullvad's
+  `windows-service-rs` crate. `Preshutdown`/`Stop` distinction wired
+  in `crates/daemon/src/windows.rs`. Recovery-actions setup matches
+  Tailscale's escalating delays.
+- **C.5 install-daemon Windows path** — `crates/cli/src/install_daemon/windows.rs`.
+  Idempotent on rerun.
+- **C.6 Reachability / sleep-wake** — covered by the cross-platform
+  `if-watch`-based `core::reachability` watcher;
+  `NotifyIpInterfaceChange` is the underlying primitive that crate
+  uses on Windows. Wall-clock-jump detector covers suspend/resume.
+- **C.7 WiX MSI installer** — `crates/xtask/src/commands/release_windows.rs`
+  + WiX `.wxs`, Authenticode signing via `xtask sign-msi` in CI.
+- **C.8 Static openvpn for Windows** — built via the flake's
+  `pkgsCross.mingwW64` openvpn (statically-linked OpenSSL),
+  bundled next to `azvpnd.exe` in the MSI under `openvpn\`.
 
-Acceptance: tunnel works from a Windows VM,
-`Get-DnsClientNrptPolicy` shows expected entries, `sc.exe stop azvpnd`
-cleans up routes + NRPT entries, suspend/resume keeps the tunnel
-healthy (or reconnects deterministically).
+What remains Windows-shaped, in their natural homes:
+
+- **A.1 `block-outside-dns` push directive** — see Track A.
+- **A.2 `dhcp-option ADAPTER_DOMAIN_SUFFIX`** — see Track A.
+- **B.1 Tier B / B.3** — cert-store-by-thumbprint and broker auth
+  live in Track B alongside their macOS counterparts.
+
+Acceptance criteria verified on jackson-dev: tunnel up,
+`Get-DnsClientNrptPolicy` shows expected entries, `sc.exe stop
+azvpnd` cleans up routes + NRPT entries, suspend/resume keeps the
+tunnel healthy.
 
 ### D. Hygiene & test discipline (cribbed from tailscale-rs survey)
 
@@ -453,14 +417,12 @@ auto-converge on every startup. This is the central addition.
     Connected to profile X; daemon is currently reconnecting (next
     attempt in 14 s)." Today we show "no active connection"
     regardless of intent.
-  - **Bug found 2026-05-15:** `azvpn info` exits with code 1 on
-    apparent success — the chained `&& echo ===` style of caller
-    commands sees a non-zero status. Likely in the route-print path
-    or the post-print return. Investigate. *Could not reproduce on
-    macOS or the Debian VM after the G.14 handshake landed; leave
-    open until next live test confirms it's actually gone — the
-    most likely root cause (stale daemon producing partial output
-    + late RPC error) is now caught at connect time.*
+  - **Bug found 2026-05-15, confirmed fixed 2026-05-16:**
+    `azvpn info` formerly exited 1 on apparent success. Repro'd as
+    gone on macOS (`azvpn info && echo === done ===` prints `done`
+    cleanly; exit 0). Root cause was almost certainly stale daemon
+    producing partial output + late RPC error, which G.14's
+    wire-handshake mismatch refusal now catches at connect time.
 
 - **F.6 Self-update.** `azvpn update` that delegates to the native
   package manager. *Reference:* Tailscale
@@ -494,31 +456,33 @@ auto-converge on every startup. This is the central addition.
   systemd-resolved path is fine — per-link state is naturally
   scoped to the link and goes away when the link dies.)
 
-- **F.9 Pre-emptive AAD refresh-token refresh.** Today we refresh
-  the RT at connect time. AAD RTs expire after ~90 days of
-  inactivity, sliding. If the daemon stays connected for 89 days
-  without ever doing a Graph call or a reneg-with-AT refresh, the
-  next reneg can fail with `invalid_grant`. Background task in the
-  daemon: every ~24 h, if `now > rt_issued_at + 60 days`, run a
-  silent refresh (existing `auth::refresh::refresh_grant`) against
-  the gateway audience and persist. Surface as F.4 warning if a
-  silent refresh ever fails ("AAD refresh token rejected — `azvpn
-  login` to re-auth"). Edge case: on a fresh `azvpn login`, the
-  daemon should pick up the new cache atomically — we already use
-  temp+rename, just confirm.
+- **F.9 Pre-emptive AAD refresh-token refresh.** *Shipped
+  2026-05-16.* Daemon-side background task in
+  `crates/daemon/src/rt_refresh.rs`. Ticks every 24 h; for each
+  AAD-auth profile whose daemon-cache file is older than 60 days
+  (file mtime as the "last successful AAD exchange" proxy), runs
+  a silent `RefreshGrant` exchange and persists atomically via the
+  existing `DaemonTokenCache::save_refresh_result` (preserves the
+  old RT if AAD's response doesn't carry a rotated one). Only
+  refreshes when `target.state == Connected` — a user who ran
+  `azvpn down` doesn't want background AAD chatter, and an aged
+  RT in that posture is fine (next `up` falls through to
+  interactive). Failure is logged at `warn!` with a hint to run
+  `azvpn login`; F.4 will upgrade this to a typed health warning
+  when the health subsystem lands.
 
-- **F.10 `azvpn login` as a first-class command.** Today the
-  device-code flow runs inside `connect`. Split it out: `azvpn
-  login` opens the browser, runs the device-code flow, persists
-  the RT cache, **does not connect**. Useful when:
-  - You want to refresh creds before they expire (F.9 fallback).
-  - You're scripting and want to verify auth without bringing the
-    tunnel up.
-  - The "headless / SSH / service" fallback path needs a clean
-    home: print the URL + code, optionally write `xdg-open` /
-    `open` URL to a tmpfile if the user wants to copy it.
-  *Reference:* Tailscale's `cli/login.go` is just an alias for
-  `cli/up.go:runUp` with `--login-only`; same shape works for us.
+- **F.10 `azvpn login` as a first-class command.** *Shipped
+  2026-05-16.* New verb `azvpn login [--profile PATH] [--auth
+  MODE]`. Pulls the shared auth machinery from `up.rs` into
+  `crates/cli/src/auth_flow.rs`; `login` uses the same module
+  with a `SessionStrategy::AlwaysRenew` knob that skips the
+  cache-hit short-circuit (a still-valid cached AT isn't good
+  enough — the user typed `login` to *renew*). Silent RT exchange
+  if the cached RT is good, interactive (browser / device-code)
+  otherwise. Writes to the user cache only; the daemon's cache
+  gets re-synced on the next `up`, and F.9 keeps it alive in
+  between. Cert / username-pass / radius profiles get an
+  informational message rather than a no-op silence.
 
 ### G. Production hardening & support flows
 
@@ -527,20 +491,25 @@ point they're the difference between "send me your logs" hell and a
 one-command bundled diagnostic. Both Tailscale and Mullvad
 independently converged on most of these; we should too.
 
-- **G.1 PeerCreds-based IPC auth.** Today our unix socket is
-  protected only by filesystem permissions on the parent directory.
-  Add daemon-side per-RPC authorization using `SO_PEERCRED` (Linux)
-  / `LOCAL_PEERCRED` (macOS), checking UID and group membership.
-  Some RPCs (`up`, `down`, `disconnect`, `install-daemon`,
-  `bugreport upload`) require admin; read-only RPCs (`status`,
-  `info`, `pushed`, `watch`) are open to any local user. *Reference:*
-  Tailscale `/tmp/tailscale/ipn/ipnauth/ipnauth.go` — peercred
-  lookup, username resolution, root-only enforcement on the daemon
-  side. Mullvad's complementary pattern (`mullvad-management-interface/src/lib.rs`):
-  socket chowned to a specific group via `MULLVAD_MANAGEMENT_SOCKET_GROUP`
-  env var with mode 0o760 — OS-level enforcement of "only members
-  of group `azvpn` may connect." Use both: peercred for per-RPC
-  authz, group for the coarse outer gate. **Security gap today.**
+- **G.1 PeerCreds-based IPC auth.** *Shipped 2026-05-16.*
+  Daemon-side per-RPC authorization on every accepted connection.
+  Windows: `ImpersonateNamedPipeClient` + `TokenUser` + admin-group
+  check (with UAC linked-token retry). Unix: tokio's
+  `UnixStream::peer_cred()` (kernel-asserted uid/gid/pid via
+  `SO_PEERCRED` on Linux and `getpeereid` + `LOCAL_PEEREPID` on
+  macOS) plus an NSS lookup that resolves the peer's username and
+  supplementary groups so the admin check is "uid==0 OR primary
+  gid matches the daemon's socket group OR socket group appears in
+  supplementary groups" — matching the kernel's own admission on
+  the file ACL. Mutating RPCs (`up`, `down`) call `require_admin`;
+  read-only RPCs stay open. Identity probe failures refuse the
+  connection entirely. The configured socket group (`AZVPND_GROUP`,
+  default `admin` macOS / `sudo` Linux) is the single source of
+  truth threaded from `socket::bind` through the accept loop into
+  `fetch_unix_identity`. *References:* Tailscale
+  `/tmp/tailscale/ipn/ipnauth/ipnauth.go` for the per-RPC peercred
+  shape; Mullvad `mullvad-management-interface/src/lib.rs` for the
+  outer-group-gate pattern (we already had that).
 
 - **G.2 Per-operation watchdog.** Wrap critical work (connect,
   dns_apply, route_apply, profile_load) in a watchdog that fires at
@@ -706,16 +675,14 @@ independently converged on most of these; we should too.
 
 ### Recommended order for G
 
-If you only land four things here, in this order:
+G.1 is shipped (2026-05-16). The remaining three, in order:
 
 1. **G.6 + G.7** together — log redaction at write time, on-disk
    ring buffer. Prerequisite for G.5 and good in their own right.
 2. **G.5** — bugreport bundle. Force multiplier for everything
    else; once it exists, every other bug becomes "share the
    bundle" instead of an interview.
-3. **G.1** — PeerCreds IPC auth. Current security gap; small,
-   well-scoped, important.
-4. **G.3** — doctor. Biggest first-run UX win on top of F.1; the
+3. **G.3** — doctor. Biggest first-run UX win on top of F.1; the
    place new users will notice the most polish.
 
 ## 5. Deferred / declined, with reasoning preserved

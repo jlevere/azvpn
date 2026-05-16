@@ -6,7 +6,7 @@ use azvpn_ipc::{InfoReport, StatusReport, TunnelRoute};
 
 use crate::Result;
 use crate::daemon_client::connect_to_daemon;
-use crate::status::format_uptime;
+use crate::status::{format_uptime, print_target_intent};
 
 pub async fn run() -> Result<()> {
     let client = connect_to_daemon().await?;
@@ -19,7 +19,7 @@ fn print(r: &InfoReport) {
     println!("=== session ===");
     match &r.status {
         Some(s) => print_status(s),
-        None => println!("(not connected)"),
+        None => print_disconnected_target(),
     }
 
     println!();
@@ -61,6 +61,11 @@ fn print_status(s: &StatusReport) {
     if let Some(ip) = s.local_ip {
         println!("ip:       {ip}");
     }
+}
+
+fn print_disconnected_target() {
+    println!("(not connected)");
+    print_target_intent("target:  ", "profile: ");
 }
 
 fn print_route(r: &TunnelRoute) {

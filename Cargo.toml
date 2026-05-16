@@ -76,7 +76,6 @@ base64 = "0.22"
 sha1 = "0.11"
 pem = "3"
 url = "2"
-hickory-resolver = { version = "0.24", default-features = false, features = ["tokio-runtime", "system-config"] }
 hickory-proto = { version = "0.24", default-features = false }
 net-route = "0.4"
 libc = "0.2"
@@ -94,19 +93,18 @@ backon = { version = "1", default-features = false, features = ["std-blocking-sl
 # (mxinden) and used in libp2p, so it tracks Tokio versions well.
 if-watch = { version = "3", default-features = false, features = ["tokio"] }
 uzers = { version = "0.12", default-features = false }
-dirs = "5"
-# Byte-size formatting (KiB/MiB/GiB/TiB style). Saves us hand-rolling a
-# magnitude table, picks units we'd have picked anyway, and rounds
-# consistently with `ls -h` / `du -h` output people already know.
-humansize = "2"
-# Human-readable Duration formatting / parsing (`2h 5m 30s`). Used by
-# the CLI's uptime line in `azvpn status`.
-humantime = "2"
-# Modern datetime library by BurntSushi (regex/ripgrep). We only need
-# epoch-seconds → RFC 3339 here, but jiff handles TZ + parsing if more
-# datetime work shows up later — replaces hand-rolled civil-from-days
-# arithmetic for JWT iat/exp claim rendering.
-jiff = "0.2"
+# Wrap AAD bearer tokens / refresh tokens in `SecretString`: no Debug
+# impl (prints `[REDACTED]`), zeroes on drop, `.expose_secret()` is
+# the explicit unwrap. Prevents accidental log leaks via tracing
+# fields or struct Debug. Wire-side: SecretString serializes as a
+# plain String for tarpc/bincode — the IPC channel itself is the
+# transport-level security.
+secrecy = { version = "0.10", features = ["serde"] }
+# `directories` gives ProjectDirs::from("com", "jlevere", "azvpn") that
+# produces OS-idiomatic per-app paths: bundle-ID-shaped subdirs on
+# macOS (`com.jlevere.azvpn`), `<vendor>/<app>` on Windows, XDG basedir
+# on Linux. Replaces hand-rolled `~/Library/Application Support/<X>` etc.
+directories = "5"
 # Pure-Rust D-Bus. No libdbus-1 C dep (sidesteps the cross-compile
 # pain we hit with libdbus-sys). Tokio-native via `tokio` feature.
 # Used by tunnel-linux to talk to systemd-resolved + systemd1 over

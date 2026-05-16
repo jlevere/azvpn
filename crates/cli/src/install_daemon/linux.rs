@@ -38,7 +38,7 @@ pub async fn install(daemon: Option<PathBuf>, openvpn: Option<PathBuf>) -> Resul
     check_executable("openvpn", &openvpn)?;
 
     std::fs::create_dir_all("/var/run/azvpn")?;
-    std::fs::create_dir_all("/var/lib/azvpn")?;
+    std::fs::create_dir_all(azvpn_auth::paths::system_state_dir())?;
 
     // Best-effort cleanup of any prior install before laying down a
     // fresh unit. systemd refuses `EnableUnitFiles` for a unit that's

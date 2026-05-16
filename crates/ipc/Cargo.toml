@@ -11,7 +11,6 @@ publish.workspace = true
 [dependencies]
 azvpn-openvpn = { workspace = true }
 azvpn-profile = { workspace = true }
-ipnet = { workspace = true }
 serde = { workspace = true }
 tarpc = { workspace = true }
 thiserror = { workspace = true }
@@ -38,6 +37,11 @@ windows-sys = { workspace = true, features = [
     "Win32_System_Threading",
 ] }
 widestring = { workspace = true }
+
+# Unix: peercred + NSS lookup for `identity::fetch_unix_identity`.
+[target.'cfg(unix)'.dependencies]
+tokio = { workspace = true }
+uzers = { workspace = true }
 
 [dev-dependencies]
 tokio = { workspace = true }

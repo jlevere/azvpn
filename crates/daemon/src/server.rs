@@ -6,7 +6,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use azvpn_auth::{Token, aad_cache_key, daemon_cache::DaemonTokenCache};
+use azvpn_auth::{ExposeSecret, SecretString, Token, aad_cache_key, daemon_cache::DaemonTokenCache};
 use azvpn_core::commands::connect::{self, ConnectOptions, ConnectionStatus};
 use azvpn_core::metrics::ConnectionMetrics;
 use azvpn_core::target::{self, State as TargetState, TargetState as Target};
@@ -45,11 +45,9 @@ struct ActiveConnection {
 pub struct AzvpndServer {
     state: Arc<DaemonState>,
     /// Caller identity for the current connection. `None` on the
-    /// base server (used by `try_converge` startup work that runs
-    /// without an IPC peer); `Some` on per-connection clones the
-    /// accept loop creates via [`with_identity`]. Cheap `Option<Arc>`
-    /// clone — the inner identity is read-only per connection so
-    /// `Arc` keeps the sharing free of locks.
+    /// base server (boot-time converge has no peer); `Some` on the
+    /// per-connection clones the accept loop creates via
+    /// [`with_identity`].
     identity: Option<Arc<ClientIdentity>>,
 }
 
@@ -69,11 +67,7 @@ impl AzvpndServer {
     /// can consult [`AzvpndServer::require_admin`] to gate mutating
     /// operations. The underlying `DaemonState` Arc is shared, so
     /// this is cheap and concurrent-safe.
-    ///
-    /// Windows-only today; the Unix half of G.1 (per-RPC enforcement
-    /// keyed on `SO_PEERCRED` / `LOCAL_PEERCRED`) lands later.
     #[must_use]
-    #[cfg(target_os = "windows")]
     pub fn with_identity(&self, identity: ClientIdentity) -> Self {
         Self {
             state: self.state.clone(),
@@ -81,17 +75,10 @@ impl AzvpndServer {
         }
     }
 
-    /// Reject the current RPC if the caller isn't admin. Returns a
-    /// human-readable `IpcError::PermissionDenied` that the CLI
-    /// prints verbatim.
-    ///
-    /// **Behavior when no identity is attached** (the `None` case):
-    /// permit the call. This covers two contexts —
-    /// `try_converge`-spawned work that runs without a peer (boot-
-    /// time auto-reconnect), and the Unix accept path which
-    /// doesn't yet populate `ClientIdentity` (G.1's Unix half).
-    /// Once Unix lands we'll make this stricter; for now Unix
-    /// callers retain the existing socket-perm-based gating.
+    /// Reject the current RPC if the caller isn't admin. The `None`
+    /// branch (permit) is reserved for `try_converge`-spawned work
+    /// that runs without an IPC peer; every RPC arriving via the
+    /// accept loop has an identity attached.
     fn require_admin(&self, operation: &str) -> Result<(), IpcError> {
         let Some(identity) = self.identity.as_deref() else {
             return Ok(());
@@ -115,7 +102,7 @@ impl AzvpndServer {
         &self,
         profile: VpnProfile,
         profile_label: String,
-        access_token: Option<String>,
+        access_token: Option<SecretString>,
         verbose: bool,
     ) -> Result<(), IpcError> {
         let mut active = self.state.active.lock().await;
@@ -163,11 +150,15 @@ impl AzvpndServer {
         });
         drop(active);
 
+        // AT only lives long enough to land in the openvpn
+        // `auth-user-pass` tempfile (0600) and then drops.
+        let access_token_plain = access_token.map(|s| s.expose_secret().to_owned());
         let state = self.state.clone();
         tokio::spawn(async move {
             info!("starting connect task");
             let result =
-                connect::run(opts, access_token, status_tx, pushed_tx, metrics_tx, cancel).await;
+                connect::run(opts, access_token_plain, status_tx, pushed_tx, metrics_tx, cancel)
+                    .await;
             if let Err(e) = result {
                 error!(error = %e, "connect task ended in error");
             } else {
@@ -249,7 +240,7 @@ impl AzvpnApi for AzvpndServer {
         self.start_connection(
             req.profile,
             req.profile_label,
-            req.access_token,
+            req.access_token.map(SecretString::from),
             req.verbose,
         )
         .await
@@ -360,10 +351,13 @@ fn stash_daemon_rt(req: &UpRequest) {
     let (Some(rt), Some(key)) = (req.refresh_token.as_deref(), aad_cache_key(&req.profile)) else {
         return;
     };
+    // AT is empty on disk: converge always silent-refreshes from the
+    // RT rather than reusing the cached AT, so saving the bearer here
+    // would be a needless extra copy of a 1h-expiring credential.
     let token = Token {
-        access_token: req.access_token.clone().unwrap_or_default(),
+        access_token: SecretString::from(String::new()),
         expires_at: SystemTime::now() + Duration::from_hours(1),
-        refresh_token: Some(rt.to_owned()),
+        refresh_token: Some(SecretString::from(rt.to_owned())),
     };
     DaemonTokenCache::for_profile(&key).save(&token);
 }

@@ -21,28 +21,20 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use azvpn_profile::{AuthType, VpnProfile};
 use tracing::{info, warn};
 
 use crate::cache_shared::{CachedToken, write_atomic_private};
-use crate::{CacheKey, Token};
+use crate::{
+    AadConfig, CacheKey, Error, ExposeSecret, RefreshGrant, Result, SecretString, Token,
+};
 
 /// Where the daemon stores its per-profile token caches. Created with
 /// mode 0700 on Unix the first time the daemon writes — only root can
 /// read the directory listing.
 #[must_use]
 pub fn default_dir() -> PathBuf {
-    #[cfg(target_os = "macos")]
-    {
-        PathBuf::from("/Library/Application Support/com.azvpn/auth-cache")
-    }
-    #[cfg(target_os = "linux")]
-    {
-        PathBuf::from("/var/lib/azvpn/auth-cache")
-    }
-    #[cfg(target_os = "windows")]
-    {
-        PathBuf::from(r"C:\ProgramData\azvpn\auth-cache")
-    }
+    crate::paths::system_state_dir().join("auth-cache")
 }
 
 /// One-cache-per-profile, like the user-scope [`crate::TokenCache`].
@@ -71,6 +63,13 @@ impl DaemonTokenCache {
         }
     }
 
+    /// On-disk path the cache writes to. Exposed so callers can stat
+    /// the file's mtime as a "last successful exchange" proxy.
+    #[must_use]
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+
     /// Read the cached token. `None` on missing or unparseable —
     /// caller is expected to fall back to interactive sign-in
     /// (which writes a fresh cache via `save`).
@@ -82,7 +81,7 @@ impl DaemonTokenCache {
 
     /// Read just the RT. Convenience for "I want to refresh; do I
     /// have anything to refresh from?"
-    pub fn load_refresh_token(&self) -> Option<String> {
+    pub fn load_refresh_token(&self) -> Option<SecretString> {
         self.load().and_then(|t| t.refresh_token)
     }
 
@@ -121,10 +120,33 @@ impl DaemonTokenCache {
     #[must_use]
     pub fn save_refresh_result(&self, mut token: Token, previous_rt: &str) -> Token {
         if token.refresh_token.is_none() {
-            token.refresh_token = Some(previous_rt.to_owned());
+            token.refresh_token = Some(SecretString::from(previous_rt.to_owned()));
         }
         self.save(&token);
         token
+    }
+
+    /// Exchange the stored refresh token for a fresh AT+RT pair and
+    /// persist atomically. The single canonical path for any daemon-
+    /// side refresh — boot-time converge and the F.9 periodic
+    /// refresher both go through this. Errors propagate untyped HTTP
+    /// / JSON failures via the crate `Error` enum.
+    pub async fn silent_refresh(&self, profile: &VpnProfile) -> Result<Token> {
+        if !matches!(profile.clientauth.auth_type, AuthType::Aad) {
+            return Err(Error::Other("profile is not AAD-auth".into()));
+        }
+        let aad_profile = profile
+            .clientauth
+            .aad
+            .as_ref()
+            .ok_or_else(|| Error::Other("AAD profile missing <aad> config block".into()))?;
+        let rt = self.load_refresh_token().ok_or(Error::NoRefreshToken)?;
+        let aad_config = AadConfig::from(aad_profile);
+        let grant = RefreshGrant::new(&aad_config.tenant_id, aad_config.client_id())?;
+        let token = grant
+            .exchange(rt.expose_secret(), &aad_config.default_scope())
+            .await?;
+        Ok(self.save_refresh_result(token, rt.expose_secret()))
     }
 }
 
@@ -139,10 +161,14 @@ mod tests {
 
     fn token() -> Token {
         Token {
-            access_token: "at".to_owned(),
+            access_token: SecretString::from("at".to_owned()),
             expires_at: SystemTime::now() + Duration::from_hours(1),
-            refresh_token: Some("rt-1".to_owned()),
+            refresh_token: Some(SecretString::from("rt-1".to_owned())),
         }
+    }
+
+    fn expose(t: &SecretString) -> &str {
+        t.expose_secret()
     }
 
     #[test]
@@ -151,8 +177,8 @@ mod tests {
         let cache = DaemonTokenCache::at(dir.path(), &key());
         cache.save(&token());
         let loaded = cache.load().unwrap();
-        assert_eq!(loaded.access_token, "at");
-        assert_eq!(loaded.refresh_token.as_deref(), Some("rt-1"));
+        assert_eq!(expose(&loaded.access_token), "at");
+        assert_eq!(loaded.refresh_token.as_ref().map(expose), Some("rt-1"));
     }
 
     #[test]
@@ -169,9 +195,9 @@ mod tests {
         let mut new_token = token();
         new_token.refresh_token = None;
         let saved = cache.save_refresh_result(new_token, "rt-from-prev");
-        assert_eq!(saved.refresh_token.as_deref(), Some("rt-from-prev"));
+        assert_eq!(saved.refresh_token.as_ref().map(expose), Some("rt-from-prev"));
         let loaded = cache.load().unwrap();
-        assert_eq!(loaded.refresh_token.as_deref(), Some("rt-from-prev"));
+        assert_eq!(loaded.refresh_token.as_ref().map(expose), Some("rt-from-prev"));
     }
 
     #[cfg(unix)]

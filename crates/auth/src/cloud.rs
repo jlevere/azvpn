@@ -12,7 +12,10 @@ use base64::Engine as _;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use serde::Deserialize;
 
-use crate::{ARM_RESOURCE, Error, GRAPH_RESOURCE, RefreshGrant, Result, TokenCache};
+use crate::{
+    ARM_RESOURCE, Error, ExposeSecret, GRAPH_RESOURCE, RefreshGrant, Result, SecretString,
+    TokenCache,
+};
 
 /// Tenant + client IDs extracted from the cached access token's JWT claims.
 /// The refresh token itself is opaque; we read tenant/client from the
@@ -32,7 +35,7 @@ pub fn read_context() -> Result<AadContext> {
     let access = TokenCache::last_used()
         .and_then(|c| c.load_access_token())
         .ok_or(Error::NoCachedToken)?;
-    extract_context(&access)
+    extract_context(access.expose_secret())
 }
 
 fn extract_context(access_token: &str) -> Result<AadContext> {
@@ -50,23 +53,26 @@ fn extract_context(access_token: &str) -> Result<AadContext> {
 
 /// Exchange the cached refresh token for an access token scoped to
 /// `resource`. The CLI cache layout is assumed (see [`TokenCache`]).
-async fn exchange_for(scope: &str) -> Result<String> {
+async fn exchange_for(scope: &str) -> Result<SecretString> {
     let cache = TokenCache::last_used().ok_or(Error::NoCachedToken)?;
     let access = cache.load_access_token().ok_or(Error::NoCachedToken)?;
     let refresh = cache.load_refresh_token().ok_or(Error::NoRefreshToken)?;
-    let ctx = extract_context(&access)?;
+    let ctx = extract_context(access.expose_secret())?;
     let grant = RefreshGrant::new(ctx.tenant_id, ctx.client_id)?;
-    Ok(grant.exchange(&refresh, scope).await?.access_token)
+    Ok(grant
+        .exchange(refresh.expose_secret(), scope)
+        .await?
+        .access_token)
 }
 
 /// Bearer token scoped to Microsoft Graph (`https://graph.microsoft.com`).
-pub async fn graph_token() -> Result<String> {
+pub async fn graph_token() -> Result<SecretString> {
     exchange_for(GRAPH_RESOURCE).await
 }
 
 /// Bearer token scoped to Azure Resource Manager
 /// (`https://management.azure.com`).
-pub async fn arm_token() -> Result<String> {
+pub async fn arm_token() -> Result<SecretString> {
     exchange_for(ARM_RESOURCE).await
 }
 
@@ -99,12 +105,12 @@ async fn typed_get<T: serde::de::DeserializeOwned>(
     service: &'static str,
     base: &str,
     path: &str,
-    token: String,
+    token: SecretString,
 ) -> Result<T> {
     let url = format!("{base}{path}");
     let resp = reqwest::Client::new()
         .get(&url)
-        .bearer_auth(&token)
+        .bearer_auth(token.expose_secret())
         .send()
         .await?;
     let status = resp.status();

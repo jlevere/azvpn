@@ -110,13 +110,24 @@ azvpn-auth = { workspace = true }
 azvpn-core = { workspace = true }
 azvpn-ipc = { workspace = true }
 azvpn-profile = { workspace = true }
+anyhow = "1"
 base64 = { workspace = true }
 clap = { workspace = true }
-hickory-resolver = { workspace = true }
-humansize = { workspace = true }
+# `-v`/`-vv`/`-q` clap-derive integration. Defaults to WARN; tracing
+# feature yields a LevelFilter we feed to EnvFilter. RUST_LOG wins.
+clap-verbosity-flag = { version = "3", features = ["tracing"] }
+# `azvpn dns lookup` — direct DNS resolver for split-horizon checks.
+hickory-resolver = { version = "0.24", default-features = false, features = ["tokio-runtime", "system-config"] }
+# Byte-size formatting for the `status` traffic line.
+humansize = "2"
+# Human-readable Duration for uptime / "N ago" lines.
+humantime = "2"
 if-addrs = { workspace = true }
-humantime = { workspace = true }
-jiff = { workspace = true }
+# epoch-seconds → RFC 3339 for the `whoami` JWT iat/exp lines.
+jiff = "0.2"
+# Embed git short-commit + build date into `azvpn --version`. Saves
+# every support exchange that starts with "what version are you on?"
+shadow-rs = { version = "1", default-features = false }
 reqwest = { workspace = true }
 open = { workspace = true }
 serde = { workspace = true }
@@ -148,6 +159,9 @@ windows-sys = { workspace = true, features = [
     "Win32_Security",
     "Win32_System_Threading",
 ] }
+
+[build-dependencies]
+shadow-rs = { version = "1", default-features = false, features = ["build", "git2"] }
 
 [lints]
 workspace = true
