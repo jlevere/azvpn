@@ -11,7 +11,7 @@
 //! Linux, Alpine, Docker, CI), we fall back to atomic 0600 files in
 //! the user's XDG state directory.
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use base64::Engine as _;
@@ -19,6 +19,7 @@ use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use serde::{Deserialize, Serialize};
 use tracing::{info, warn};
 
+use crate::cache_shared::{CachedToken, write_atomic_private};
 use crate::{Error, Token};
 
 const SERVICE: &str = "com.jlevere.azvpn";
@@ -99,38 +100,6 @@ impl From<&crate::AadConfig> for CacheKey {
     }
 }
 
-#[derive(Serialize, Deserialize)]
-struct CachedToken {
-    access_token: String,
-    expires_at_epoch: u64,
-    #[serde(default)]
-    refresh_token: Option<String>,
-}
-
-impl From<&Token> for CachedToken {
-    fn from(token: &Token) -> Self {
-        Self {
-            access_token: token.access_token.clone(),
-            expires_at_epoch: token
-                .expires_at
-                .duration_since(UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_secs(),
-            refresh_token: token.refresh_token.clone(),
-        }
-    }
-}
-
-impl From<CachedToken> for Token {
-    fn from(cached: CachedToken) -> Self {
-        Self {
-            access_token: cached.access_token,
-            expires_at: UNIX_EPOCH + Duration::from_secs(cached.expires_at_epoch),
-            refresh_token: cached.refresh_token,
-        }
-    }
-}
-
 type BackendError = Box<dyn std::error::Error + Send + Sync>;
 
 /// Storage primitive: keyed by an opaque `slot` string (account name on
@@ -206,7 +175,7 @@ impl KeyStoreBackend for FileBackend {
     }
 
     fn save(&self, slot: &str, data: &str) -> Result<(), BackendError> {
-        write_private(&self.path_for(slot), data.as_bytes())?;
+        write_atomic_private(&self.path_for(slot), data.as_bytes(), None)?;
         Ok(())
     }
 
@@ -282,7 +251,7 @@ impl TokenCache {
     /// file shape on the public API would let callers bypass the
     /// keyring on real systems.
     #[cfg(test)]
-    pub(crate) fn with_file_at(dir: &Path, key: CacheKey) -> Self {
+    pub(crate) fn with_file_at(dir: &std::path::Path, key: CacheKey) -> Self {
         let backend: Box<dyn KeyStoreBackend> = Box::new(FileBackend {
             dir: dir.to_owned(),
         });
@@ -485,36 +454,6 @@ fn default_state_dir() -> PathBuf {
         .join("azvpn")
 }
 
-/// Write `data` to `path` atomically with mode 0600 (Unix). The file
-/// holds an AAD refresh + access token — must not be world-readable.
-/// Temp-then-rename guards a half-written file if we crash mid-save.
-fn write_private(path: &Path, data: &[u8]) -> std::io::Result<()> {
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-    let tmp = path.with_extension("tmp");
-
-    #[cfg(unix)]
-    {
-        use std::io::Write as _;
-        use std::os::unix::fs::OpenOptionsExt as _;
-        let mut f = std::fs::OpenOptions::new()
-            .write(true)
-            .create(true)
-            .truncate(true)
-            .mode(0o600)
-            .open(&tmp)?;
-        f.write_all(data)?;
-        f.sync_all()?;
-    }
-    #[cfg(not(unix))]
-    {
-        std::fs::write(&tmp, data)?;
-    }
-
-    std::fs::rename(&tmp, path)
-}
-
 #[cfg(all(test, unix))]
 mod tests {
     use super::*;
@@ -694,7 +633,7 @@ mod tests {
     fn write_private_sets_mode_0600() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("nested/token.json");
-        write_private(&path, b"{}").unwrap();
+        write_atomic_private(&path, b"{}", None).unwrap();
 
         let mode = std::fs::metadata(&path).unwrap().permissions().mode();
         assert_eq!(mode & 0o777, 0o600, "actual: {:o}", mode & 0o777);
@@ -704,7 +643,7 @@ mod tests {
     fn write_private_creates_parent_dirs() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("a/b/c/token.json");
-        write_private(&path, b"hi").unwrap();
+        write_atomic_private(&path, b"hi", None).unwrap();
         assert_eq!(std::fs::read(&path).unwrap(), b"hi");
     }
 
@@ -712,8 +651,8 @@ mod tests {
     fn write_private_overwrites_existing() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("token.json");
-        write_private(&path, b"old").unwrap();
-        write_private(&path, b"new").unwrap();
+        write_atomic_private(&path, b"old", None).unwrap();
+        write_atomic_private(&path, b"new", None).unwrap();
         assert_eq!(std::fs::read(&path).unwrap(), b"new");
         let mode = std::fs::metadata(&path).unwrap().permissions().mode();
         assert_eq!(mode & 0o777, 0o600);
