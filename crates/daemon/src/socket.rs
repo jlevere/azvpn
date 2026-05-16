@@ -1,6 +1,12 @@
 //! Unix-socket bind logic: create parent directory, remove any stale
 //! socket from a previous run, bind, and set ownership / mode so only
 //! members of the configured group can connect.
+//!
+//! Unix-only. The Windows equivalent is a named-pipe transport in
+//! `azvpn-ipc::transport::windows` (W1.3 in `docs/windows-plan.md`);
+//! the daemon's Windows entry uses that instead of this module.
+
+#![cfg(unix)]
 
 use std::os::unix::fs::PermissionsExt as _;
 use std::path::{Path, PathBuf};

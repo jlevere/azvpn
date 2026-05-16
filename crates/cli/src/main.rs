@@ -9,7 +9,7 @@ mod down;
 mod error;
 mod groups;
 mod info;
-#[cfg(any(target_os = "macos", target_os = "linux"))]
+#[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
 mod install_daemon;
 mod logging;
 mod manager;
@@ -94,7 +94,7 @@ enum Command {
     /// (launchd plist on macOS, systemd .service on Linux) and starts it.
     /// Mirrors `tailscaled install-system-daemon` so package installs
     /// don't have to dump a multi-step caveats block. Requires sudo.
-    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
     InstallDaemon {
         /// Override the azvpnd binary path baked into the unit. Default:
         /// `<prefix>/libexec/azvpnd` on macOS, `/usr/lib/azvpn/azvpnd`
@@ -109,7 +109,7 @@ enum Command {
     },
     /// Stop and remove the system daemon installed by install-daemon.
     /// Requires sudo.
-    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
     UninstallDaemon,
 }
 
@@ -149,11 +149,11 @@ async fn main() {
         Command::Dns(DnsCommand::Lookup { host, via }) => {
             report(dns::lookup(&host, via.as_deref()).await)
         }
-        #[cfg(any(target_os = "macos", target_os = "linux"))]
+        #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
         Command::InstallDaemon { daemon, openvpn } => {
             report(install_daemon::install(daemon, openvpn).await)
         }
-        #[cfg(any(target_os = "macos", target_os = "linux"))]
+        #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
         Command::UninstallDaemon => report(install_daemon::uninstall().await),
         Command::Import { path } => {
             tracing::info!(?path, "importing profile");

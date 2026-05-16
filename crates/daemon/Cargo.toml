@@ -35,6 +35,30 @@ libc = { workspace = true }
 tracing-journald = { workspace = true }
 sd-notify = { workspace = true }
 
+# Windows daemon: SCM service shell (windows-service),
+# hibernation detector + admin check + GP refresh (windows-sys),
+# named-pipe SDDL helpers (widestring), and the rolling-file
+# logger that replaces journald on Windows (tracing-appender).
+# See docs/windows-plan.md §2.4–§2.8.
+[target.'cfg(target_os = "windows")'.dependencies]
+windows-service = { workspace = true }
+windows-sys = { workspace = true, features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_Security_Authentication_Identity",
+    "Win32_Security_Authorization",
+    "Win32_System_Services",
+    "Win32_System_RemoteDesktop",
+    "Win32_System_GroupPolicy",
+    "Win32_System_Threading",
+    # `routes::interface_name` does ifindex -> LUID -> alias for the
+    # `info` RPC's pretty display of route interfaces on Windows.
+    "Win32_NetworkManagement_IpHelper",
+    "Win32_NetworkManagement_Ndis",
+] }
+widestring = { workspace = true }
+tracing-appender = { workspace = true }
+
 [dev-dependencies]
 tempfile = { workspace = true }
 

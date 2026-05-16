@@ -14,6 +14,10 @@ Deep-dive companions, kept separate so this doc stays read-in-one-sitting:
 - [`docs/refactor-plan.md`](docs/refactor-plan.md) — historical record
   of the POC→base refactor. The refactor shipped; doc is preserved as
   the postmortem.
+- [`docs/windows-plan.md`](docs/windows-plan.md) — concrete
+  implementation plan for the Windows track (C). Owns the build
+  target, design decisions, phased work items, crate inventory, and
+  the win-test-vm test loop.
 
 ---
 
@@ -210,6 +214,11 @@ What the official client does that we don't yet:
 The largest single chunk of remaining work. Everything Windows-shaped
 lives here. Items annotated with concrete prior-art file pointers we
 should read before writing our own version.
+
+**See [`docs/windows-plan.md`](docs/windows-plan.md) for the concrete
+phased plan, build target, crate inventory, and win-test-vm test
+loop. The C.* list below is the summary; the doc is the working
+plan.**
 
 - **C.1** `wintun` crate for the TUN driver. Drop-in;
   Microsoft-signed kernel side. *Reference:* Mullvad's

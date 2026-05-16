@@ -168,12 +168,42 @@ fn diff(
     (to_add, to_remove)
 }
 
+/// Match Windows IP Helper error codes that std's `io::Error` mapping
+/// misses. `CreateIpForwardEntry2` and `DeleteIpForwardEntry2` return
+/// Win32 codes that don't all surface as the same `io::ErrorKind` Unix
+/// kernel-route errors do — so we widen the match.
+fn is_already_exists(e: &std::io::Error) -> bool {
+    // EEXIST (17) on Unix maps to AlreadyExists. On Windows
+    // ERROR_OBJECT_ALREADY_EXISTS (5010) is what
+    // CreateIpForwardEntry2 returns for a duplicate route and std
+    // does NOT map it to AlreadyExists.
+    e.kind() == std::io::ErrorKind::AlreadyExists || e.raw_os_error() == Some(5010)
+}
+
+/// Kernel-route delete that means "this entry doesn't exist." `ESRCH`
+/// on Unix; Win32 `ERROR_NOT_FOUND` (2) on Windows. Also accepted
+/// from cleanup-on-startup where the kernel may have already torn
+/// the routes down (`crate::cleanup::clear_routes`).
+pub(crate) fn is_not_found(e: &std::io::Error) -> bool {
+    e.kind() == std::io::ErrorKind::NotFound
+        || e.raw_os_error() == Some(libc::ESRCH)
+        || e.raw_os_error() == Some(2)
+}
+
 /// Owns the set of routes we've installed for the live tunnel. Holds an
 /// open `net_route::Handle` so successive `apply` / `clear` calls reuse
 /// the same kernel session.
 pub struct RouteManager {
     handle: Handle,
     installed: HashMap<IpNet, IpAddr>,
+    /// Interface index used when adding routes — same value for every
+    /// route in the live set, since they all transit the same tunnel
+    /// interface. Stored so `clear()` rebuilds each route with the
+    /// same shape used to add it; Windows's `DeleteIpForwardEntry2`
+    /// matches on `InterfaceIndex`, so a delete without it silently
+    /// fails to find the entry. `None` on Unix (kernel resolves the
+    /// iface from the gateway alone).
+    installed_ifindex: Option<u32>,
 }
 
 impl RouteManager {
@@ -182,7 +212,55 @@ impl RouteManager {
         Ok(Self {
             handle,
             installed: HashMap::new(),
+            installed_ifindex: None,
         })
+    }
+
+    /// Resolve the interface index `local_ip` is bound to by reading
+    /// the routing table for the on-link host route the kernel
+    /// auto-installs when an interface gets an address.
+    ///
+    /// Used to set `Route::with_ifindex` on Windows, where
+    /// `CreateIpForwardEntry2` returns `ERROR_NOT_FOUND` (2) without
+    /// an explicit `InterfaceIndex` — gateway-only routes work on
+    /// Unix because the kernel resolves the iface from the next-hop,
+    /// but Windows refuses.
+    ///
+    /// On Unix the kernel installs the host route synchronously with
+    /// the tun device, so one read of the route table is enough. On
+    /// Windows the daemon receives the `PUSH_REPLY` before openvpn
+    /// finishes `netsh interface ip set address`, so we poll briefly
+    /// until the host route appears. Returns `None` after timeout
+    /// (Unix happy path falls through immediately if not found).
+    pub async fn resolve_local_ifindex(&self, local_ip: IpAddr) -> Option<u32> {
+        let host_prefix = match local_ip {
+            IpAddr::V4(_) => 32u8,
+            IpAddr::V6(_) => 128u8,
+        };
+        if let Some(idx) = self.lookup_host_route_ifindex(local_ip, host_prefix).await {
+            return Some(idx);
+        }
+        #[cfg(target_os = "windows")]
+        {
+            const POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(100);
+            const TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+            let deadline = std::time::Instant::now() + TIMEOUT;
+            while std::time::Instant::now() < deadline {
+                tokio::time::sleep(POLL_INTERVAL).await;
+                if let Some(idx) = self.lookup_host_route_ifindex(local_ip, host_prefix).await {
+                    return Some(idx);
+                }
+            }
+        }
+        None
+    }
+
+    async fn lookup_host_route_ifindex(&self, local_ip: IpAddr, host_prefix: u8) -> Option<u32> {
+        let routes = self.handle.list().await.ok()?;
+        routes
+            .into_iter()
+            .find(|r| r.destination == local_ip && r.prefix == host_prefix)
+            .and_then(|r| r.ifindex)
     }
 
     /// Snapshot of `(destination, gateway)` pairs currently believed to
@@ -200,7 +278,18 @@ impl RouteManager {
     /// removed entries, adds new ones — first call from an empty state
     /// adds everything, subsequent calls only touch what changed.
     /// `EEXIST` on add is treated as success (the kernel already has it).
-    pub async fn apply(&mut self, desired: &[IpNet], gateway: IpAddr) -> Result<(), Error> {
+    ///
+    /// `ifindex` is the interface routes should transit. Required on
+    /// Windows; harmless and recommended on Unix (makes the route
+    /// deterministic regardless of how the kernel would resolve the
+    /// next-hop). Pass `None` to leave iface resolution to the kernel
+    /// — works on Linux / macOS, fails on Windows.
+    pub async fn apply(
+        &mut self,
+        desired: &[IpNet],
+        gateway: IpAddr,
+        ifindex: Option<u32>,
+    ) -> Result<(), Error> {
         // Warn on any pushed CIDR that already exists in the kernel
         // via a non-tunnel route — the kernel's longest-prefix-match
         // will resolve same-length CIDRs in favor of the existing
@@ -216,13 +305,18 @@ impl RouteManager {
             desired.iter().map(|net| (*net, gateway)).collect();
         let (to_add, to_remove) = diff(&self.installed, &desired_map);
 
+        // Use the ifindex previously stored for routes already in the
+        // installed set (which is what they were added with) — across
+        // a reconnect the new tunnel may bind to a different iface,
+        // and Windows's delete matches on `InterfaceIndex`.
+        let delete_ifindex = self.installed_ifindex;
         for net in &to_remove {
-            let route = Route::new(net.network(), net.prefix_len()).with_gateway(gateway);
+            let route = build_route(net, gateway, delete_ifindex);
             match self.handle.delete(&route).await {
                 Ok(()) => {
                     debug!(dest = %net, "route removed");
                 }
-                Err(e) if e.raw_os_error() == Some(libc::ESRCH) => {
+                Err(e) if is_not_found(&e) => {
                     // Route already gone — openvpn's internal restart
                     // tears down the kernel routes between push-reply
                     // cycles, so by the time we re-apply on the second
@@ -239,13 +333,13 @@ impl RouteManager {
         }
 
         for net in &to_add {
-            let route = Route::new(net.network(), net.prefix_len()).with_gateway(gateway);
+            let route = build_route(net, gateway, ifindex);
             match self.handle.add(&route).await {
                 Ok(()) => {
-                    debug!(dest = %net, %gateway, "route added");
+                    debug!(dest = %net, %gateway, ?ifindex, "route added");
                     self.installed.insert(*net, gateway);
                 }
-                Err(e) if e.raw_os_error() == Some(libc::EEXIST) => {
+                Err(e) if is_already_exists(&e) => {
                     debug!(dest = %net, "route already present in kernel");
                     self.installed.insert(*net, gateway);
                 }
@@ -255,11 +349,14 @@ impl RouteManager {
             }
         }
 
+        self.installed_ifindex = ifindex;
+
         info!(
             installed = self.installed.len(),
             added = to_add.len(),
             removed = to_remove.len(),
             %gateway,
+            ?ifindex,
             "route apply complete"
         );
         Ok(())
@@ -270,12 +367,13 @@ impl RouteManager {
     /// connect, partial cleanup is better than no cleanup.
     pub async fn clear(&mut self) {
         let installed = std::mem::take(&mut self.installed);
+        let ifindex = self.installed_ifindex.take();
         let count = installed.len();
         for (net, gateway) in installed {
-            let route = Route::new(net.network(), net.prefix_len()).with_gateway(gateway);
+            let route = build_route(&net, gateway, ifindex);
             match self.handle.delete(&route).await {
                 Ok(()) => {}
-                Err(e) if e.raw_os_error() == Some(libc::ESRCH) => {
+                Err(e) if is_not_found(&e) => {
                     // Already gone — openvpn's tun teardown may have
                     // removed it via auto-flush before we got here.
                     debug!(dest = %net, "route already absent during clear");
@@ -287,6 +385,16 @@ impl RouteManager {
         }
         info!(removed = count, "routes removed");
     }
+}
+
+/// Build a `Route` for the given CIDR + gateway, attaching `ifindex`
+/// when known. Keeps the `with_ifindex` branching out of the hot loops.
+fn build_route(net: &IpNet, gateway: IpAddr, ifindex: Option<u32>) -> Route {
+    let mut route = Route::new(net.network(), net.prefix_len()).with_gateway(gateway);
+    if let Some(idx) = ifindex {
+        route = route.with_ifindex(idx);
+    }
+    route
 }
 
 impl Drop for RouteManager {

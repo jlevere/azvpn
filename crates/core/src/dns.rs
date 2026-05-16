@@ -136,13 +136,19 @@ pub fn new_manager() -> Box<dyn DnsManager> {
 impl DnsManager for azvpn_tunnel_windows::DnsManager {
     async fn apply(
         &mut self,
-        _suffixes: &[&str],
-        _servers: &[IpAddr],
+        suffixes: &[&str],
+        servers: &[IpAddr],
         _ctx: &DnsApplyCtx,
     ) -> Result<()> {
-        Err(Error::NotImplemented)
+        // NRPT writes are synchronous (winreg + a handful of
+        // `RegSet*` calls per rule, ~ms-scale). Wrap in the async
+        // signature; no spawn_blocking needed at this scale.
+        self.install(suffixes, servers)
+            .map_err(|e| Error::Operation(e.to_string()))
     }
-    async fn clear(&mut self) {}
+    async fn clear(&mut self) {
+        self.revert();
+    }
 }
 
 #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]

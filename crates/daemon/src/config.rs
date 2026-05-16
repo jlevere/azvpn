@@ -57,24 +57,49 @@ fn resolve_openvpn_binary() -> PathBuf {
     PathBuf::from("openvpn")
 }
 
-/// Try the .deb / .rpm layout first, then the brew layout. Returns
-/// the first candidate that exists. Two `parent()` hops:
-/// `/usr/sbin/azvpnd` → `/usr`, then join `libexec/...`. Returns
-/// `None` when there's no usable `current_exe` (sandboxing, broken
-/// `/proc`) — caller falls through to a `$PATH` lookup. The relative
-/// paths live in [`azvpn_core::layout`] so this stays in sync with
-/// what `azvpn install-daemon` writes into the unit / plist.
+/// Per-platform "look next to me" lookup. Unix: package + brew
+/// layouts (rel paths live in [`azvpn_core::layout`] so this stays
+/// in sync with what `azvpn install-daemon` writes into the unit /
+/// plist). Windows: MSI bundle layout where openvpn.exe lives in a
+/// sibling `openvpn\` directory next to `azvpnd.exe`. Returns the
+/// first existing candidate, or `None` (caller falls through to a
+/// `$PATH` lookup).
 fn bundled_openvpn(exe: Option<&Path>) -> Option<PathBuf> {
-    let prefix = exe?.parent()?.parent()?;
-    for rel in [
-        azvpn_core::layout::DEB_OPENVPN_REL,
-        azvpn_core::layout::BREW_OPENVPN_REL,
-    ] {
-        let candidate = prefix.join(rel);
+    let exe = exe?;
+
+    #[cfg(target_os = "windows")]
+    {
+        // Windows bundle layout (matches install_daemon::windows::
+        // DEFAULT_INSTALL_DIR and the W7 MSI):
+        //
+        //   <install>\azvpnd.exe
+        //   <install>\openvpn\openvpn.exe
+        //   <install>\openvpn\wintun.dll
+        //
+        // One `parent()` hop, sibling `openvpn\` dir.
+        let prefix = exe.parent()?;
+        let candidate = prefix.join("openvpn").join("openvpn.exe");
         if candidate.is_file() {
             return Some(candidate);
         }
     }
+
+    #[cfg(unix)]
+    {
+        // `/usr/sbin/azvpnd` → `/usr` (two parent() hops), then join
+        // the deb / brew relative paths from `azvpn_core::layout`.
+        let prefix = exe.parent()?.parent()?;
+        for rel in [
+            azvpn_core::layout::DEB_OPENVPN_REL,
+            azvpn_core::layout::BREW_OPENVPN_REL,
+        ] {
+            let candidate = prefix.join(rel);
+            if candidate.is_file() {
+                return Some(candidate);
+            }
+        }
+    }
+
     None
 }
 
@@ -102,6 +127,7 @@ mod tests {
         assert!(bundled_openvpn(None).is_none());
     }
 
+    #[cfg(unix)]
     #[test]
     fn bundled_openvpn_finds_linux_layout() {
         let tmp = tempfile::tempdir().unwrap();
@@ -119,6 +145,7 @@ mod tests {
         assert_eq!(found, openvpn);
     }
 
+    #[cfg(unix)]
     #[test]
     fn bundled_openvpn_finds_macos_layout() {
         let tmp = tempfile::tempdir().unwrap();
@@ -130,6 +157,22 @@ mod tests {
         let daemon = bin.join("azvpnd");
         std::fs::write(&daemon, b"").unwrap();
         let openvpn = libexec.join("azvpn-openvpn");
+        std::fs::write(&openvpn, b"").unwrap();
+
+        let found = bundled_openvpn(Some(&daemon)).unwrap();
+        assert_eq!(found, openvpn);
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn bundled_openvpn_finds_windows_layout() {
+        let tmp = tempfile::tempdir().unwrap();
+        let prefix = tmp.path();
+        let openvpn_dir = prefix.join("openvpn");
+        std::fs::create_dir_all(&openvpn_dir).unwrap();
+        let daemon = prefix.join("azvpnd.exe");
+        std::fs::write(&daemon, b"").unwrap();
+        let openvpn = openvpn_dir.join("openvpn.exe");
         std::fs::write(&openvpn, b"").unwrap();
 
         let found = bundled_openvpn(Some(&daemon)).unwrap();
