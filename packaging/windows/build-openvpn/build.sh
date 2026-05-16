@@ -36,7 +36,15 @@ LZO_URL="https://www.oberhumer.com/opensource/lzo/download/lzo-${LZO_VERSION}.ta
 
 STRICT_HASHES=${STRICT_HASHES:-0}
 
-JOBS=${JOBS:-$(nproc)}
+# Conservative parallelism default — cc1 building OpenSSL 3.x can
+# spike to ~1 GiB per process under Rosetta on Apple Silicon, and
+# Docker Desktop / Colima typically only allocate 8 GiB to the
+# Linux VM. `nproc` (= 6 on a default Colima) pushes us into
+# OOM-kills-cc1 territory mid-build, surfacing as "internal
+# compiler error: Segmentation fault" — a confusing failure mode
+# that's actually just resource pressure. Override with
+# `JOBS=$(nproc)` if you've raised the VM's memory budget.
+JOBS=${JOBS:-2}
 SRC=/work/sources
 BUILD=/work/build
 PREFIX=${PREFIX:-/work/install}
