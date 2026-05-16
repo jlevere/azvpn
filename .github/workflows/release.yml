@@ -220,7 +220,7 @@ jobs:
         # so we drop the --target flag the matrix-build step uses.
         run: cargo build --release -p azvpn -p azvpn-daemon
       - name: Stage bundled openvpn
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: openvpn-azvpn-linux-x86_64
           path: target/openvpn-azvpn-staged
@@ -263,7 +263,7 @@ jobs:
         # also looks under target/release/ by default.
         run: cargo build --release -p azvpn -p azvpn-daemon
       - name: Stage bundled openvpn
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: openvpn-azvpn-linux-x86_64
           path: target/openvpn-azvpn-staged
@@ -291,7 +291,7 @@ jobs:
     if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           path: artifacts
           merge-multiple: true
