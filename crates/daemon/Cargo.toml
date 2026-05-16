@@ -51,6 +51,10 @@ windows-sys = { workspace = true, features = [
     "Win32_System_RemoteDesktop",
     "Win32_System_GroupPolicy",
     "Win32_System_Threading",
+    # `routes::interface_name` does ifindex -> LUID -> alias for the
+    # `info` RPC's pretty display of route interfaces on Windows.
+    "Win32_NetworkManagement_IpHelper",
+    "Win32_NetworkManagement_Ndis",
 ] }
 widestring = { workspace = true }
 tracing-appender = { workspace = true }

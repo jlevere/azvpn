@@ -119,6 +119,25 @@
             # drives openvpn directly via the management interface.
             # Just strip `openvpnserv` out of SUBDIRS in Makefile.in
             # before configure runs.
+            #
+            # Consequence to know: openvpn 2.6 on Windows delegates
+            # *route installation* (and a couple of small DNS
+            # helpers) to openvpnserv via its `msg_channel` IPC. With
+            # openvpnserv absent, openvpn emits `msg_channel=0` and
+            # silently skips those operations. We hit this for routes
+            # — fixed by owning route install in our daemon via
+            # `net-route` (`commit ce8c990`, `azvpn-core::route`).
+            # For DNS we also own it via NRPT (the macOS-bug-fix on
+            # Windows; see `azvpn-tunnel-windows::DnsManager`). So
+            # the missing iservice doesn't impair anything we ship
+            # today.
+            #
+            # **If we ever add a feature openvpn delegates to
+            # iservice** (additional netsh helpers, MTU adjust,
+            # route prio bumps), it will silently no-op until
+            # `openvpnserv` is restored to this build. Re-evaluate
+            # then; the fix is upstream-style — provide the missing
+            # `eventmsg.mc` and let openvpnserv build normally.
             postPatch = (old.postPatch or "") + ''
               substituteInPlace src/Makefile.in \
                 --replace-fail \
