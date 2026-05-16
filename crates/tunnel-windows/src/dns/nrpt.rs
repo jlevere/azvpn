@@ -43,8 +43,7 @@ pub const NRPT_BASE_LOCAL: &str =
 /// — domain-joined hosts whose GPO already populates this key need
 /// our rules mirrored here, otherwise GP wins and our rules are
 /// ignored. Always under `HKEY_LOCAL_MACHINE`.
-pub const NRPT_BASE_GP: &str =
-    r"SOFTWARE\Policies\Microsoft\Windows NT\DNSClient\DnsPolicyConfig";
+pub const NRPT_BASE_GP: &str = r"SOFTWARE\Policies\Microsoft\Windows NT\DNSClient\DnsPolicyConfig";
 
 /// Our ownership-tracking key. Holds a `REG_MULTI_SZ` value
 /// `NRPTRuleIDs` listing the GUIDs of rules we currently own, so
@@ -112,17 +111,7 @@ pub(crate) fn new_guid_string() -> io::Result<String> {
     let d4 = guid.data4;
     Ok(format!(
         "{{{:08X}-{:04X}-{:04X}-{:02X}{:02X}-{:02X}{:02X}{:02X}{:02X}{:02X}{:02X}}}",
-        guid.data1,
-        guid.data2,
-        guid.data3,
-        d4[0],
-        d4[1],
-        d4[2],
-        d4[3],
-        d4[4],
-        d4[5],
-        d4[6],
-        d4[7],
+        guid.data1, guid.data2, guid.data3, d4[0], d4[1], d4[2], d4[3], d4[4], d4[5], d4[6], d4[7],
     ))
 }
 
@@ -506,11 +495,11 @@ fn delete_gp_base_key() -> io::Result<()> {
 /// registry path when dnscache is unavailable). We accept the
 /// limitation since the corp-VPN target always has dnscache running.
 pub(crate) fn dnscache_running() -> bool {
+    use widestring::U16CString;
     use windows_sys::Win32::System::Services::{
         OpenSCManagerW, OpenServiceW, QueryServiceStatus, SC_MANAGER_CONNECT, SERVICE_QUERY_STATUS,
         SERVICE_RUNNING, SERVICE_STATUS,
     };
-    use widestring::U16CString;
 
     let Ok(name) = U16CString::from_str("Dnscache") else {
         return true; // bias toward "assume ok" if we can't even build the string
@@ -614,7 +603,11 @@ mod tests {
         // 1 chunk needed, previous had 3 — 2 surplus.
         let suffixes = vec!["a.example.com"];
         let servers = vec!["10.0.0.36".parse().unwrap()];
-        let prev = vec!["{aaa}".to_string(), "{bbb}".to_string(), "{ccc}".to_string()];
+        let prev = vec![
+            "{aaa}".to_string(),
+            "{bbb}".to_string(),
+            "{ccc}".to_string(),
+        ];
         let (rules, surplus) = build_rules(&suffixes, &servers, &prev).unwrap();
         assert_eq!(rules.len(), 1);
         assert_eq!(rules[0].id, "{aaa}");

@@ -136,18 +136,19 @@ pub async fn install(daemon: Option<PathBuf>, openvpn: Option<PathBuf>) -> Resul
 /// running, with a bounded wait for `Stopped`) → delete. Idempotent
 /// — a missing service is a no-op.
 pub async fn uninstall() -> Result<()> {
-    let manager = ServiceManager::local_computer(
-        None::<&str>,
-        ServiceManagerAccess::CONNECT,
-    )
-    .map_err(|e| other(format!("connect to SCM (need admin): {e}")))?;
+    let manager = ServiceManager::local_computer(None::<&str>, ServiceManagerAccess::CONNECT)
+        .map_err(|e| other(format!("connect to SCM (need admin): {e}")))?;
 
     let service = match manager.open_service(SERVICE_NAME, SERVICE_ACCESS) {
         Ok(s) => s,
         Err(windows_service::Error::Winapi(e))
-            if e.raw_os_error() == Some(windows_sys::Win32::Foundation::ERROR_SERVICE_DOES_NOT_EXIST as i32) =>
+            if e.raw_os_error()
+                == Some(windows_sys::Win32::Foundation::ERROR_SERVICE_DOES_NOT_EXIST as i32) =>
         {
-            tracing::info!(name = SERVICE_NAME, "service not installed; nothing to remove");
+            tracing::info!(
+                name = SERVICE_NAME,
+                "service not installed; nothing to remove"
+            );
             return Ok(());
         }
         Err(e) => return Err(other(format!("open service: {e}"))),
@@ -209,12 +210,30 @@ fn open_update_service(
 /// admin is the right answer.
 fn apply_recovery_actions(service: &Service) -> Result<()> {
     let recovery = vec![
-        ServiceAction { action_type: ServiceActionType::Restart, delay: Duration::from_secs(1) },
-        ServiceAction { action_type: ServiceActionType::Restart, delay: Duration::from_secs(4) },
-        ServiceAction { action_type: ServiceActionType::Restart, delay: Duration::from_secs(9) },
-        ServiceAction { action_type: ServiceActionType::Restart, delay: Duration::from_secs(16) },
-        ServiceAction { action_type: ServiceActionType::Restart, delay: Duration::from_secs(25) },
-        ServiceAction { action_type: ServiceActionType::Restart, delay: Duration::from_secs(36) },
+        ServiceAction {
+            action_type: ServiceActionType::Restart,
+            delay: Duration::from_secs(1),
+        },
+        ServiceAction {
+            action_type: ServiceActionType::Restart,
+            delay: Duration::from_secs(4),
+        },
+        ServiceAction {
+            action_type: ServiceActionType::Restart,
+            delay: Duration::from_secs(9),
+        },
+        ServiceAction {
+            action_type: ServiceActionType::Restart,
+            delay: Duration::from_secs(16),
+        },
+        ServiceAction {
+            action_type: ServiceActionType::Restart,
+            delay: Duration::from_secs(25),
+        },
+        ServiceAction {
+            action_type: ServiceActionType::Restart,
+            delay: Duration::from_secs(36),
+        },
     ];
 
     let failure_actions = ServiceFailureActions {
@@ -244,7 +263,9 @@ fn apply_recovery_actions(service: &Service) -> Result<()> {
 fn same_path(a: &std::path::Path, b: &std::path::Path) -> bool {
     match (std::fs::canonicalize(a), std::fs::canonicalize(b)) {
         (Ok(ca), Ok(cb)) => ca == cb,
-        _ => a.to_string_lossy().eq_ignore_ascii_case(&b.to_string_lossy()),
+        _ => a
+            .to_string_lossy()
+            .eq_ignore_ascii_case(&b.to_string_lossy()),
     }
 }
 
