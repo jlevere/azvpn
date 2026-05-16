@@ -6,14 +6,16 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use azvpn_auth::{AadConfig, CacheKey, Token, daemon_cache::DaemonTokenCache};
 use azvpn_core::commands::connect::{self, ConnectOptions, ConnectionStatus};
 use azvpn_core::metrics::ConnectionMetrics;
 use azvpn_core::target::{self, State as TargetState, TargetState as Target};
 use azvpn_ipc::{
     AzvpnApi, DisconnectOutcome, DownRequest, InfoReport, IpcError, PushOptions, StatusReport,
-    UpRequest,
+    UpRequest, VpnProfile,
 };
 use azvpn_openvpn::VpnState;
+use azvpn_profile::AuthType;
 use tarpc::context::Context;
 use tokio::sync::{Mutex, watch};
 use tokio_util::sync::CancellationToken;
@@ -55,6 +57,98 @@ impl AzvpndServer {
         }
     }
 
+    /// Spawn the openvpn-side connect machinery for the given profile
+    /// + token. Shared between the `up` RPC (user-driven) and the
+    /// startup-converge path (boot-driven). Returns once the tunnel
+    /// reaches a terminal state — `Connected` (Ok), `Failed` (Err),
+    /// or `Exited` (Err). The daemon's `active` slot is filled
+    /// during, and cleared when, the connect task exits.
+    pub async fn start_connection(
+        &self,
+        profile: VpnProfile,
+        profile_label: String,
+        access_token: Option<String>,
+        verbose: bool,
+    ) -> Result<(), IpcError> {
+        let mut active = self.state.active.lock().await;
+        if active.is_some() {
+            return Err(IpcError::AlreadyConnected);
+        }
+
+        // Pre-pull server_fqdn so `status` can answer "what gateway?"
+        // immediately, before the connect task has spawned openvpn.
+        let server_fqdn = profile
+            .primary_server()
+            .ok_or_else(|| IpcError::Profile("no server in profile".into()))?
+            .fqdn
+            .clone();
+
+        // Static mgmt port — the daemon owns the only openvpn child.
+        let mgmt_addr = SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 7505));
+        let opts = ConnectOptions {
+            profile,
+            profile_label: profile_label.clone(),
+            openvpn_binary: self.state.openvpn_binary.clone(),
+            mgmt_addr,
+            verbose,
+        };
+
+        let cancel = CancellationToken::new();
+        let (status_tx, _) = watch::channel(ConnectionStatus::Idle);
+        let (pushed_tx, _) = watch::channel::<Option<PushOptions>>(None);
+        let (metrics_tx, _) = watch::channel::<ConnectionMetrics>(ConnectionMetrics::default());
+        let mut wait_rx = status_tx.subscribe();
+
+        let started_at = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_or(0, |d| d.as_secs());
+
+        *active = Some(ActiveConnection {
+            cancel: cancel.clone(),
+            status_rx: status_tx.subscribe(),
+            pushed_rx: pushed_tx.subscribe(),
+            metrics_rx: metrics_tx.subscribe(),
+            server_fqdn,
+            profile_label,
+            mgmt_addr,
+            started_at,
+        });
+        drop(active);
+
+        let state = self.state.clone();
+        tokio::spawn(async move {
+            info!("starting connect task");
+            let result =
+                connect::run(opts, access_token, status_tx, pushed_tx, metrics_tx, cancel).await;
+            if let Err(e) = result {
+                error!(error = %e, "connect task ended in error");
+            } else {
+                info!("connect task ended cleanly");
+            }
+            state.active.lock().await.take();
+        });
+
+        let terminal = wait_rx
+            .wait_for(is_terminal)
+            .await
+            .map_err(|_| IpcError::Other("status channel closed before terminal state".into()))?
+            .clone();
+
+        match terminal {
+            ConnectionStatus::OpenVpn {
+                state: VpnState::Connected,
+                ..
+            } => Ok(()),
+            ConnectionStatus::Failed(reason) => Err(IpcError::OpenVpn(reason)),
+            ConnectionStatus::Exited { code } => Err(IpcError::OpenVpn(format!(
+                "openvpn exited before reaching Connected (code {code:?})"
+            ))),
+            other => Err(IpcError::Other(format!(
+                "unexpected terminal status: {other:?}"
+            ))),
+        }
+    }
+
     /// Tear down the active connection (if any) and wait for the
     /// connect task to finish. Called from the daemon's signal-driven
     /// shutdown path so SIGTERM produces a clean teardown — routes,
@@ -91,20 +185,6 @@ impl AzvpnApi for AzvpndServer {
     }
 
     async fn up(self, _: Context, req: UpRequest) -> Result<(), IpcError> {
-        let mut active = self.state.active.lock().await;
-        if active.is_some() {
-            return Err(IpcError::AlreadyConnected);
-        }
-
-        // Pre-pull server_fqdn so `status` can answer "what gateway?"
-        // immediately, before the connect task has spawned openvpn.
-        let server_fqdn = req
-            .profile
-            .primary_server()
-            .ok_or_else(|| IpcError::Profile("no server in profile".into()))?
-            .fqdn
-            .clone();
-
         // Persist user intent before the connect task spawns —
         // Tailscale's `WantRunning` shape. The target reflects what
         // the user asked for, regardless of whether the connect
@@ -131,79 +211,30 @@ impl AzvpnApi for AzvpndServer {
                     "failed to persist target state; daemon won't auto-converge after reboot",
                 );
             }
-        }
 
-        // Static mgmt port — the daemon owns the only openvpn child.
-        let mgmt_addr = SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 7505));
-        let opts = ConnectOptions {
-            profile: req.profile,
-            profile_label: req.profile_label.clone(),
-            openvpn_binary: self.state.openvpn_binary.clone(),
-            mgmt_addr,
-            verbose: req.verbose,
-        };
-
-        let cancel = CancellationToken::new();
-        let (status_tx, _) = watch::channel(ConnectionStatus::Idle);
-        let (pushed_tx, _) = watch::channel::<Option<PushOptions>>(None);
-        let (metrics_tx, _) = watch::channel::<ConnectionMetrics>(ConnectionMetrics::default());
-        let mut wait_rx = status_tx.subscribe();
-
-        let started_at = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map_or(0, |d| d.as_secs());
-
-        *active = Some(ActiveConnection {
-            cancel: cancel.clone(),
-            status_rx: status_tx.subscribe(),
-            pushed_rx: pushed_tx.subscribe(),
-            metrics_rx: metrics_tx.subscribe(),
-            server_fqdn,
-            profile_label: req.profile_label,
-            mgmt_addr,
-            started_at,
-        });
-        drop(active);
-
-        let state = self.state.clone();
-        tokio::spawn(async move {
-            info!("starting connect task");
-            let result = connect::run(
-                opts,
-                req.access_token,
-                status_tx,
-                pushed_tx,
-                metrics_tx,
-                cancel,
-            )
-            .await;
-            if let Err(e) = result {
-                error!(error = %e, "connect task ended in error");
-            } else {
-                info!("connect task ended cleanly");
+            // Save the RT to the daemon's own cache so a reboot can
+            // refresh silently without going through the user's
+            // browser. The RT belongs to a specific AAD profile;
+            // cert-auth profiles pass `None` and we skip.
+            if let Some(rt) = req.refresh_token.as_deref()
+                && let Some(key) = aad_cache_key(&req.profile)
+            {
+                let token = Token {
+                    access_token: req.access_token.clone().unwrap_or_default(),
+                    expires_at: SystemTime::now() + Duration::from_hours(1),
+                    refresh_token: Some(rt.to_owned()),
+                };
+                DaemonTokenCache::for_profile(&key).save(&token);
             }
-            state.active.lock().await.take();
-        });
-
-        let terminal = wait_rx
-            .wait_for(is_terminal)
-            .await
-            .map_err(|_| IpcError::Other("status channel closed before terminal state".into()))?
-            .clone();
-
-        match terminal {
-            ConnectionStatus::OpenVpn {
-                state: VpnState::Connected,
-                ..
-            } => Ok(()),
-            ConnectionStatus::Failed(reason) => Err(IpcError::OpenVpn(reason)),
-            ConnectionStatus::Exited { code } => Err(IpcError::OpenVpn(format!(
-                "openvpn exited before reaching Connected (code {code:?})"
-            ))),
-            other => Err(IpcError::Other(format!(
-                "unexpected terminal status: {other:?}"
-            ))),
         }
+
+        self.start_connection(
+            req.profile,
+            req.profile_label,
+            req.access_token,
+            req.verbose,
+        )
+        .await
     }
 
     async fn down(self, _: Context, req: DownRequest) -> Result<DisconnectOutcome, IpcError> {
@@ -306,4 +337,16 @@ fn current_local_ip(conn: &ActiveConnection) -> Option<IpAddr> {
         ConnectionStatus::OpenVpn { local_ip, .. } => *local_ip,
         _ => None,
     }
+}
+
+/// Derive the AAD cache key for a profile. `None` for non-AAD profiles
+/// — cert / username-pass / radius profiles don't have a refresh token
+/// to cache.
+pub fn aad_cache_key(profile: &VpnProfile) -> Option<CacheKey> {
+    if profile.clientauth.auth_type != AuthType::Aad {
+        return None;
+    }
+    let aad_profile = profile.clientauth.aad.as_ref()?;
+    let config = AadConfig::from(aad_profile);
+    Some(CacheKey::from(&config))
 }
