@@ -34,11 +34,12 @@
 
 use std::collections::BTreeSet;
 use std::fs;
-use std::io::Write as _;
+use std::io::{BufRead as _, BufReader, Write as _};
 use std::net::IpAddr;
 use std::os::unix::fs::PermissionsExt as _;
 use std::path::{Path, PathBuf};
 
+use hickory_proto::rr::Name;
 use tempfile::NamedTempFile;
 use tracing::{info, warn};
 
@@ -61,11 +62,8 @@ const MAX_SUFFIX_LEN: usize = 253;
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
-    #[error(
-        "invalid DNS suffix {0:?}: must be ASCII [a-zA-Z0-9.-], 1-253 chars, \
-         no leading hyphen/dot, no trailing hyphen/dot"
-    )]
-    InvalidSuffix(String),
+    #[error("invalid DNS suffix {input:?}: {reason}")]
+    InvalidSuffix { input: String, reason: String },
 
     #[error(
         "/etc/resolver/{name} exists but is not managed by azvpn \
@@ -198,7 +196,7 @@ fn cleanup_orphan_dns_in(dir: &Path) -> bool {
             continue;
         }
         let path = entry.path();
-        if first_line_starts_with(&path, MAGIC_HEADER_PREFIX.as_bytes()) {
+        if has_first_line_prefix(&path, MAGIC_HEADER_PREFIX) {
             match fs::remove_file(&path) {
                 Ok(()) => {
                     removed_any = true;
@@ -216,63 +214,94 @@ fn cleanup_orphan_dns_in(dir: &Path) -> bool {
     removed_any
 }
 
-/// Strip leading dots, validate, dedupe via `BTreeSet`. The set is
-/// returned so callers can diff against a prior session.
+/// Strip leading dots, parse + canonicalize via `hickory-proto`,
+/// dedupe via `BTreeSet`. The set is returned so callers can diff
+/// against a prior session. Bare empty raw inputs are skipped (a
+/// profile parser handing back an empty element shouldn't break
+/// the connect); anything that survives the leading-dot strip is
+/// parsed as a DNS name and rejected if it isn't one.
 fn normalize_suffixes(input: &[&str]) -> Result<BTreeSet<String>, Error> {
     let mut out = BTreeSet::new();
     for raw in input {
         if raw.is_empty() {
-            // Defensive skip for bare empty strings — happens when a
-            // profile parser hands us an XML element with no content.
-            // Not the same as "all dots", which is a path-traversal
-            // attempt and gets rejected below.
             continue;
         }
-        let s = raw.trim_start_matches('.');
-        validate_suffix(s)?;
-        out.insert(s.to_owned());
+        let stripped = raw.trim_start_matches('.');
+        out.insert(canonicalize_suffix(raw, stripped)?);
     }
     Ok(out)
 }
 
-/// Strict ASCII-only DNS-label-shaped allowlist. Hand-rolled instead
-/// of pulling in `regex` — single pattern, hot-path-irrelevant, not
-/// worth ~600KB of compile-time cost.
+/// Parse `stripped` as an RFC-1035 DNS name via `hickory-proto`,
+/// then return its lowercased ASCII form (without the trailing root
+/// dot) for use as an `/etc/resolver/` filename.
 ///
-/// Accepts: `a-zA-Z0-9.-`, 1..=253 chars, no leading hyphen/dot, no
-/// trailing hyphen/dot. Rejects everything else, including every form
-/// of path traversal (`..`, `../etc/passwd`, `foo/bar`, `foo\bar`,
-/// `foo:bar`, `foo bar`), every shell metacharacter, every null byte,
-/// and every non-ASCII byte. Non-ASCII domain names must arrive in
-/// their punycode form (`xn--…`); documented limitation, can relax
-/// if any real corp profile needs it.
-fn validate_suffix(s: &str) -> Result<(), Error> {
-    if s.is_empty() || s.len() > MAX_SUFFIX_LEN {
-        return Err(Error::InvalidSuffix(s.to_owned()));
+/// Layered filtering:
+///
+/// 1. Pre-hickory: reject the raw stripped input if it contains
+///    filesystem-meaningful characters. Hickory's `Name::from_ascii`
+///    honours RFC-1035 backslash escapes (`foo\bar` → label `foobar`),
+///    so we filter the raw input first before normalization can erase
+///    the evidence. Mirrors Tailscale's `isValidResolverFileName`.
+/// 2. Pre-hickory: reject trailing `.` (user-supplied FQDNs) and
+///    trailing `-` (hickory accepts these but RFC 1035 doesn't, and
+///    a profile XML carrying one is almost certainly malformed).
+/// 3. Hickory parsing: catches every other malformed DNS name —
+///    leading hyphen, internal `/` `:` ` `, empty labels (`..`),
+///    over-long labels, non-ASCII (must arrive as punycode).
+/// 4. Post-hickory: same path-unsafe needle check on the canonical
+///    form, belt-and-suspenders against a future hickory release
+///    that accepts something new.
+fn canonicalize_suffix(raw: &str, stripped: &str) -> Result<String, Error> {
+    const PATH_UNSAFE: [char; 5] = ['/', '\\', ':', '\0', ' '];
+
+    let invalid = |reason: &str| Error::InvalidSuffix {
+        input: (*raw).to_owned(),
+        reason: reason.to_owned(),
+    };
+
+    if stripped.is_empty() {
+        return Err(invalid("empty after stripping leading dots"));
     }
-    let bytes = s.as_bytes();
-    if matches!(bytes[0], b'-' | b'.') {
-        return Err(Error::InvalidSuffix(s.to_owned()));
+    if stripped.len() > MAX_SUFFIX_LEN {
+        return Err(invalid("longer than 253 chars (RFC 1035 cap)"));
     }
-    if matches!(bytes[bytes.len() - 1], b'-' | b'.') {
-        return Err(Error::InvalidSuffix(s.to_owned()));
+    if stripped.contains(PATH_UNSAFE) {
+        return Err(invalid(
+            "contains path-unsafe characters (/, \\, :, NUL, space)",
+        ));
     }
-    for &b in bytes {
-        if !(b.is_ascii_alphanumeric() || b == b'.' || b == b'-') {
-            return Err(Error::InvalidSuffix(s.to_owned()));
-        }
+    if stripped.ends_with('.') {
+        return Err(invalid("trailing dot not allowed (use the relative form)"));
     }
-    Ok(())
+    if stripped.ends_with('-') {
+        return Err(invalid("trailing hyphen not allowed (RFC 1035 §2.3.1)"));
+    }
+
+    let name =
+        Name::from_ascii(stripped).map_err(|e| invalid(&format!("not a valid DNS name: {e}")))?;
+
+    // `to_ascii` returns the canonical absolute form `foo.example.com.`;
+    // strip the root dot for the filename.
+    let canon = name.to_ascii();
+    let canon = canon.strip_suffix('.').unwrap_or(&canon).to_owned();
+    if canon.is_empty() {
+        return Err(invalid("canonical name is empty"));
+    }
+    if canon.contains(PATH_UNSAFE) {
+        return Err(invalid("canonical name contains path-unsafe characters"));
+    }
+    Ok(canon)
 }
 
 /// Pre-flight collision check. Reads the first line of the existing
-/// file (if any). A file we own (magic header) is fine to overwrite;
-/// a foreign file errors out. Missing file is fine.
+/// file (if any) via `BufRead::read_line`. A file we own (magic
+/// header) is fine to overwrite; a foreign file errors out. Missing
+/// file is fine.
 fn check_writable(path: &Path) -> Result<(), Error> {
-    match fs::read(path) {
-        Ok(bytes) => {
-            let first = first_line_of(&bytes);
-            if first.starts_with(MAGIC_HEADER_PREFIX.as_bytes()) {
+    match read_first_line(path) {
+        Ok(Some(first)) => {
+            if first.starts_with(MAGIC_HEADER_PREFIX) {
                 Ok(())
             } else {
                 Err(Error::Conflict {
@@ -281,16 +310,37 @@ fn check_writable(path: &Path) -> Result<(), Error> {
                         .and_then(|s| s.to_str())
                         .unwrap_or("<unknown>")
                         .to_owned(),
-                    first_line: String::from_utf8_lossy(first).into_owned(),
+                    first_line: first,
                 })
             }
         }
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Ok(None) => Ok(()), // file is missing
         Err(e) => Err(Error::Io {
             path: path.to_owned(),
             source: e,
         }),
     }
+}
+
+/// Read the first line of `path` via a buffered reader. `Ok(None)`
+/// on `ENOENT`; `Ok(Some(""))` if the file is empty. The trailing
+/// newline (if any) is stripped to make `starts_with` checks
+/// straightforward.
+fn read_first_line(path: &Path) -> std::io::Result<Option<String>> {
+    let file = match fs::File::open(path) {
+        Ok(f) => f,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(e),
+    };
+    let mut line = String::new();
+    BufReader::new(file).read_line(&mut line)?;
+    if line.ends_with('\n') {
+        line.pop();
+        if line.ends_with('\r') {
+            line.pop();
+        }
+    }
+    Ok(Some(line))
 }
 
 /// Atomic write via `tempfile::NamedTempFile`: random-named tempfile
@@ -342,7 +392,7 @@ fn remove_if_ours(dir: &Path, suffix: &str) {
     if !path.exists() {
         return;
     }
-    if !first_line_starts_with(&path, MAGIC_HEADER_PREFIX.as_bytes()) {
+    if !has_first_line_prefix(&path, MAGIC_HEADER_PREFIX) {
         warn!(
             path = %path.display(),
             "/etc/resolver entry no longer ours; leaving alone",
@@ -360,15 +410,11 @@ fn remove_if_ours(dir: &Path, suffix: &str) {
     }
 }
 
-fn first_line_starts_with(path: &Path, prefix: &[u8]) -> bool {
-    match fs::read(path) {
-        Ok(bytes) => first_line_of(&bytes).starts_with(prefix),
-        Err(_) => false,
-    }
-}
-
-fn first_line_of(bytes: &[u8]) -> &[u8] {
-    bytes.split(|&b| b == b'\n').next().unwrap_or(&[])
+/// Convenience wrapper over [`read_first_line`] that swallows
+/// missing-file / IO errors. Returns `false` whenever the file
+/// doesn't exist, can't be read, or doesn't start with `prefix`.
+fn has_first_line_prefix(path: &Path, prefix: &str) -> bool {
+    matches!(read_first_line(path), Ok(Some(line)) if line.starts_with(prefix))
 }
 
 #[cfg(test)]
@@ -486,7 +532,7 @@ mod tests {
         for s in bad {
             let result = g.update(&[s], &[dns("1.2.3.4")]);
             assert!(
-                matches!(result, Err(Error::InvalidSuffix(_))),
+                matches!(result, Err(Error::InvalidSuffix { .. })),
                 "expected InvalidSuffix for {s:?}, got {result:?}",
             );
         }
@@ -590,7 +636,7 @@ mod tests {
         let mut g = guard_in(tmp.path());
         let long = "a".repeat(254);
         let result = g.update(&[long.as_str()], &[dns("1.2.3.4")]);
-        assert!(matches!(result, Err(Error::InvalidSuffix(_))));
+        assert!(matches!(result, Err(Error::InvalidSuffix { .. })));
     }
 
     #[test]
@@ -619,7 +665,7 @@ mod tests {
         let mut g = guard_in(tmp.path());
 
         let result = g.update(&["münchen.example.com"], &[dns("1.2.3.4")]);
-        assert!(matches!(result, Err(Error::InvalidSuffix(_))));
+        assert!(matches!(result, Err(Error::InvalidSuffix { .. })));
 
         g.update(&["xn--mnchen-3ya.example.com"], &[dns("1.2.3.4")])
             .unwrap();
