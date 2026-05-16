@@ -36,6 +36,22 @@ fn hex_lower(bytes: &[u8]) -> String {
     out
 }
 
+/// openvpn-friendly path rendering. On Windows the config parser
+/// treats single backslashes inside an unquoted value as shell
+/// escape sequences (`\n`, `\t`, ...), rejecting any path like
+/// `C:\WINDOWS\SystemTemp\.tmpXXX` with a "Bad backslash usage"
+/// error. openvpn 2.x accepts forward slashes interchangeably on
+/// Windows, so we swap. On Unix this is a no-op — POSIX paths
+/// don't contain backslashes.
+fn normalize_path(path: &Path) -> String {
+    let s = path.display().to_string();
+    if cfg!(target_os = "windows") {
+        s.replace('\\', "/")
+    } else {
+        s
+    }
+}
+
 // DigiCert Global Root G2 — the CA used by Azure VPN P2S gateways.
 const DIGICERT_GLOBAL_ROOT_G2: &str = "\
 -----BEGIN CERTIFICATE-----
@@ -102,6 +118,14 @@ impl<'a> ConfigBuilder<'a> {
 
         writeln!(config, "client").unwrap();
         writeln!(config, "dev tun").unwrap();
+        // openvpn 2.6 on Windows ships with both tap-windows6 and
+        // Wintun drivers. We bundle Wintun (signed by WireGuard LLC)
+        // in the MSI and pin to it explicitly — `tap-windows6` would
+        // require the legacy TAP driver we don't ship. wintun.dll
+        // must live next to openvpn.exe (the bundle layout puts both
+        // at <install>\openvpn\). See docs/windows-plan.md §2.1.
+        #[cfg(target_os = "windows")]
+        writeln!(config, "windows-driver wintun").unwrap();
         writeln!(config, "proto {proto}").unwrap();
         // Emit every <ServerEntry> as a `remote` line — openvpn 2.6
         // tries them in order and falls over to the next on connect
@@ -130,6 +154,16 @@ impl<'a> ConfigBuilder<'a> {
         // emits them on the mgmt socket so we know what to install.
         writeln!(config, "route-noexec").unwrap();
         writeln!(config, "verb {}", self.verb).unwrap();
+        // openvpn on Windows can't write to its inherited stderr
+        // when launched by the SCM (the service's stdio is NUL),
+        // so any pre-management-socket error — bad config, wintun
+        // driver missing, TLS chain rejection — is lost. Tell
+        // openvpn to write its own log to a file we own. Same
+        // path on Unix would conflict with journald / launchd's
+        // capture, so this is Windows-only. Forward slashes per
+        // the path-quoting note on auth-user-pass below.
+        #[cfg(target_os = "windows")]
+        writeln!(config, "log C:/ProgramData/azvpn/logs/openvpn.log").unwrap();
         writeln!(config).unwrap();
 
         writeln!(
@@ -141,7 +175,14 @@ impl<'a> ConfigBuilder<'a> {
         .unwrap();
         writeln!(config, "management-hold").unwrap();
         if let Some(path) = self.auth_user_pass_file {
-            writeln!(config, "auth-user-pass {}", path.display()).unwrap();
+            // openvpn's config parser treats single backslashes as
+            // shell-escapes (`\n`, `\t`, etc.). On Windows the
+            // tempfile path is `C:\WINDOWS\SystemTemp\...` which
+            // trips that parse and rejects the whole config with
+            // "Bad backslash ('\') usage". openvpn 2.x accepts
+            // forward slashes interchangeably with backslashes on
+            // Windows, so we normalize the path before emitting.
+            writeln!(config, "auth-user-pass {}", normalize_path(path)).unwrap();
         }
         writeln!(config).unwrap();
 

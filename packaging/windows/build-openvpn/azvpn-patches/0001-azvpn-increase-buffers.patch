@@ -1,0 +1,29 @@
+diff --git a/src/openvpn/common.h b/src/openvpn/common.h
+index 3a84541..9527ea0 100644
+--- a/src/openvpn/common.h
++++ b/src/openvpn/common.h
+@@ -66,7 +66,7 @@ typedef unsigned long ptr_type;
+  * maximum size of a single TLS message (cleartext).
+  * This parameter must be >= PUSH_BUNDLE_SIZE
+  */
+-#define TLS_CHANNEL_BUF_SIZE 2048
++#define TLS_CHANNEL_BUF_SIZE 6144
+ 
+ /* TLS control buffer minimum size
+  *
+diff --git a/src/openvpn/misc.h b/src/openvpn/misc.h
+index 022498c..7d38d98 100644
+--- a/src/openvpn/misc.h
++++ b/src/openvpn/misc.h
+@@ -63,11 +63,7 @@ struct user_pass
+     bool protected;
+ 
+ /* max length of username/password */
+-#ifdef ENABLE_PKCS11
+ #define USER_PASS_LEN 4096
+-#else
+-#define USER_PASS_LEN 128
+-#endif
+     /* Note that username and password are expected to be null-terminated */
+     char username[USER_PASS_LEN];
+     char password[USER_PASS_LEN];

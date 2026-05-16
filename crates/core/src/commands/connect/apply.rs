@@ -81,7 +81,27 @@ async fn apply_routes(manager: &mut RouteManager, push_opts: &PushOptions) -> Re
         }
     }
 
-    manager.apply(&desired, gateway).await?;
+    // Windows's `CreateIpForwardEntry2` returns ERROR_NOT_FOUND (2)
+    // for any route added without an explicit `InterfaceIndex` — the
+    // kernel doesn't infer the iface from the gateway like Unix
+    // kernels do. Resolve the tunnel's ifindex from the local IP that
+    // openvpn just pushed and feed it into the apply. On Linux/macOS
+    // the resolution is harmless (the kernel would have inferred the
+    // same iface anyway) and makes the install deterministic.
+    let ifindex = if let Some(ref ifcfg) = push_opts.ifconfig {
+        let idx = manager.resolve_local_ifindex(ifcfg.local).await;
+        if idx.is_none() {
+            tracing::warn!(
+                tunnel_ip = %ifcfg.local,
+                "couldn't resolve tunnel ifindex — Windows route install will fail"
+            );
+        }
+        idx
+    } else {
+        None
+    };
+
+    manager.apply(&desired, gateway, ifindex).await?;
     Ok(())
 }
 
