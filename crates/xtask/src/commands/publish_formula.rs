@@ -19,6 +19,7 @@ use anyhow::{Context as _, Result, bail};
 use base64::Engine as _;
 use serde::{Deserialize, Serialize};
 
+use crate::commands::release_macos::TARGET_TRIPLE;
 use crate::workspace;
 
 #[derive(clap::Args, Debug)]
@@ -93,47 +94,55 @@ pub fn run(args: Args) -> Result<()> {
 
 fn default_tarball_url(version: &str) -> String {
     format!(
-        "https://github.com/jlevere/azvpn/releases/download/v{version}/azvpn-{version}-aarch64-apple-darwin.tar.gz",
+        "https://github.com/jlevere/azvpn/releases/download/v{version}/azvpn-{version}-{TARGET_TRIPLE}.tar.gz",
     )
 }
 
-/// Substitute the three release-specific lines in the formula. We do
-/// line-replacement (not full TOML/Ruby parsing) because the template
-/// is hand-authored and we want changes outside the marked lines to
-/// pass through unchanged. Returns an error if any of the expected
-/// lines isn't found — better to fail loudly than silently produce a
+/// Substitute the three release-specific lines in the formula. Line
+/// replacement (not full Ruby parsing) so changes outside the marked
+/// lines pass through unchanged. Returns an error if any expected
+/// line isn't found — better to fail loudly than silently ship a
 /// formula with a stale field.
 fn render_formula(template: &str, version: &str, url: &str, sha256: &str) -> Result<String> {
     use std::fmt::Write as _;
 
-    let mut out = String::with_capacity(template.len() + 64);
-    let mut saw_version = false;
-    let mut saw_url = false;
-    let mut saw_sha = false;
+    // (line prefix that identifies the row, replacement value).
+    // First-match-wins: each prefix is consumed once, subsequent
+    // matches fall through to the pass-through branch.
+    let substitutions: [(&str, &str); 3] = [
+        ("version \"", version),
+        ("url \"", url),
+        ("sha256 \"", sha256),
+    ];
+    let mut consumed = [false; 3];
 
+    let mut out = String::with_capacity(template.len() + 256);
     for line in template.lines() {
         let trimmed = line.trim_start();
         let indent = &line[..line.len() - trimmed.len()];
-        if trimmed.starts_with("version \"") && !saw_version {
-            writeln!(out, "{indent}version \"{version}\"").unwrap();
-            saw_version = true;
-        } else if trimmed.starts_with("url \"") && !saw_url {
-            writeln!(out, "{indent}url \"{url}\"").unwrap();
-            saw_url = true;
-        } else if trimmed.starts_with("sha256 \"") && !saw_sha {
-            writeln!(out, "{indent}sha256 \"{sha256}\"").unwrap();
-            saw_sha = true;
+        if let Some((i, (prefix, value))) = substitutions
+            .iter()
+            .enumerate()
+            .find(|(i, (prefix, _))| !consumed[*i] && trimmed.starts_with(prefix))
+        {
+            // Strip the trailing `"` from the prefix so the rendered
+            // line matches the template's quoting.
+            let key_name = prefix.trim_end_matches(" \"");
+            writeln!(out, "{indent}{key_name} \"{value}\"").unwrap();
+            consumed[i] = true;
         } else {
             out.push_str(line);
             out.push('\n');
         }
     }
 
-    if !saw_version || !saw_url || !saw_sha {
-        bail!(
-            "template at packaging/homebrew/azvpn.rb missing required line(s) \
-             (version: {saw_version}, url: {saw_url}, sha256: {saw_sha})",
-        );
+    if !consumed.iter().all(|&c| c) {
+        let missing: Vec<&str> = substitutions
+            .iter()
+            .zip(consumed)
+            .filter_map(|((prefix, _), seen)| (!seen).then_some(*prefix))
+            .collect();
+        bail!("template at packaging/homebrew/azvpn.rb missing required line(s): {missing:?}");
     }
     Ok(out)
 }

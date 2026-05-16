@@ -4139,6 +4139,7 @@ name = "xtask"
 version = "0.0.0"
 dependencies = [
  "anyhow",
+ "azvpn-core",
  "base64",
  "clap",
  "flate2",
