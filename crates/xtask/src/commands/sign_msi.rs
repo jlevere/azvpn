@@ -1,8 +1,7 @@
 //! `cargo xtask sign-msi` — Authenticode-sign an MSI via `osslsigncode`.
 //!
-//! Linux-native, no Wine. Same shape as the prior `sign-msi.sh`
-//! script — PEM cert + key pair, RFC 3161 timestamp authority,
-//! SHA-256 digest — but argument-validated, typed, and lintable.
+//! Linux-native, no Wine. PEM cert + key pair, RFC 3161 timestamp
+//! authority, SHA-256 digest. Lintable, testable, typed.
 //!
 //! Timestamping is critical: without a countersignature from an
 //! RFC 3161 TSA, the Authenticode signature becomes invalid the day
