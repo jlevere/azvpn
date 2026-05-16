@@ -8,6 +8,13 @@ license.workspace = true
 publish = false
 
 [dependencies]
+# `azvpn-core::layout` owns the relative paths the brew formula and
+# the install-daemon CLI both consume (`libexec/azvpnd`,
+# `libexec/azvpn-openvpn`). Pulling them in here means the tarball
+# layout, the formula's `install` block, and the daemon's runtime
+# self-discovery are all keyed off the same constants — a future
+# rename only needs to land in `core::layout`.
+azvpn-core = { workspace = true }
 clap = { workspace = true }
 # `anyhow` is the right fit for an xtask: error variants would
 # proliferate fast across half a dozen integration points (cargo,

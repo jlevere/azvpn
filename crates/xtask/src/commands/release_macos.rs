@@ -24,8 +24,10 @@ use sha2::{Digest as _, Sha256};
 use crate::workspace;
 
 /// Single target we ship — Intel macs are out of scope per
-/// `project_macos_intel_out_of_scope`.
-const TARGET_TRIPLE: &str = "aarch64-apple-darwin";
+/// `project_macos_intel_out_of_scope`. `pub` so `publish_formula`
+/// can construct the matching GitHub Releases URL without
+/// redeclaring the triple.
+pub const TARGET_TRIPLE: &str = "aarch64-apple-darwin";
 
 #[derive(clap::Args, Debug)]
 pub struct Args {
@@ -96,7 +98,7 @@ pub fn run(args: Args) -> Result<()> {
 
     if !args.keep_symbols {
         for entry in &layout {
-            if entry.is_binary {
+            if entry.is_binary() {
                 strip_binary(&entry.dst);
             }
         }
@@ -132,12 +134,10 @@ pub fn run(args: Args) -> Result<()> {
     Ok(())
 }
 
-/// Append `version=`, `sha256=`, `tarball_name=` lines to whatever
-/// file `$GITHUB_OUTPUT` points at. That's GitHub Actions' contract
-/// for a step setting outputs — anything written to that file
-/// becomes `${{ steps.<id>.outputs.<key> }}` for subsequent steps
-/// / jobs. No-op when the env var is missing so the same `--emit-ci-outputs`
-/// invocation runs harmlessly outside CI (e.g. during `cargo run`).
+/// Append the release metadata to `$GITHUB_OUTPUT`. No-op outside CI
+/// (the env var is GitHub Actions' contract for step outputs; absent
+/// elsewhere) so the same `--emit-ci-outputs` invocation runs
+/// harmlessly during local `cargo xtask` calls.
 fn emit_ci_outputs(version: &str, sha: &str, tarball_name: &str) -> Result<()> {
     use std::io::Write as _;
 
@@ -157,56 +157,60 @@ fn emit_ci_outputs(version: &str, sha: &str, tarball_name: &str) -> Result<()> {
     Ok(())
 }
 
-/// One row of the staged tarball: where the bits come from, where
-/// they go, what mode they need. Owned `PathBuf`s so we can build
-/// the table once and iterate twice (install, then strip).
+/// One row of the staged tarball — `mode` doubles as the
+/// "needs strip" discriminator (0o755 → binary).
 struct StagedFile {
     src: PathBuf,
     dst: PathBuf,
     mode: u32,
-    is_binary: bool,
 }
 
-/// Compute the tarball layout without doing any I/O — the function
-/// `verify_tarball_layout` exercises this against the formula's
-/// `install` block at test time so we catch drift before CI does.
+impl StagedFile {
+    fn is_binary(&self) -> bool {
+        self.mode == 0o755
+    }
+}
+
+/// Compute the tarball layout without doing any I/O — the
+/// `layout_matches_formula_install_block` unit test exercises this
+/// against the formula's `install` block at test time so we catch
+/// drift before CI does. `BREW_DAEMON_REL` / `BREW_OPENVPN_REL`
+/// come from `azvpn_core::layout` — same constants the
+/// `install-daemon` CLI uses to discover the binaries at runtime,
+/// so a rename only needs to land in one place.
 fn tarball_layout(root: &Path, nix_link: &Path, stage: &Path) -> Vec<StagedFile> {
+    use azvpn_core::layout::{BREW_DAEMON_REL, BREW_OPENVPN_REL};
+
     vec![
         StagedFile {
             src: root.join("target/release/azvpn"),
             dst: stage.join("bin/azvpn"),
             mode: 0o755,
-            is_binary: true,
         },
         StagedFile {
             src: root.join("target/release/azvpnd"),
-            dst: stage.join("libexec/azvpnd"),
+            dst: stage.join(BREW_DAEMON_REL),
             mode: 0o755,
-            is_binary: true,
         },
         StagedFile {
             src: nix_link.join("bin/openvpn"),
-            dst: stage.join("libexec/azvpn-openvpn"),
+            dst: stage.join(BREW_OPENVPN_REL),
             mode: 0o755,
-            is_binary: true,
         },
         StagedFile {
             src: root.join("LICENSE-MIT"),
             dst: stage.join("LICENSE-MIT"),
             mode: 0o644,
-            is_binary: false,
         },
         StagedFile {
             src: root.join("LICENSE-APACHE"),
             dst: stage.join("LICENSE-APACHE"),
             mode: 0o644,
-            is_binary: false,
         },
         StagedFile {
             src: root.join("README.md"),
             dst: stage.join("README.md"),
             mode: 0o644,
-            is_binary: false,
         },
     ]
 }
@@ -393,10 +397,13 @@ mod tests {
                     .to_string()
             })
             .collect();
+        // Required paths pinned against the formula's `install` block.
+        // The two `libexec/` entries route through `azvpn_core::layout`
+        // so a rename can't silently desync formula and tarball.
         for required in [
             "bin/azvpn",
-            "libexec/azvpnd",
-            "libexec/azvpn-openvpn",
+            azvpn_core::layout::BREW_DAEMON_REL,
+            azvpn_core::layout::BREW_OPENVPN_REL,
             "LICENSE-MIT",
             "LICENSE-APACHE",
             "README.md",
@@ -409,30 +416,16 @@ mod tests {
     }
 
     #[test]
-    fn binaries_marked_for_strip() {
+    fn only_executables_are_marked_binary() {
         let layout = fake_layout();
         let binaries: Vec<_> = layout
             .iter()
-            .filter(|e| e.is_binary)
+            .filter(|e| e.is_binary())
             .map(|e| e.dst.file_name().unwrap().to_string_lossy().into_owned())
             .collect();
-        // All three executables must be strippable; everything else
-        // (licenses, README) must NOT be — `strip` on a text file is
-        // a hard error on some BSD strips.
+        // The strip loop must hit exactly these three; running `strip`
+        // on a text file is a hard error on some BSD strips.
         assert_eq!(binaries, vec!["azvpn", "azvpnd", "azvpn-openvpn"]);
-    }
-
-    #[test]
-    fn binaries_get_0o755_others_get_0o644() {
-        for entry in fake_layout() {
-            let expected = if entry.is_binary { 0o755 } else { 0o644 };
-            assert_eq!(
-                entry.mode,
-                expected,
-                "wrong mode on {}",
-                entry.dst.display(),
-            );
-        }
     }
 
     #[test]
