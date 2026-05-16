@@ -23,9 +23,12 @@ windows-sys = { workspace = true, features = [
     "Win32_System_Registry",
     "Win32_System_GroupPolicy",
     "Win32_Security",
+    # `CoCreateGuid` in nrpt::new_guid_string.
+    "Win32_System_Com",
 ] }
+# Dnscache service-running probe in `nrpt::dnscache_running`.
+windows-service = { workspace = true }
 winreg = { workspace = true }
-widestring = { workspace = true }
 
 [lints]
 workspace = true

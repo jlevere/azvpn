@@ -16,25 +16,19 @@ pub use nrpt::{
     NRPT_RULE_IDS_VALUE, NrptRule,
 };
 
-/// Owner of the live NRPT rules and the registry handles writes
-/// flow through. Mirrors the macOS `DnsGuard` / Linux
-/// `DnsManager` shape so `azvpn-core::dns::new_manager` can
-/// box-and-go.
+/// Owner of the live NRPT rules. Mirrors the macOS `DnsGuard` /
+/// Linux `DnsManager` shape so `azvpn-core::dns::new_manager` can
+/// box-and-go. Source of truth for which rules we own lives in the
+/// registry under [`AZVPN_REGKEY`]; this struct only carries
+/// session-scoped GP-mirror state.
 #[derive(Debug, Default)]
 pub struct DnsManager {
-    /// GUID-formatted rule IDs we've written under
-    /// [`NRPT_BASE_LOCAL`] (and mirrored to [`NRPT_BASE_GP`] when
-    /// the GP path is in use). Persisted under [`AZVPN_REGKEY`]
-    /// so a daemon crash + restart can clean up exact-by-id rather
-    /// than guessing by name pattern.
-    rule_ids: Vec<String>,
-
     /// True when the Group Policy NRPT key already contains rules
     /// owned by something other than us (typically a domain GPO).
     /// In that case every rule we write is mirrored to the GP key
     /// and a `RefreshPolicyEx` follows. Auto-detected on every
-    /// `apply` (cheap: one registry enum) so the flag stays current
-    /// across GP changes between connects.
+    /// `install` (cheap: one registry enum) so the flag stays
+    /// current across GP changes between connects.
     write_as_gp: bool,
 }
 
@@ -47,10 +41,7 @@ pub enum Error {
 impl DnsManager {
     #[must_use]
     pub const fn new() -> Self {
-        Self {
-            rule_ids: Vec::new(),
-            write_as_gp: false,
-        }
+        Self { write_as_gp: false }
     }
 
     /// Install or replace NRPT rules covering `suffixes` → `servers`.
@@ -100,7 +91,7 @@ impl DnsManager {
         };
 
         let (rules, surplus) = nrpt::build_rules(suffixes, servers, &previous)?;
-        self.rule_ids = nrpt::apply_rules(&rules, &surplus, self.write_as_gp)?;
+        nrpt::apply_rules(&rules, &surplus, self.write_as_gp)?;
         Ok(())
     }
 
@@ -112,13 +103,5 @@ impl DnsManager {
         if let Err(e) = nrpt::clear_rules(self.write_as_gp) {
             warn!(error = %e, "NRPT clear failed");
         }
-        self.rule_ids.clear();
-    }
-
-    /// GUIDs of rules currently owned by this manager, for cleanup
-    /// manifest persistence.
-    #[must_use]
-    pub fn owned_rule_ids(&self) -> &[String] {
-        &self.rule_ids
     }
 }

@@ -103,6 +103,7 @@ fn interface_name(index: u32) -> Option<String> {
 #[allow(unsafe_code)]
 #[cfg(windows)]
 fn interface_name(index: u32) -> Option<String> {
+    use widestring::U16CStr;
     use windows_sys::Win32::Foundation::NO_ERROR;
     use windows_sys::Win32::NetworkManagement::IpHelper::{
         ConvertInterfaceIndexToLuid, ConvertInterfaceLuidToAlias,
@@ -131,6 +132,7 @@ fn interface_name(index: u32) -> Option<String> {
     if r != NO_ERROR {
         return None;
     }
-    let nul = buf.iter().position(|&c| c == 0).unwrap_or(buf.len());
-    Some(String::from_utf16_lossy(&buf[..nul]))
+    U16CStr::from_slice_truncate(&buf)
+        .ok()
+        .map(|s| s.to_string_lossy())
 }
