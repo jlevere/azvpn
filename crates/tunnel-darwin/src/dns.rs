@@ -452,9 +452,9 @@ fn try_remove(path: &Path) -> bool {
     }
 }
 
-/// First line of every `/etc/resolver/<suffix>` file we manage —
-/// `MAGIC_HEADER_PREFIX` plus the suffix plus newline. Defined once
-/// so the writer and the test that asserts on it stay in sync.
+/// Defined once so the writer and the test that asserts on it stay
+/// in sync — the wire format of the header is otherwise hard-coded
+/// in two places.
 fn magic_header(suffix: &str) -> String {
     format!("{MAGIC_HEADER_PREFIX}{suffix}\n")
 }
@@ -575,31 +575,37 @@ mod tests {
         // intentionally stripped (`.example.com` normalizes to
         // `example.com`), which the `leading_dot_normalized` test
         // covers.
-        let mut check = |input: &str, want: &str| {
-            let result = g.update(&[input], &[dns("1.2.3.4")]);
-            let Err(Error::InvalidSuffix { reason, .. }) = result else {
-                panic!("input {input:?}: expected InvalidSuffix, got {result:?}");
-            };
-            let got = match reason {
-                PathUnsafe => "PathUnsafe",
-                Empty => "Empty",
-                TrailingDot => "TrailingDot",
-                TrailingHyphen => "TrailingHyphen",
-                MalformedDnsName(_) => "MalformedDnsName",
-                other => panic!("input {input:?}: unexpected reason {other:?}"),
-            };
-            assert_eq!(got, want, "input {input:?}: wrong reason variant");
-        };
+        // Local macro so the patterns can match the enum variants
+        // directly — passing variants as values would force a
+        // `fn(&InvalidSuffixReason) -> bool` table that clippy
+        // (correctly) flags as `type_complexity`.
+        macro_rules! reject {
+            ($input:expr, $variant:pat) => {{
+                let result = g.update(&[$input], &[dns("1.2.3.4")]);
+                let Err(Error::InvalidSuffix { reason, .. }) = result else {
+                    panic!(
+                        "input {:?}: expected InvalidSuffix, got {:?}",
+                        $input, result
+                    );
+                };
+                assert!(
+                    matches!(reason, $variant),
+                    "input {:?}: wrong variant, got {:?}",
+                    $input,
+                    reason,
+                );
+            }};
+        }
 
-        check("../evil", "PathUnsafe");
-        check("foo/bar", "PathUnsafe");
-        check("foo\\bar", "PathUnsafe");
-        check("foo:bar", "PathUnsafe");
-        check("foo bar", "PathUnsafe");
-        check("..", "Empty");
-        check("-bad", "MalformedDnsName");
-        check("bad-", "TrailingHyphen");
-        check("bad.", "TrailingDot");
+        reject!("../evil", PathUnsafe);
+        reject!("foo/bar", PathUnsafe);
+        reject!("foo\\bar", PathUnsafe);
+        reject!("foo:bar", PathUnsafe);
+        reject!("foo bar", PathUnsafe);
+        reject!("..", Empty);
+        reject!("-bad", MalformedDnsName(_));
+        reject!("bad-", TrailingHyphen);
+        reject!("bad.", TrailingDot);
 
         assert!(
             !parent_marker.exists(),
