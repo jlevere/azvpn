@@ -21,6 +21,7 @@ pub mod metrics;
 pub mod reachability;
 pub mod route;
 pub mod session;
+pub mod target;
 
 pub type Result<T> = std::result::Result<T, Error>;
 

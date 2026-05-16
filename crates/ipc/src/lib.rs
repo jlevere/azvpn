@@ -33,10 +33,15 @@ use serde::{Deserialize, Serialize};
 /// (bincode failing mid-decode on the daemon side), forcing the user
 /// to guess that `azvpn install-daemon` was needed.
 ///
-/// Bump when changing: any `ConnectRequest` field, any `*Report`
-/// shape returned over the wire, any new RPC added (the new method ID
-/// will be unknown to an old daemon).
-pub const WIRE_VERSION: u32 = 1;
+/// Bump when changing: any request field, any `*Report` shape
+/// returned over the wire, any RPC method added/removed/renamed (the
+/// method ID will be unknown to an old daemon, or vice-versa).
+///
+/// History:
+/// - 1: initial release with `connect`/`disconnect` verbs
+/// - 2: renamed `connect`/`disconnect` → `up`/`down` with
+///   `ephemeral` flag for F.1 declarative target state
+pub const WIRE_VERSION: u32 = 2;
 
 #[tarpc::service]
 pub trait AzvpnApi {
@@ -50,16 +55,19 @@ pub trait AzvpnApi {
     /// to issue any wire-sensitive call.
     async fn wire_version() -> u32;
 
-    /// Start a connection. The daemon spawns openvpn, applies DNS and
-    /// routes, and replies once the tunnel reaches `Connected`.
-    /// Subsequent status changes can be polled via [`status`] or
-    /// observed in the daemon's log stream.
-    async fn connect(req: ConnectRequest) -> Result<(), IpcError>;
+    /// Bring the tunnel up. Persists target state (`{state:
+    /// Connected, profile}`) so the daemon will auto-converge after a
+    /// reboot, unless `req.ephemeral` is set — in which case the call
+    /// behaves like a one-shot connect (CI scripts, debugging). The
+    /// daemon spawns openvpn, applies DNS and routes, and replies
+    /// once the tunnel reaches `Connected`.
+    async fn up(req: UpRequest) -> Result<(), IpcError>;
 
-    /// Tear down the active connection. Returns `NotConnected` if
-    /// there isn't one, `SignalSent` after openvpn has received
-    /// SIGTERM.
-    async fn disconnect() -> Result<DisconnectOutcome, IpcError>;
+    /// Tear down the active connection. Persists target state
+    /// (`{state: Disconnected}`) unless `req.ephemeral` is set —
+    /// matching `up`'s semantics. Returns `NotConnected` if there
+    /// isn't one, `SignalSent` after openvpn has received SIGTERM.
+    async fn down(req: DownRequest) -> Result<DisconnectOutcome, IpcError>;
 
     /// Current connection state — `None` when no active connection.
     async fn status() -> Result<Option<StatusReport>, IpcError>;
@@ -74,7 +82,7 @@ pub trait AzvpnApi {
     async fn pushed() -> Result<Option<PushOptions>, IpcError>;
 }
 
-/// Inputs the CLI marshals into a `Connect` call.
+/// Inputs the CLI marshals into an `Up` call.
 ///
 /// `access_token` is the AAD bearer token the CLI obtained via the
 /// device-code flow (or refreshed). The daemon never runs the flow
@@ -88,11 +96,25 @@ pub trait AzvpnApi {
 /// is the user's path-as-typed, carried along purely for status / info
 /// display ("where did this come from").
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ConnectRequest {
+pub struct UpRequest {
     pub profile: VpnProfile,
     pub profile_label: String,
     pub access_token: Option<String>,
     pub verbose: bool,
+    /// One-shot mode: don't persist this as the user's target state.
+    /// Daemon brings the tunnel up exactly the same way; after a
+    /// reboot the daemon stays idle instead of auto-converging.
+    /// CI scripts and ad-hoc debugging.
+    pub ephemeral: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DownRequest {
+    /// One-shot mode: don't update target state. If a previous
+    /// non-ephemeral `up` set the target to Connected, a reboot will
+    /// re-converge. Useful for "I want to power-cycle the tunnel for
+    /// debugging without unsetting my intent."
+    pub ephemeral: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

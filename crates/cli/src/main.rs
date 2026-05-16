@@ -3,10 +3,9 @@ use std::path::PathBuf;
 use clap::{Parser, Subcommand};
 
 mod captive;
-mod connect;
 mod daemon_client;
-mod disconnect;
 mod dns;
+mod down;
 mod error;
 mod groups;
 mod info;
@@ -18,6 +17,7 @@ mod me;
 mod org;
 mod pushed;
 mod status;
+mod up;
 mod whoami;
 
 pub use error::{Error, Result};
@@ -35,18 +35,33 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
-    /// Connect to a VPN profile (talks to the running azvpnd daemon).
-    Connect {
-        /// Path to Azure VPN profile XML
+    /// Bring up the tunnel and persist intent so it auto-reconnects
+    /// after reboot. `--profile PATH` is required the first time;
+    /// after that the daemon remembers, so plain `azvpn up` re-runs
+    /// with the stored profile.
+    Up {
+        /// Path to Azure VPN profile XML. Required on first `up`;
+        /// optional thereafter (daemon uses the stored snapshot).
         #[arg(short, long)]
-        profile: PathBuf,
+        profile: Option<PathBuf>,
         /// Interactive AAD auth flow. `auto` picks browser when
         /// available, falls back to device-code on SSH / headless.
-        #[arg(long, value_enum, default_value_t = connect::AuthMode::Auto)]
-        auth: connect::AuthMode,
+        #[arg(long, value_enum, default_value_t = up::AuthMode::Auto)]
+        auth: up::AuthMode,
+        /// One-shot mode: don't update target state. The daemon
+        /// brings the tunnel up the same way, but a reboot won't
+        /// reconnect. For CI scripts and ad-hoc debugging.
+        #[arg(long)]
+        ephemeral: bool,
     },
-    /// Disconnect the active VPN session
-    Disconnect,
+    /// Tear down the tunnel and (unless `--ephemeral`) update target
+    /// state so the daemon stays idle after reboot.
+    Down {
+        /// Skip target-state update — useful for "power-cycle the
+        /// tunnel for debugging without clearing my `up` intent."
+        #[arg(long)]
+        ephemeral: bool,
+    },
     /// Show current connection status
     Status,
     /// Import a VPN profile
@@ -117,10 +132,12 @@ async fn main() {
     logging::init(cli.verbose);
 
     let exit_code = match cli.command {
-        Command::Connect { profile, auth } => {
-            report(connect::run(&profile, cli.verbose, auth).await)
-        }
-        Command::Disconnect => report(disconnect::run().await),
+        Command::Up {
+            profile,
+            auth,
+            ephemeral,
+        } => report(up::run(profile, cli.verbose, auth, ephemeral).await),
+        Command::Down { ephemeral } => report(down::run(ephemeral).await),
         Command::Status => report(status::run().await),
         Command::Whoami => report(whoami::run()),
         Command::Info => report(info::run().await),
