@@ -1,12 +1,20 @@
 //! `azvpn dns` subcommands.
 //!
-//! - `lookup`: resolve one hostname. Default uses the system resolver
-//!   (libresolv on macOS), which respects the `SCDynamicStore`
-//!   `SupplementalMatchDomains` entry we write on `Connected` — so this
-//!   command verifies our split-DNS routing actually works.
-//!   `--via <server>` does an explicit query via `hickory-resolver`.
+//! - `lookup`: resolve one hostname. Default uses `getaddrinfo(3)`
+//!   via [`std::net::ToSocketAddrs`] — the exact path real apps
+//!   (browsers, curl, ssh) take, so the answer this prints is what
+//!   the user's tools will actually see. On macOS that path goes
+//!   through mDNSResponder, which honours both `SCDynamicStore`
+//!   supplemental match domains AND `/etc/resolver/<suffix>` files;
+//!   on Linux it goes through `nsswitch.conf` (typically systemd-
+//!   resolved). The previous hickory-resolver `from_system_conf`
+//!   implementation read `/etc/resolv.conf` only, which on macOS
+//!   bypasses split-horizon DNS entirely.
+//! - `--via <server>` still uses `hickory-resolver` for explicit
+//!   per-server queries (the "debug a specific nameserver" path).
 
-use std::net::{IpAddr, SocketAddr};
+use std::io;
+use std::net::{IpAddr, SocketAddr, ToSocketAddrs as _};
 use std::time::Instant;
 
 use hickory_resolver::TokioAsyncResolver;
@@ -21,18 +29,30 @@ pub async fn lookup(host: &str, via: Option<&str>) -> Result<()> {
     }
 }
 
-/// Resolve via the system configuration — on macOS this honours
-/// `SCDynamicStore` `SupplementalMatchDomains`, so it verifies our
-/// split-DNS routing is wired correctly.
+/// Resolve via `getaddrinfo(3)` — the same path real applications
+/// (browsers, curl, ssh, etc.) take, so the answer here matches what
+/// users will see in their tools. Runs the syscall in a blocking
+/// pool because `getaddrinfo` doesn't have an async form.
 async fn lookup_system(host: &str) -> Result<()> {
-    let resolver = TokioAsyncResolver::tokio_from_system_conf()?;
+    let host_owned = host.to_owned();
     let started = Instant::now();
-    let answer = resolver.lookup_ip(host).await?;
+    // Port 0 because we only care about the IP — `ToSocketAddrs`
+    // returns `SocketAddr`s and we project to `IpAddr`. Wrapped in
+    // `spawn_blocking` so the syscall doesn't park the runtime.
+    let result = tokio::task::spawn_blocking(move || (host_owned.as_str(), 0u16).to_socket_addrs())
+        .await
+        .map_err(io::Error::other)?;
     let elapsed = started.elapsed();
 
-    let ips: Vec<IpAddr> = answer.iter().collect();
+    // Dedupe IPs — `getaddrinfo` can return the same address multiple
+    // times when both v4 and v6 socktypes are wanted, or when a host
+    // has multiple service entries pointing at one address.
+    let mut ips: Vec<IpAddr> = result?.map(|sa| sa.ip()).collect();
+    ips.sort();
+    ips.dedup();
+
     println!("host:     {host}");
-    println!("resolver: system (libresolv → SCDynamicStore)");
+    println!("resolver: getaddrinfo (system; respects /etc/resolver/ on macOS)");
     println!("rtt:      {} ms", elapsed.as_millis());
     if ips.is_empty() {
         return Err(Error::NoDnsAnswer {
