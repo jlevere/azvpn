@@ -197,9 +197,19 @@ async fn wait_for_callback(listener: TcpListener, expected_state: &str) -> Resul
          \r\n",
         body.len()
     );
-    let _ = stream.write_all(response.as_bytes()).await;
-    let _ = stream.write_all(body).await;
-    let _ = stream.shutdown().await;
+    // Best-effort: by this point we already have `code`, so the auth
+    // flow can succeed even if the browser closed mid-handshake. Log
+    // (don't fail) so the user gets a hint when the "Signed in" tab
+    // never rendered — most often a port-forwarder / proxy / antivirus
+    // closed the loopback socket before the response landed.
+    if let Err(e) = stream.write_all(response.as_bytes()).await {
+        tracing::warn!(error = %e, "loopback callback: failed to write HTTP headers");
+    } else if let Err(e) = stream.write_all(body).await {
+        tracing::warn!(error = %e, "loopback callback: failed to write HTTP body");
+    }
+    if let Err(e) = stream.shutdown().await {
+        tracing::debug!(error = %e, "loopback callback: shutdown failed");
+    }
 
     Ok(code)
 }

@@ -39,6 +39,12 @@ struct ActiveConnection {
     profile_label: String,
     mgmt_addr: SocketAddr,
     started_at: u64,
+    /// Handle to the spawned connect task. `shutdown()` `.take()`s it
+    /// and awaits it directly so we know cleanup (routes, DNS, openvpn
+    /// child) has finished — no polling loop on the `active` slot.
+    /// `Option` because the join is consumed exactly once on shutdown;
+    /// other RPCs leave it alone.
+    task: Option<tokio::task::JoinHandle<()>>,
 }
 
 #[derive(Clone)]
@@ -132,29 +138,25 @@ impl AzvpndServer {
         let (status_tx, _) = watch::channel(ConnectionStatus::Idle);
         let (pushed_tx, _) = watch::channel::<Option<PushOptions>>(None);
         let (metrics_tx, _) = watch::channel::<ConnectionMetrics>(ConnectionMetrics::default());
+
+        // Subscribe the receivers we want to keep before the senders
+        // move into the spawned task. tokio's watch channel is Arc-
+        // internally so additional subscribers see every send().
         let mut wait_rx = status_tx.subscribe();
+        let status_rx = status_tx.subscribe();
+        let pushed_rx = pushed_tx.subscribe();
+        let metrics_rx = metrics_tx.subscribe();
+        let cancel_for_conn = cancel.clone();
 
         let started_at = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .map_or(0, |d| d.as_secs());
 
-        *active = Some(ActiveConnection {
-            cancel: cancel.clone(),
-            status_rx: status_tx.subscribe(),
-            pushed_rx: pushed_tx.subscribe(),
-            metrics_rx: metrics_tx.subscribe(),
-            server_fqdn,
-            profile_label,
-            mgmt_addr,
-            started_at,
-        });
-        drop(active);
-
         // AT only lives long enough to land in the openvpn
         // `auth-user-pass` tempfile (0600) and then drops.
         let access_token_plain = access_token.map(|s| s.expose_secret().to_owned());
         let state = self.state.clone();
-        tokio::spawn(async move {
+        let task = tokio::spawn(async move {
             info!("starting connect task");
             let result =
                 connect::run(opts, access_token_plain, status_tx, pushed_tx, metrics_tx, cancel)
@@ -166,6 +168,19 @@ impl AzvpndServer {
             }
             state.active.lock().await.take();
         });
+
+        *active = Some(ActiveConnection {
+            cancel: cancel_for_conn,
+            status_rx,
+            pushed_rx,
+            metrics_rx,
+            server_fqdn,
+            profile_label,
+            mgmt_addr,
+            started_at,
+            task: Some(task),
+        });
+        drop(active);
 
         let terminal = wait_rx
             .wait_for(is_terminal)
@@ -193,23 +208,30 @@ impl AzvpndServer {
     /// shutdown path so SIGTERM produces a clean teardown — routes,
     /// DNS key, openvpn child — instead of leaving kernel state for
     /// the next boot to inherit.
+    ///
+    /// Awaits the spawned connect task's `JoinHandle` directly rather
+    /// than polling the `active` slot. The task only completes after
+    /// `connect::run` has unwound — including `RouteManager::clear()`
+    /// and `DnsManager::clear()` in its scope-exit path — so the
+    /// join is the right "cleanup done" signal.
     pub async fn shutdown(&self) {
-        let active = self.state.active.lock().await;
-        if let Some(conn) = active.as_ref() {
+        let task = {
+            let mut active = self.state.active.lock().await;
+            let Some(conn) = active.as_mut() else {
+                return;
+            };
             info!("cancelling active connection for shutdown");
             conn.cancel.cancel();
-        }
-        drop(active);
-
-        // Wait until the connect task clears its slot. The task drops
-        // routes, DNS, openvpn child during this window; once it
-        // takes() the slot we know cleanup is done.
-        let poll = Duration::from_millis(100);
-        loop {
-            if self.state.active.lock().await.is_none() {
-                break;
-            }
-            tokio::time::sleep(poll).await;
+            // Take the join handle so we can await outside the mutex.
+            // Concurrent `status` / `info` / `pushed` RPCs can still see
+            // `Some(conn)` until the task itself `take()`s the slot,
+            // which keeps their behaviour unchanged across this race.
+            conn.task.take()
+        };
+        if let Some(task) = task {
+            // Discard JoinError: a task panic was already logged inside
+            // the spawn, and a clean exit returns `()` we don't need.
+            let _ = task.await;
         }
     }
 }

@@ -77,10 +77,10 @@ pub(super) fn bundled_root_matches(profile: &VpnProfile) -> Result<()> {
     if hash.trim().eq_ignore_ascii_case(bundled) {
         return Ok(());
     }
-    Err(Error::Other(format!(
-        "profile pins root CA {hash} but azvpn bundles {bundled} — gateway likely \
-         uses a CA we don't trust; please file an issue with the profile"
-    )))
+    Err(Error::RootCaMismatch {
+        pinned: hash.trim().to_owned(),
+        bundled: bundled.to_owned(),
+    })
 }
 
 /// Reject a `PUSH_REPLY` that names a known-weak data cipher. Returns
@@ -95,11 +95,7 @@ pub(super) fn pushed_cipher_acceptable(cipher: Option<&str>) -> Result<()> {
         .iter()
         .any(|weak| cipher.eq_ignore_ascii_case(weak))
     {
-        return Err(Error::Other(format!(
-            "gateway pushed weak data cipher `{cipher}` — refusing the connection. \
-             A modern AEAD cipher (AES-256-GCM, AES-128-GCM, CHACHA20-POLY1305) \
-             must be configured at the gateway."
-        )));
+        return Err(Error::WeakCipher(cipher.to_owned()));
     }
     Ok(())
 }
@@ -122,11 +118,7 @@ pub(super) fn pushed_compression_acceptable(compress: Option<&Compression>) -> R
         // remaining variant is Active. Kept as a defensive default.
         Compression::Stub | Compression::StubV2 | Compression::CompLzoOff => "(unknown)",
     };
-    Err(Error::Other(format!(
-        "gateway pushed data-channel compression `{wire}` — refusing the \
-         connection. Compression alongside encryption enables CRIME/VORACLE-style \
-         leaks; turn it off at the gateway or downgrade to `compress stub-v2`."
-    )))
+    Err(Error::UnsafeCompression(wire.to_owned()))
 }
 
 #[cfg(test)]

@@ -9,8 +9,6 @@
 
 use std::path::{Path, PathBuf};
 
-use azvpn_core::Error as CoreError;
-
 use crate::{Error, Result};
 
 #[cfg(target_os = "linux")]
@@ -163,7 +161,7 @@ pub(super) fn resolve_binary(
 }
 
 pub(super) fn other(msg: impl Into<String>) -> Error {
-    Error::Core(CoreError::Other(msg.into()))
+    Error::Install(msg.into())
 }
 
 /// Canonical "you just installed the daemon, here's what to do next"

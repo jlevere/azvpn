@@ -36,6 +36,10 @@ allow = [
     # CDLA-Permissive-2.0: webpki-roots (via hyper-rustls). Permissive
     # data license used by Mozilla's bundled CA list.
     "CDLA-Permissive-2.0",
+    # Zlib: const_format / konst / konst_macro_rules (via shadow-rs,
+    # pulled in for the `azvpn --version` git-commit embed). OSI- and
+    # FSF-approved permissive license; same posture as MPL-2.0 above.
+    "Zlib",
 ]
 confidence-threshold = 0.93
 

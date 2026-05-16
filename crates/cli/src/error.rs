@@ -96,6 +96,16 @@ pub enum Error {
     /// `dns lookup` got no A/AAAA records for the host.
     #[error("no answer for {host}")]
     NoDnsAnswer { host: String },
+
+    /// `install-daemon` / `uninstall-daemon` failure context — SCM
+    /// roundtrips, launchd plist writes, systemd D-Bus calls, install-dir
+    /// path math. Stringly-typed because the underlying errors are a
+    /// per-platform grab-bag (windows-service, launchctl shell-out,
+    /// `io::Error`, path-not-found). Lives in this file rather than as a
+    /// `core::Error` variant because install-daemon is a CLI-side concern,
+    /// not part of the connect lifecycle.
+    #[error("install-daemon: {0}")]
+    Install(String),
 }
 
 /// Crate-wide `Result` type. Subcommand modules return `crate::Result<()>`.

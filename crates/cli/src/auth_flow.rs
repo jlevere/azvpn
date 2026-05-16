@@ -102,9 +102,9 @@ pub async fn acquire(
             Ok(AadTokens::default())
         }
         AuthType::Aad => {
-            let aad_profile = profile.clientauth.aad.as_ref().ok_or_else(|| {
-                azvpn_core::Error::Other("AAD auth requires <aad> config block".into())
-            })?;
+            let aad_profile = profile.clientauth.aad.as_ref().ok_or(
+                azvpn_core::Error::ProfileIncomplete("AAD auth requires <aad> config block"),
+            )?;
             let aad_config = AadConfig::from(aad_profile);
             let cache = TokenCache::for_profile(CacheKey::from(&aad_config));
 

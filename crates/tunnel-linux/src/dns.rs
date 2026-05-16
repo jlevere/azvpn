@@ -142,7 +142,24 @@ async fn detect_backend() -> Backend {
     // The connection doubles as the resolved backend we'd return — no
     // second probe needed downstream.
     let resolved_probe = ResolvedBackend::try_connect().await.ok();
-    let resolv = fs::read_to_string(RESOLV_CONF).unwrap_or_default();
+    // Best-effort read: a missing or unreadable resolv.conf is treated as
+    // "no signal" and we fall through to Direct backend. Logged at warn
+    // for the ENOMEM / EIO / permission-denied case where the file is
+    // there but we can't see it — silently treating it as empty would
+    // hide a real misconfiguration.
+    let resolv = match fs::read_to_string(RESOLV_CONF) {
+        Ok(s) => s,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(e) => {
+            warn!(
+                path = RESOLV_CONF,
+                error = %e,
+                "couldn't read resolv.conf for backend fingerprinting; \
+                 treating as no-signal"
+            );
+            String::new()
+        }
+    };
     let signal = fingerprint(&resolv);
 
     let resolved_ok = |reason: &str, b: ResolvedBackend| {
@@ -422,10 +439,20 @@ impl DirectBackend {
 
     fn apply(&mut self, suffixes: &[&str], servers: &[IpAddr]) -> Result<()> {
         if self.backup.is_none() {
-            let current = fs::read(&self.resolv_path).unwrap_or_default();
+            // A missing resolv.conf is fine (some minimalist containers
+            // start without one) and round-trips to "restore an empty
+            // file" cleanly. Any other read failure (permission denied,
+            // EIO, ...) must bubble — silently backing up zero bytes
+            // would corrupt the restore-on-disconnect path.
+            let current = match fs::read(&self.resolv_path) {
+                Ok(bytes) => bytes,
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => Vec::new(),
+                Err(e) => return Err(Error::Io(e)),
+            };
             // Persist the snapshot to disk too — if azvpnd dies before
             // it can call clear(), the cleanup-manifest restart path
-            // can spot this file and restore.
+            // can spot this file and restore. Best-effort dir-create:
+            // a failure here surfaces via the subsequent fs::write.
             if let Some(parent) = self.backup_path.parent() {
                 let _ = fs::create_dir_all(parent);
             }

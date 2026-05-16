@@ -173,7 +173,7 @@ async fn attempt(
     let _ = status_tx.send(ConnectionStatus::Connecting);
     let profile = &opts.profile;
     let Some(server) = profile.primary_server() else {
-        return AttemptOutcome::Fatal(Error::Other("no server in profile".into()));
+        return AttemptOutcome::Fatal(Error::ProfileIncomplete("no server in profile"));
     };
     info!(server = %server.fqdn, "loaded profile");
 
@@ -478,20 +478,22 @@ async fn attempt(
                     }
                     Event::PasswordVerificationFailed { realm } => {
                         tracing::error!(%realm, "gateway rejected credentials — terminal");
-                        let msg =
-                            format!("credentials rejected by gateway (realm {realm})");
+                        let realm = realm.to_string();
+                        let err = Error::CredentialsRejected(realm);
+                        let msg = err.to_string();
                         let _ = status_tx.send(ConnectionStatus::Failed(msg.clone()));
                         record_error(&msg);
                         let _ = mgmt.send("signal SIGTERM").await;
                         // Rejection won't fix by retrying with the same
                         // token — caller has to acquire a fresh AAD AT
                         // and re-issue connect().
-                        outcome = Some(AttemptOutcome::Fatal(Error::Other(msg)));
+                        outcome = Some(AttemptOutcome::Fatal(err));
                         break;
                     }
                     Event::Fatal(msg) => {
-                        tracing::error!("openvpn fatal: {msg}");
-                        let status_msg = format!("openvpn fatal: {msg}");
+                        let err = Error::OpenVpnFatal(msg);
+                        tracing::error!("{err}");
+                        let status_msg = err.to_string();
                         let _ = status_tx.send(ConnectionStatus::Failed(status_msg.clone()));
                         record_error(&status_msg);
                         // openvpn will exit on its own after emitting >FATAL:,
@@ -504,7 +506,7 @@ async fn attempt(
                         // retry loop gets a chance — at worst we burn
                         // the budget on a non-fixable issue and surface
                         // the final error to the caller.
-                        outcome = Some(AttemptOutcome::Transient(Error::Other(status_msg)));
+                        outcome = Some(AttemptOutcome::Transient(err));
                         break;
                     }
                     Event::PushReply(opts) => {
@@ -639,8 +641,6 @@ async fn attempt(
     //   trying to reach the gateway and exited unhappy)
     outcome.unwrap_or_else(|| match code {
         Some(0) | None => AttemptOutcome::Completed,
-        Some(_) => {
-            AttemptOutcome::Transient(Error::Other(format!("openvpn exited with code {code:?}")))
-        }
+        Some(_) => AttemptOutcome::Transient(Error::OpenVpnExitNonZero { code }),
     })
 }

@@ -94,10 +94,9 @@ pub(super) fn build_auth_file(
             info!("wrote AAD auth-user-pass file");
             Ok(Some(f))
         }
-        (AuthType::Aad, None) => Err(Error::Other(
-            "AAD profile requires an access token (caller must run \
-             the device-code flow before invoking connect)"
-                .into(),
+        (AuthType::Aad, None) => Err(Error::ProfileIncomplete(
+            "AAD profile requires an access token (caller must run the device-code flow \
+             before invoking connect)",
         )),
         (AuthType::Certificate, _) => {
             // Client cert auth needs the cert + private key wired into
@@ -110,16 +109,15 @@ pub(super) fn build_auth_file(
             // ConfigBuilder to emit <cert>/<key> blocks from
             // <clientauth><cert><certificatedata>, or implement
             // platform-specific keystore lookup by <hash>.
-            Err(Error::Other(
-                "client certificate auth is not yet implemented — \
-                 only AAD and username/password profiles can connect today"
-                    .into(),
+            Err(Error::Unsupported(
+                "client certificate auth — only AAD and username/password profiles can \
+                 connect today",
             ))
         }
         (AuthType::UsernamePass | AuthType::Radius, _) => {
-            let creds = profile.clientauth.usernamepass.as_ref().ok_or_else(|| {
-                Error::Other("usernamepass/radius auth requires <usernamepass> block".into())
-            })?;
+            let creds = profile.clientauth.usernamepass.as_ref().ok_or(
+                Error::ProfileIncomplete("usernamepass/radius auth requires <usernamepass> block"),
+            )?;
             // Both fields are <xs:string minOccurs="0"> in the XSD —
             // populated profiles do exist (headless / CI) but Microsoft
             // generally expects the user to fill them in. Reject empties
@@ -128,12 +126,16 @@ pub(super) fn build_auth_file(
                 .username
                 .as_deref()
                 .filter(|s| !s.is_empty())
-                .ok_or_else(|| Error::Other("<usernamepass><username> missing or empty".into()))?;
+                .ok_or(Error::ProfileIncomplete(
+                    "<usernamepass><username> missing or empty",
+                ))?;
             let password = creds
                 .password
                 .as_deref()
                 .filter(|s| !s.is_empty())
-                .ok_or_else(|| Error::Other("<usernamepass><password> missing or empty".into()))?;
+                .ok_or(Error::ProfileIncomplete(
+                    "<usernamepass><password> missing or empty",
+                ))?;
             let f = write_creds_file(username, password)?;
             info!(auth = ?profile.clientauth.auth_type, "wrote username/password auth file");
             Ok(Some(f))
