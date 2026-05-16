@@ -47,7 +47,6 @@ pub enum AuthMode {
 /// this only needs to cover openvpn handshake + first push reply —
 /// generous 3 minutes covers slow gateways.
 const UP_DEADLINE: Duration = Duration::from_mins(3);
-const DOWN_DEADLINE: Duration = Duration::from_secs(30);
 
 pub async fn run(
     profile_path: Option<PathBuf>,
@@ -86,21 +85,16 @@ pub async fn run(
         eprintln!("requesting connection from daemon...");
     }
     client.up(ctx, req).await??;
-    eprintln!("connected. Ctrl-C to disconnect.");
 
-    // Park until the user signals. The daemon owns the tunnel
-    // lifecycle now — the CLI is just a control channel.
-    let _ = tokio::signal::ctrl_c().await;
-    eprintln!("\ndisconnecting...");
-
-    let mut ctx = tarpc::context::current();
-    ctx.deadline = Instant::now() + DOWN_DEADLINE;
-    // Ctrl-C from an `up` session is "I want this stopped now and
-    // I don't want it to come back on reboot" — match the
-    // explicitness by sending the persistent `down` (not ephemeral).
-    let _ = client
-        .down(ctx, azvpn_ipc::DownRequest { ephemeral: false })
-        .await??;
+    // Set-and-forget: daemon owns the tunnel now, CLI exits. Same
+    // shape as `tailscale up` / `mullvad connect` — the user told
+    // the daemon what to do; babysitting the foreground process is
+    // not the CLI's job. To disconnect, the user runs `azvpn down`.
+    if ephemeral {
+        eprintln!("connected. Ephemeral session — run `azvpn down --ephemeral` to disconnect.");
+    } else {
+        eprintln!("connected. Run `azvpn down` to disconnect.");
+    }
     Ok(())
 }
 
