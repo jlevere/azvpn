@@ -1,0 +1,8 @@
+# `cargo xtask <cmd>` runs the project-internal release-engineering
+# tool (crates/xtask/) without polluting `cargo build --workspace`.
+# The `--` separator stops cargo from interpreting xtask's own flags
+# as `cargo run` flags. The `xtaskc` (check-mode) alias keeps clippy
+# / rust-analyzer fast on the xtask crate during development.
+[alias]
+xtask = "run --quiet --release --package xtask --"
+xtaskc = "check --package xtask --all-targets"

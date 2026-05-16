@@ -10,6 +10,24 @@ members = [
     "crates/tunnel-darwin",
     "crates/tunnel-linux",
     "crates/tunnel-windows",
+    "crates/xtask",
+]
+# Don't pull xtask into `cargo build --workspace`: it's project-internal
+# release tooling, not shippable code, and dragging its compile time
+# into every dev `cargo build` is the easiest way to make people hate
+# it. The `cargo xtask <cmd>` alias still works because aliases run
+# `cargo run -p xtask`, which is explicit-membership.
+default-members = [
+    "crates/cli",
+    "crates/core",
+    "crates/daemon",
+    "crates/ipc",
+    "crates/profile",
+    "crates/auth",
+    "crates/openvpn",
+    "crates/tunnel-darwin",
+    "crates/tunnel-linux",
+    "crates/tunnel-windows",
 ]
 resolver = "3"
 
