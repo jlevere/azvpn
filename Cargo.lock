@@ -273,7 +273,7 @@ dependencies = [
  "tracing-subscriber",
  "uzers",
  "windows-service",
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
  "zbus 5.15.0",
 ]
 
@@ -350,7 +350,7 @@ dependencies = [
  "uzers",
  "widestring",
  "windows-service",
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -365,7 +365,7 @@ dependencies = [
  "tokio",
  "uzers",
  "widestring",
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -420,7 +420,7 @@ dependencies = [
  "tracing",
  "uuid",
  "windows-service",
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
  "winreg",
 ]
 

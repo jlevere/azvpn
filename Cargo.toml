@@ -135,7 +135,7 @@ windows-service = "0.8"
 # (`Win32_Security`, `Win32_System_Pipes`). Cheap to compile vs the
 # higher-level `windows` crate. Per-crate Cargo.toml enables only
 # the feature subset that crate actually uses.
-windows-sys = "0.59"
+windows-sys = "0.61"
 # Higher-level registry helper. Used for NRPT registry writes
 # (`HKLM\SYSTEM\CurrentControlSet\Services\Dnscache\Parameters\
 # DnsPolicyConfig\<guid>`). Less unsafe than driving the raw
