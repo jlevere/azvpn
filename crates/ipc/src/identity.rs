@@ -167,14 +167,11 @@ pub fn fetch_pipe_identity(
     pipe: &tokio::net::windows::named_pipe::NamedPipeServer,
 ) -> Result<WindowsClientIdentity, IdentityError> {
     use std::os::windows::io::AsRawHandle;
-    use windows_sys::Win32::Foundation::{CloseHandle, HANDLE, LocalFree};
-    use windows_sys::Win32::Security::Authorization::ConvertSidToStringSidW;
+    use windows_sys::Win32::Foundation::{CloseHandle, HANDLE};
     use windows_sys::Win32::Security::{
-        CheckTokenMembership, CreateWellKnownSid, GetTokenInformation, LookupAccountSidW,
-        RevertToSelf, SECURITY_MAX_SID_SIZE, TOKEN_ELEVATION, TOKEN_ELEVATION_TYPE,
-        TOKEN_LINKED_TOKEN, TOKEN_QUERY, TOKEN_USER, TokenElevation, TokenElevationType,
-        TokenElevationTypeLimited, TokenLinkedToken, TokenSessionId, TokenUser,
-        WinBuiltinAdministratorsSid,
+        CreateWellKnownSid, GetTokenInformation, RevertToSelf, SECURITY_MAX_SID_SIZE,
+        TOKEN_ELEVATION, TOKEN_LINKED_TOKEN, TOKEN_QUERY, TokenElevation, TokenElevationType,
+        TokenElevationTypeLimited, TokenLinkedToken, TokenSessionId, WinBuiltinAdministratorsSid,
     };
     use windows_sys::Win32::System::Pipes::ImpersonateNamedPipeClient;
     use windows_sys::Win32::System::Threading::{GetCurrentThread, OpenThreadToken};
@@ -227,8 +224,13 @@ pub fn fetch_pipe_identity(
     }
     let token = TokenHandle(token);
 
-    let sid_string = sid_string_from_token(token.0)?;
-    let user_name = lookup_account_name(token.0).ok();
+    // Fetch the TokenUser blob once — it carries the SID we need
+    // for both the canonical string form and the audit-only
+    // `DOMAIN\Username` lookup. Avoids the previous two-call dance
+    // each helper used to do independently.
+    let token_user = read_token_user(token.0)?;
+    let sid_string = sid_string_from_token_user(&token_user)?;
+    let user_name = lookup_account_name_from_token_user(&token_user).ok();
     let session_id = query_token_u32(token.0, TokenSessionId, "TokenSessionId")?;
 
     let is_elevated = {
@@ -310,19 +312,22 @@ pub fn fetch_pipe_identity(
     })
 }
 
-/// Read `TokenUser` and convert the SID to its canonical string form.
-/// Sole responsibility — keeps the unsafe Win32 plumbing out of the
-/// main fetch function's body.
+/// Read the `TokenUser` blob from a token handle. Returned as a raw
+/// byte buffer that aliases as `TOKEN_USER { PSID Sid; DWORD Attributes; }`
+/// — callers cast and read the SID pointer, which points into the
+/// returned buffer. The buffer must stay alive for the duration of
+/// the SID's use.
+///
+/// Single source of truth for the two-call `GetTokenInformation`
+/// size-probe + fetch dance; both `sid_string_from_token_user` and
+/// `lookup_account_name_from_token_user` consume the same buffer.
 #[cfg(target_os = "windows")]
 #[allow(unsafe_code)]
-fn sid_string_from_token(token: windows_sys::Win32::Foundation::HANDLE) -> Result<String, IdentityError> {
-    use widestring::U16CStr;
-    use windows_sys::Win32::Foundation::LocalFree;
-    use windows_sys::Win32::Security::Authorization::ConvertSidToStringSidW;
-    use windows_sys::Win32::Security::{GetTokenInformation, TOKEN_USER, TokenUser};
+fn read_token_user(
+    token: windows_sys::Win32::Foundation::HANDLE,
+) -> Result<Vec<u8>, IdentityError> {
+    use windows_sys::Win32::Security::{GetTokenInformation, TokenUser};
 
-    // Two-call pattern: first size-only to get the required buffer
-    // length, then again with the right-sized buffer.
     let mut size: u32 = 0;
     // SAFETY: NULL buffer + 0 size makes GetTokenInformation report
     // the required size in `size` and return ERROR_INSUFFICIENT_BUFFER.
@@ -350,12 +355,27 @@ fn sid_string_from_token(token: windows_sys::Win32::Foundation::HANDLE) -> Resul
             source: std::io::Error::last_os_error(),
         });
     }
+    Ok(buf)
+}
+
+/// Convert the SID inside a `TOKEN_USER` buffer to its canonical
+/// string form (`"S-1-5-..."`). The buffer is the one returned by
+/// [`read_token_user`].
+#[cfg(target_os = "windows")]
+#[allow(unsafe_code)]
+fn sid_string_from_token_user(token_user_buf: &[u8]) -> Result<String, IdentityError> {
+    use widestring::U16CStr;
+    use windows_sys::Win32::Foundation::LocalFree;
+    use windows_sys::Win32::Security::Authorization::ConvertSidToStringSidW;
+    use windows_sys::Win32::Security::TOKEN_USER;
+
     // SAFETY: TOKEN_USER lays out as { PSID Sid; DWORD Attributes; }
-    // — we cast and read the SID pointer, which points into `buf`.
-    let user = unsafe { &*(buf.as_ptr().cast::<TOKEN_USER>()) };
+    // — we cast and read the SID pointer, which points into the
+    // caller-owned buffer that outlives this borrow.
+    let user = unsafe { &*(token_user_buf.as_ptr().cast::<TOKEN_USER>()) };
     let mut str_sid: *mut u16 = std::ptr::null_mut();
-    // SAFETY: `user.User.Sid` is a valid SID inside our buffer.
-    // `ConvertSidToStringSidW` allocates a UTF-16 string via
+    // SAFETY: `user.User.Sid` is a valid SID inside the caller's
+    // buffer. `ConvertSidToStringSidW` allocates a UTF-16 string via
     // LocalAlloc; we LocalFree it after copying.
     let ok = unsafe { ConvertSidToStringSidW(user.User.Sid, &raw mut str_sid) };
     if ok == 0 {
@@ -371,45 +391,18 @@ fn sid_string_from_token(token: windows_sys::Win32::Foundation::HANDLE) -> Resul
     Ok(owned)
 }
 
-/// Best-effort lookup of `DOMAIN\Username` for a token's user SID.
-/// Used only for audit logging. `LookupAccountSidW` can be slow on
-/// domain-joined hosts (LSA roundtrip), so callers tolerate failure
-/// — the SID alone is the authoritative identifier.
+/// Best-effort lookup of `DOMAIN\Username` for the SID inside a
+/// `TOKEN_USER` buffer. Used only for audit logging.
+/// `LookupAccountSidW` can be slow on domain-joined hosts (LSA
+/// roundtrip), so callers tolerate failure — the SID alone is the
+/// authoritative identifier.
 #[cfg(target_os = "windows")]
 #[allow(unsafe_code)]
-fn lookup_account_name(
-    token: windows_sys::Win32::Foundation::HANDLE,
-) -> Result<String, IdentityError> {
+fn lookup_account_name_from_token_user(token_user_buf: &[u8]) -> Result<String, IdentityError> {
     use widestring::U16Str;
-    use windows_sys::Win32::Security::{
-        GetTokenInformation, LookupAccountSidW, SID_NAME_USE, TOKEN_USER, TokenUser,
-    };
+    use windows_sys::Win32::Security::{LookupAccountSidW, SID_NAME_USE, TOKEN_USER};
 
-    let mut size: u32 = 0;
-    unsafe { GetTokenInformation(token, TokenUser, std::ptr::null_mut(), 0, &raw mut size) };
-    if size == 0 {
-        return Err(IdentityError::TokenInfo {
-            class: "TokenUser (size probe, for name lookup)",
-            source: std::io::Error::last_os_error(),
-        });
-    }
-    let mut buf = vec![0u8; size as usize];
-    let ok = unsafe {
-        GetTokenInformation(
-            token,
-            TokenUser,
-            buf.as_mut_ptr().cast(),
-            size,
-            &raw mut size,
-        )
-    };
-    if ok == 0 {
-        return Err(IdentityError::TokenInfo {
-            class: "TokenUser (for name lookup)",
-            source: std::io::Error::last_os_error(),
-        });
-    }
-    let user = unsafe { &*(buf.as_ptr().cast::<TOKEN_USER>()) };
+    let user = unsafe { &*(token_user_buf.as_ptr().cast::<TOKEN_USER>()) };
 
     let mut name: [u16; 256] = [0; 256];
     let mut name_len: u32 = name.len() as u32;
@@ -417,7 +410,7 @@ fn lookup_account_name(
     let mut domain_len: u32 = domain.len() as u32;
     let mut sid_use: SID_NAME_USE = 0;
     // SAFETY: All buffers are writable and the lengths are honest;
-    // `user.User.Sid` is the SID we extracted moments ago.
+    // `user.User.Sid` is the SID inside the caller's buffer.
     let ok = unsafe {
         LookupAccountSidW(
             std::ptr::null(),
@@ -435,10 +428,10 @@ fn lookup_account_name(
             source: std::io::Error::last_os_error(),
         });
     }
-    let domain_str = unsafe { U16Str::from_ptr(domain.as_ptr(), domain_len as usize) }
-        .to_string_lossy();
-    let name_str = unsafe { U16Str::from_ptr(name.as_ptr(), name_len as usize) }
-        .to_string_lossy();
+    let domain_str =
+        unsafe { U16Str::from_ptr(domain.as_ptr(), domain_len as usize) }.to_string_lossy();
+    let name_str =
+        unsafe { U16Str::from_ptr(name.as_ptr(), name_len as usize) }.to_string_lossy();
     if domain_str.is_empty() {
         Ok(name_str)
     } else {
