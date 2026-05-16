@@ -127,7 +127,7 @@ if-addrs = { workspace = true }
 jiff = "0.2"
 # Embed git short-commit + build date into `azvpn --version`. Saves
 # every support exchange that starts with "what version are you on?"
-shadow-rs = { version = "1", default-features = false }
+shadow-rs = { version = "2", default-features = false }
 reqwest = { workspace = true }
 open = { workspace = true }
 serde = { workspace = true }
@@ -161,7 +161,7 @@ windows-sys = { workspace = true, features = [
 ] }
 
 [build-dependencies]
-shadow-rs = { version = "1", default-features = false, features = ["build", "git2"] }
+shadow-rs = { version = "2", default-features = false, features = ["build", "git2"] }
 
 [lints]
 workspace = true
