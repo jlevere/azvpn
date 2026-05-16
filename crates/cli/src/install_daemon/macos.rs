@@ -10,7 +10,7 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use super::{check_executable, other, require_root};
+use super::{check_executable, other, require_root, resolve_binary};
 use crate::Result;
 
 const LAUNCHD_LABEL: &str = "com.jlevere.azvpn.daemon";
@@ -29,7 +29,7 @@ pub async fn install(daemon: Option<PathBuf>, openvpn: Option<PathBuf>) -> Resul
     require_root("install-daemon")?;
 
     let (daemon_path, openvpn_path) = resolve_paths(daemon, openvpn)?;
-    check_executable("azvpnd", &daemon_path)?;
+    check_executable("daemon", &daemon_path)?;
     check_executable("openvpn", &openvpn_path)?;
 
     std::fs::create_dir_all(RUNTIME_DIR)?;
@@ -72,19 +72,24 @@ pub async fn uninstall() -> Result<()> {
     Ok(())
 }
 
-/// Resolve daemon + openvpn paths. Caller-supplied flags win; otherwise
-/// we look next to the running `azvpn` binary on the standard layout
-/// (`<prefix>/bin/azvpn` ↔ `<prefix>/libexec/{azvpnd, azvpn-openvpn}`).
-/// Works for both `brew install` (paths resolve under the cellar after
-/// symlink follow) and a manual `install -m 755` layout. The relative
-/// paths are kept in [`azvpn_core::layout`] so this stays in sync with
-/// what the daemon probes at startup.
+/// Resolve daemon + openvpn paths. See [`resolve_binary`] for the
+/// fallback chain — explicit flag → sibling of the CLI binary (dev) →
+/// brew-layout `<prefix>/libexec/...` → `$PATH` (openvpn only). Keeps
+/// the dev cycle (`sudo target/release/azvpn install-daemon`) and the
+/// brew install (`sudo azvpn install-daemon`) both flag-free.
 fn resolve_paths(daemon: Option<PathBuf>, openvpn: Option<PathBuf>) -> Result<(PathBuf, PathBuf)> {
     let prefix = default_prefix()?;
-    Ok((
-        daemon.unwrap_or_else(|| prefix.join(azvpn_core::layout::BREW_DAEMON_REL)),
-        openvpn.unwrap_or_else(|| prefix.join(azvpn_core::layout::BREW_OPENVPN_REL)),
-    ))
+    let daemon_path = resolve_binary(
+        daemon,
+        "azvpnd",
+        prefix.join(azvpn_core::layout::BREW_DAEMON_REL),
+    );
+    let openvpn_path = resolve_binary(
+        openvpn,
+        "azvpn-openvpn",
+        prefix.join(azvpn_core::layout::BREW_OPENVPN_REL),
+    );
+    Ok((daemon_path, openvpn_path))
 }
 
 /// Two directories up from the CLI binary — `…/bin/azvpn` → `…/`.
@@ -128,10 +133,15 @@ fn render_plist(daemon: &Path, openvpn: &Path) -> String {
     <key>KeepAlive</key>
     <true/>
 
+    <!-- The daemon owns its own rolling-file logger at
+         /Library/Logs/com.jlevere.azvpn/daemon.log.<date> with
+         daily rotation + 7-day retention. Discard whatever else
+         hits stdout/stderr so launchd doesn't grow an unbounded
+         /var/log/azvpnd.log (seen at 900 MB in the wild). -->
     <key>StandardOutPath</key>
-    <string>/var/log/azvpnd.log</string>
+    <string>/dev/null</string>
     <key>StandardErrorPath</key>
-    <string>/var/log/azvpnd.log</string>
+    <string>/dev/null</string>
 
     <key>EnvironmentVariables</key>
     <dict>

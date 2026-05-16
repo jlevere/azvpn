@@ -13,7 +13,7 @@ use std::path::{Path, PathBuf};
 use tracing::debug;
 use zbus::zvariant::OwnedObjectPath;
 
-use super::{check_executable, require_root};
+use super::{check_executable, require_root, resolve_binary};
 use crate::Result;
 
 const UNIT_NAME: &str = "azvpn.service";
@@ -32,8 +32,8 @@ const DEFAULT_OPENVPN: &str = "/usr/sbin/openvpn";
 pub async fn install(daemon: Option<PathBuf>, openvpn: Option<PathBuf>) -> Result<()> {
     require_root("install-daemon")?;
 
-    let daemon = daemon.unwrap_or_else(|| PathBuf::from(DEFAULT_DAEMON));
-    let openvpn = openvpn.unwrap_or_else(|| PathBuf::from(DEFAULT_OPENVPN));
+    let daemon = resolve_binary(daemon, "azvpnd", PathBuf::from(DEFAULT_DAEMON));
+    let openvpn = resolve_binary(openvpn, "azvpn-openvpn", PathBuf::from(DEFAULT_OPENVPN));
     check_executable("daemon", &daemon)?;
     check_executable("openvpn", &openvpn)?;
 

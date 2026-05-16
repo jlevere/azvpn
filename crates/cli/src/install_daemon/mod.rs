@@ -81,13 +81,57 @@ pub(super) fn require_root(subcommand: &str) -> Result<()> {
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 pub(super) fn check_executable(label: &str, path: &Path) -> Result<()> {
     if path.is_file() {
-        Ok(())
-    } else {
-        Err(other(format!(
-            "{label} binary not found at {} — pass `--{label} <path>` to override",
-            path.display()
-        )))
+        return Ok(());
     }
+    let hint = if label == "openvpn" {
+        // System openvpn is NOT a safe fallback — see `resolve_binary`
+        // for the USER_PASS_LEN / AAD-token truncation rationale.
+        "\n  build the patched openvpn from the flake:\n  \
+         nix build .#openvpn-azvpn-static\n  \
+         sudo azvpn install-daemon --openvpn $(readlink result)/bin/openvpn"
+    } else {
+        ""
+    };
+    Err(other(format!(
+        "{label} binary not found at {} — pass `--{label} <path>` to override{hint}",
+        path.display()
+    )))
+}
+
+/// Resolve a helper binary path with a sane fallback chain:
+/// 1. Explicit `--<flag>` override wins.
+/// 2. Sibling of the running `azvpn` (dev cycle: `target/release/azvpn`
+///    next to `target/release/azvpnd`).
+/// 3. Platform canonical path (the caller-supplied `fallback`).
+///
+/// **No `$PATH` / well-known-locations fallback for openvpn.** Vanilla
+/// openvpn ships with `USER_PASS_LEN = 128` (unless built
+/// `--with-pkcs11`, which bumps it to 4096). AAD bearer tokens are
+/// ~2–3 KB JWTs, so a vanilla openvpn silently truncates the password
+/// over auth-user-pass and the gateway fails the TLS handshake with a
+/// generic error. We patch our bundled openvpn to set
+/// `USER_PASS_LEN = 4096` unconditionally
+/// (see `patches/openvpn-increase-user-pass-len.patch`). Picking up a
+/// system openvpn would replace a clear "binary not found" error with a
+/// near-impossible-to-diagnose runtime failure.
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+pub(super) fn resolve_binary(
+    override_path: Option<PathBuf>,
+    sibling_name: &str,
+    fallback: PathBuf,
+) -> PathBuf {
+    if let Some(p) = override_path {
+        return p;
+    }
+    if let Ok(exe) = std::env::current_exe()
+        && let Some(parent) = exe.parent()
+    {
+        let sibling = parent.join(sibling_name);
+        if sibling.is_file() {
+            return sibling;
+        }
+    }
+    fallback
 }
 
 pub(super) fn other(msg: impl Into<String>) -> Error {
