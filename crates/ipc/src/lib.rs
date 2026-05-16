@@ -20,6 +20,8 @@ pub use azvpn_openvpn::{AddrFamily, Ifconfig, PushOptions, PushedRoute};
 pub use azvpn_profile::VpnProfile;
 use serde::{Deserialize, Serialize};
 
+pub mod transport;
+
 /// Monotonic counter bumped on every wire-shape change — new request
 /// fields, request renames, enum variant additions, etc. Independent
 /// of `CARGO_PKG_VERSION`; a release without wire-shape changes

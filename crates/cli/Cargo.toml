@@ -138,5 +138,16 @@ uzers = { workspace = true }
 [target.'cfg(target_os = "linux")'.dependencies]
 zbus = { workspace = true }
 
+# Windows-only — install-daemon registers `azvpnd` with the SCM via
+# windows-service's `ServiceManager` (no `sc.exe` shell-out).
+# Admin-elevation check via windows-sys token APIs.
+[target.'cfg(target_os = "windows")'.dependencies]
+windows-service = { workspace = true }
+windows-sys = { workspace = true, features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_System_Threading",
+] }
+
 [lints]
 workspace = true

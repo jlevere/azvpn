@@ -15,6 +15,8 @@ mod converge;
 mod routes;
 mod server;
 mod socket;
+#[cfg(windows)]
+mod windows;
 
 use std::process::ExitCode;
 use std::time::Duration;
