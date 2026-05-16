@@ -6,8 +6,19 @@ implementation plan for Windows: build target, design decisions
 (with alternatives), phased work items, crate inventory, and the
 test loop on `jackson-dev`.
 
-Status: pre-work. No Windows code shipped yet beyond a `DnsManager`
-stub that returns `NotImplemented`.
+## Status (2026-05-16)
+
+| Phase | State | Notes |
+|---|---|---|
+| W0 — workspace deps + module skeletons | **shipped** | `cargo check --target x86_64-pc-windows-msvc --workspace` green on jackson-dev |
+| W1 — named-pipe IPC + SCM service shell | **shipped** | `sc.exe start azvpnd` + `azvpn status` works over the pipe; service_main lifecycle (StartPending → Running → Stopped) wired |
+| W2 — install-daemon / uninstall-daemon | **shipped** | One-command service install with recovery actions + dependencies; idempotent rerun via change_config |
+| W3 — openvpn + wintun bundle | **shipped (manual layout)** | openvpn-community 2.6.14 + wintun 0.14.1 placed at `C:\Program Files\azvpn\openvpn\`. Authenticode chains verified (OpenVPN Inc., WireGuard LLC). MSI bundling defers to W7. |
+| W6.4 (early) — rolling-file logger | **in flight** | Pulled forward from W6 because the SCM swallows daemon stdout, making W4 debugging impossible. Logs to `C:\ProgramData\azvpn\logs\daemon.log.<date>`. |
+| W4 — `azvpn up` end-to-end | **debugging** | AAD device-code + token cache + RPC handoff all working. `openvpn.exe` spawns and dies silently — root cause hidden until W6.4 lands. rtalab smoke-test is the acceptance bar. |
+| W5 — NRPT split-DNS | not started | Lifts the macOS bug to Windows |
+| W6 — production polish (PowerEvent, hibernation, Preshutdown, admin check, etc.) | partial — W6.4 landing early | Other items still to come |
+| W7 — MSI installer | not started | Track E |
 
 ---
 
