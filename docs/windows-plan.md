@@ -10,15 +10,20 @@ test loop on `jackson-dev`.
 
 | Phase | State | Notes |
 |---|---|---|
-| W0 — workspace deps + module skeletons | **shipped** | `cargo check --target x86_64-pc-windows-msvc --workspace` green on jackson-dev |
-| W1 — named-pipe IPC + SCM service shell | **shipped** | `sc.exe start azvpnd` + `azvpn status` works over the pipe; service_main lifecycle (StartPending → Running → Stopped) wired |
+| W0 — workspace deps + module skeletons | **shipped** | `nix build .#azvpn-windows-cross` (mingw, not msvc — see §2 build-target decision below) |
+| W1 — named-pipe IPC + SCM service shell | **shipped** | `sc.exe start azvpnd` + `azvpn status` over the pipe; service_main lifecycle (StartPending → Running → Stopped) wired |
 | W2 — install-daemon / uninstall-daemon | **shipped** | One-command service install with recovery actions + dependencies; idempotent rerun via change_config |
-| W3 — openvpn + wintun bundle | **shipped (manual layout)** | openvpn-community 2.6.14 + wintun 0.14.1 placed at `C:\Program Files\azvpn\openvpn\`. Authenticode chains verified (OpenVPN Inc., WireGuard LLC). MSI bundling defers to W7. |
-| W6.4 (early) — rolling-file logger | **in flight** | Pulled forward from W6 because the SCM swallows daemon stdout, making W4 debugging impossible. Logs to `C:\ProgramData\azvpn\logs\daemon.log.<date>`. |
-| W4 — `azvpn up` end-to-end | **blocked on openvpn build** | AAD device-code, token cache, RPC handoff, daemon→openvpn spawn, wintun adapter init, TCP connect to Azure gateway — all working. verb=9 confirms our HARD_RESET_CLIENT_V2 lands at the gateway with a valid HMAC; gateway then FINs (Win32 `Completion success [0]`) before we send any TLS bytes. Working theory: stock openvpn-community 2.6.14's `TLS_CHANNEL_BUF_SIZE = 2048` truncates OpenSSL 3.4.1's ClientHello against Azure's longer cert chain — our macOS-side `2048→6144` patch is exactly what unblocks this. Mullvad doesn't have an analogue (their gateway never produces big enough TLS payloads), but their build *pipeline* is the cleanest template for fixing it (see [[reference-mullvad-openvpn-build]]). W4a is the canonical fix; rtalab smoke acceptance defers behind it. |
-| W5 — NRPT split-DNS | not started | Lifts the macOS bug to Windows |
-| W6 — production polish (PowerEvent, hibernation, Preshutdown, admin check, etc.) | partial — W6.4 landing early | Other items still to come |
-| W7 — MSI installer | not started | Track E |
+| W3 — openvpn + wintun bundle | **shipped** | Patched openvpn 2.6.19 + wintun 0.14.1 bundled via `azvpn-windows-msi`. Authenticode chains verified (OpenVPN Inc., WireGuard LLC) |
+| W4 — `azvpn up` end-to-end | **shipped** | The original TLS_CHANNEL_BUF_SIZE theory was wrong — clock skew on jackson-dev was rejecting our tls-auth HMAC. MS Azure VPN Client's own "Test Application Prerequisites" diagnostic flagged it; `w32tm /resync` + correct NTP source fixed the reset loop. See `feedback_azure_hmac_replay_clockskew` memory |
+| W5 — NRPT split-DNS | **shipped** | Tailscale's `nrpt_windows.go` model: registry-direct rules under `HKLM\SYSTEM\...\DnsPolicyConfig`, GUID-keyed, GP-auto-detect, dnscache running probe. End-to-end verified on jackson-dev: `Resolve-DnsName rtalab-b... → 10.2.100.7` |
+| W6.1 — PowerEvent + SessionChange | **deferred (Tailscale model)** | Mullvad's `HibernationDetector` via `SERVICE_CONTROL_POWEREVENT` is famously flaky on Windows (notifications race delivery, get debounced, arrive late). Tailscale's `netmon_windows.go` doesn't use power events — they trust adapter/route change callbacks. Our `if-watch` + wall-clock-jump detector already covers sleep/resume. Document, don't implement |
+| W6.2 — Preshutdown vs Stop | **shipped (unified)** | Accept `SERVICE_CONTROL_PRESHUTDOWN` so SCM gives us the ~180s pre-shutdown window. Same teardown path as Stop — cleanup is fast enough that there's no win in skipping it on shutdown |
+| W6.3 — admin check at startup | **shipped** | `CheckTokenMembership(BUILTIN\Administrators)` via windows-sys. Refuse to start when running as a non-admin console process; point at `install-daemon` |
+| W6.4 — rolling-file logger | **shipped** | `tracing-appender::rolling::Rotation::DAILY` at `C:\ProgramData\azvpn\logs\daemon.<date>.log`, 7-day retention |
+| W6.5 — `net-route` Windows verification | **shipped** | The `Option<u32> ifindex` thread-through fixed `CreateIpForwardEntry2` returning `ERROR_NOT_FOUND` (2) for routes added without InterfaceIndex. All 20 Azure-pushed routes land on the wintun adapter |
+| W6.6 — `if-watch` Windows verification | **shipped** | Daemon log confirms reachability events fire on adapter Up/Down on jackson-dev. Wall-clock-jump path covers sleep/resume cleanup |
+| W6.7 — idempotent install-daemon | **shipped** | `cli::install_daemon::windows` uses `change_config` for upgrades; rerunning replaces the binary + reapplies service config without uninstall/install cycle |
+| W7 — MSI installer | **shipped** | `nix build .#azvpn-windows-msi` (wixl-built, reproducible cross-build) + `tools/codesign/sign-msi.sh` (osslsigncode-signed with DigiCert TSA) |
 
 ---
 
