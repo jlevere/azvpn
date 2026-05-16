@@ -151,7 +151,7 @@ async fn clear_routes(routes: &[RouteEntry]) {
             .with_gateway(entry.gateway);
         match handle.delete(&route).await {
             Ok(()) => info!(dest = %entry.destination, "orphan route deleted"),
-            Err(e) if is_orphan_already_gone(&e) => {
+            Err(e) if crate::route::is_not_found(&e) => {
                 // Already gone — the kernel typically releases routes
                 // when the tun they pointed at goes away, which is
                 // exactly the crash sequence we're cleaning up after.
@@ -164,15 +164,6 @@ async fn clear_routes(routes: &[RouteEntry]) {
             }
         }
     }
-}
-
-/// `delete` failure that means "this entry is already gone" rather
-/// than "couldn't reach the kernel." `ESRCH` on Unix; std maps Win32
-/// `ERROR_NOT_FOUND` to `NotFound` for the `IpHelper` return path.
-fn is_orphan_already_gone(e: &io::Error) -> bool {
-    e.kind() == io::ErrorKind::NotFound
-        || e.raw_os_error() == Some(libc::ESRCH)
-        || e.raw_os_error() == Some(2)
 }
 
 #[cfg(target_os = "macos")]

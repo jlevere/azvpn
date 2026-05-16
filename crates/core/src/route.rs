@@ -180,11 +180,11 @@ fn is_already_exists(e: &std::io::Error) -> bool {
     e.kind() == std::io::ErrorKind::AlreadyExists || e.raw_os_error() == Some(5010)
 }
 
-fn is_not_found(e: &std::io::Error) -> bool {
-    // ESRCH (3) on Unix is what `route DELETE` returns for a missing
-    // entry. On Windows DeleteIpForwardEntry2 returns ERROR_NOT_FOUND
-    // (2) which std maps to NotFound, but the bare numeric check
-    // covers the case where a future std update changes the mapping.
+/// Kernel-route delete that means "this entry doesn't exist." `ESRCH`
+/// on Unix; Win32 `ERROR_NOT_FOUND` (2) on Windows. Also accepted
+/// from cleanup-on-startup where the kernel may have already torn
+/// the routes down (`crate::cleanup::clear_routes`).
+pub(crate) fn is_not_found(e: &std::io::Error) -> bool {
     e.kind() == std::io::ErrorKind::NotFound
         || e.raw_os_error() == Some(libc::ESRCH)
         || e.raw_os_error() == Some(2)
@@ -218,44 +218,49 @@ impl RouteManager {
 
     /// Resolve the interface index `local_ip` is bound to by reading
     /// the routing table for the on-link host route the kernel
-    /// auto-installs when an interface gets an address. Polls up to
-    /// `IFINDEX_RESOLVE_TIMEOUT` because on Windows the daemon
-    /// receives the `PUSH_REPLY` before openvpn has finished
-    /// `netsh interface ip set address` on the wintun adapter — the
-    /// host route doesn't exist yet at the instant we want to install
-    /// pushed routes. Returns `None` after timeout (caller logs and
-    /// proceeds without ifindex; install will fail on Windows but
-    /// succeed elsewhere).
+    /// auto-installs when an interface gets an address.
     ///
     /// Used to set `Route::with_ifindex` on Windows, where
     /// `CreateIpForwardEntry2` returns `ERROR_NOT_FOUND` (2) without
     /// an explicit `InterfaceIndex` — gateway-only routes work on
     /// Unix because the kernel resolves the iface from the next-hop,
     /// but Windows refuses.
+    ///
+    /// On Unix the kernel installs the host route synchronously with
+    /// the tun device, so one read of the route table is enough. On
+    /// Windows the daemon receives the `PUSH_REPLY` before openvpn
+    /// finishes `netsh interface ip set address`, so we poll briefly
+    /// until the host route appears. Returns `None` after timeout
+    /// (Unix happy path falls through immediately if not found).
     pub async fn resolve_local_ifindex(&self, local_ip: IpAddr) -> Option<u32> {
-        const POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(100);
-        const TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
-
         let host_prefix = match local_ip {
             IpAddr::V4(_) => 32u8,
             IpAddr::V6(_) => 128u8,
         };
-
-        let deadline = std::time::Instant::now() + TIMEOUT;
-        loop {
-            let routes = self.handle.list().await.ok()?;
-            let found = routes
-                .into_iter()
-                .find(|r| r.destination == local_ip && r.prefix == host_prefix)
-                .and_then(|r| r.ifindex);
-            if found.is_some() {
-                return found;
-            }
-            if std::time::Instant::now() >= deadline {
-                return None;
-            }
-            tokio::time::sleep(POLL_INTERVAL).await;
+        if let Some(idx) = self.lookup_host_route_ifindex(local_ip, host_prefix).await {
+            return Some(idx);
         }
+        #[cfg(target_os = "windows")]
+        {
+            const POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(100);
+            const TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+            let deadline = std::time::Instant::now() + TIMEOUT;
+            while std::time::Instant::now() < deadline {
+                tokio::time::sleep(POLL_INTERVAL).await;
+                if let Some(idx) = self.lookup_host_route_ifindex(local_ip, host_prefix).await {
+                    return Some(idx);
+                }
+            }
+        }
+        None
+    }
+
+    async fn lookup_host_route_ifindex(&self, local_ip: IpAddr, host_prefix: u8) -> Option<u32> {
+        let routes = self.handle.list().await.ok()?;
+        routes
+            .into_iter()
+            .find(|r| r.destination == local_ip && r.prefix == host_prefix)
+            .and_then(|r| r.ifindex)
     }
 
     /// Snapshot of `(destination, gateway)` pairs currently believed to

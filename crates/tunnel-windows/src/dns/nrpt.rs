@@ -135,45 +135,27 @@ pub(crate) fn refresh_machine_policy() -> io::Result<()> {
     Ok(())
 }
 
-/// Write a single rule's subkey + values under `base_path`. Idempotent:
-/// `create_subkey` returns the existing key on second call, and value
-/// writes overwrite. Caller decides which base ([`NRPT_BASE_LOCAL`] vs
-/// [`NRPT_BASE_GP`]) and whether to call both for the GP-mirroring case.
-pub(crate) fn write_rule(base_path: &str, rule: &NrptRule) -> io::Result<()> {
-    let hklm = RegKey::predef(HKEY_LOCAL_MACHINE);
-    let base = hklm.create_subkey_with_flags(base_path, KEY_ALL_ACCESS)?.0;
+/// Write a single rule's subkey + values, given the already-opened
+/// base key ([`NRPT_BASE_LOCAL`] or [`NRPT_BASE_GP`]). Idempotent:
+/// value writes overwrite. Caller is responsible for opening each
+/// base exactly once and passing a reference here per rule.
+fn write_rule(base: &RegKey, rule: &NrptRule) -> io::Result<()> {
     let (subkey, _disp) = base.create_subkey_with_flags(&rule.id, KEY_ALL_ACCESS)?;
-
     subkey.set_value("Version", &1u32)?;
-    subkey.set_raw_value(
-        "Name",
-        &winreg::RegValue {
-            vtype: winreg::enums::REG_MULTI_SZ,
-            // REG_MULTI_SZ is a sequence of NUL-terminated UTF-16
-            // strings, terminated by a final empty string (extra NUL).
-            // `widestring::U16CString` would handle this for us per
-            // string but the multi-string framing is easier to write
-            // by hand.
-            bytes: encode_multi_sz(&rule.domains),
-        },
-    )?;
+    // winreg's `ToRegValue for Vec<String>` produces the
+    // NUL-terminated UTF-16 + trailing empty-string framing
+    // REG_MULTI_SZ requires; no manual byte assembly needed.
+    subkey.set_value("Name", &rule.domains)?;
     subkey.set_value("GenericDNSServers", &rule.servers.join(";"))?;
     subkey.set_value("ConfigOptions", &NRPT_OVERRIDE_DNS)?;
-
     Ok(())
 }
 
-/// Delete a single rule by GUID under `base_path`. Treats
-/// `ERROR_FILE_NOT_FOUND` as success — cleanup is idempotent and we
-/// don't care whether the rule was already gone (e.g. an admin pruned
-/// it manually between apply and clear).
-pub(crate) fn delete_rule(base_path: &str, rule_id: &str) -> io::Result<()> {
-    let hklm = RegKey::predef(HKEY_LOCAL_MACHINE);
-    let base = match hklm.open_subkey_with_flags(base_path, KEY_ALL_ACCESS) {
-        Ok(k) => k,
-        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(()),
-        Err(e) => return Err(e),
-    };
+/// Delete a single rule by GUID under the already-opened `base`.
+/// `NotFound` is success — the rule may have been pruned manually
+/// between apply and clear, or the base key itself may be absent
+/// (caller passes `None` in that case and we skip).
+fn delete_rule(base: &RegKey, rule_id: &str) -> io::Result<()> {
     match base.delete_subkey_all(rule_id) {
         Ok(()) => Ok(()),
         Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(()),
@@ -181,9 +163,31 @@ pub(crate) fn delete_rule(base_path: &str, rule_id: &str) -> io::Result<()> {
     }
 }
 
+/// Open a base key for write/delete access, returning `Ok(None)` if
+/// it doesn't exist. Used so callers can open `NRPT_BASE_LOCAL` and
+/// `NRPT_BASE_GP` once and pass the handles into per-rule loops
+/// instead of re-opening 2N times.
+fn open_base_rw(path: &str) -> io::Result<Option<RegKey>> {
+    let hklm = RegKey::predef(HKEY_LOCAL_MACHINE);
+    match hklm.open_subkey_with_flags(path, KEY_ALL_ACCESS) {
+        Ok(k) => Ok(Some(k)),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(e),
+    }
+}
+
+/// Create-or-open a base key for write. Used by `write_rule` callers
+/// who need the base to exist before writing rules under it.
+fn create_base_rw(path: &str) -> io::Result<RegKey> {
+    let hklm = RegKey::predef(HKEY_LOCAL_MACHINE);
+    Ok(hklm.create_subkey_with_flags(path, KEY_ALL_ACCESS)?.0)
+}
+
 /// Read our own `NRPTRuleIDs` REG_MULTI_SZ under [`AZVPN_REGKEY`].
-/// Returns an empty list if the key doesn't exist yet — first apply
-/// against a clean machine.
+/// Returns an empty list if the key or value is absent (first apply
+/// against a clean machine). A non-REG_MULTI_SZ value is also
+/// treated as empty — an admin must have written something unrelated
+/// and we don't try to interpret it.
 pub(crate) fn load_owned_rule_ids() -> io::Result<Vec<String>> {
     let hklm = RegKey::predef(HKEY_LOCAL_MACHINE);
     let key = match hklm.open_subkey_with_flags(AZVPN_REGKEY, KEY_READ) {
@@ -191,35 +195,29 @@ pub(crate) fn load_owned_rule_ids() -> io::Result<Vec<String>> {
         Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
         Err(e) => return Err(e),
     };
-    let val = match key.get_raw_value(NRPT_RULE_IDS_VALUE) {
-        Ok(v) => v,
-        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
-        Err(e) => return Err(e),
-    };
-    if val.vtype != winreg::enums::REG_MULTI_SZ {
-        warn!(
-            ?val.vtype,
-            "NRPTRuleIDs is not REG_MULTI_SZ — ignoring (treating as empty)"
-        );
-        return Ok(Vec::new());
+    match key.get_value::<Vec<String>, _>(NRPT_RULE_IDS_VALUE) {
+        Ok(ids) => Ok(ids),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(Vec::new()),
+        Err(e) => {
+            // Wrong type or unreadable. Treat as empty so an admin
+            // poking the value can't crash our cleanup path.
+            warn!(error = %e, "NRPTRuleIDs unreadable — treating as empty");
+            Ok(Vec::new())
+        }
     }
-    Ok(decode_multi_sz(&val.bytes))
 }
 
 /// Persist the canonical owned-IDs list to the registry. Always
 /// overwrites; an empty list still writes the value with zero
-/// strings so subsequent loads find the key present (lets us
-/// distinguish "we own zero rules" from "we've never written").
-pub(crate) fn save_owned_rule_ids(ids: &[String]) -> io::Result<()> {
+/// strings so subsequent loads find the structure intact.
+fn save_owned_rule_ids(ids: &[String]) -> io::Result<()> {
     let hklm = RegKey::predef(HKEY_LOCAL_MACHINE);
     let (key, _) = hklm.create_subkey_with_flags(AZVPN_REGKEY, KEY_ALL_ACCESS)?;
-    key.set_raw_value(
-        NRPT_RULE_IDS_VALUE,
-        &winreg::RegValue {
-            vtype: winreg::enums::REG_MULTI_SZ,
-            bytes: encode_multi_sz(ids),
-        },
-    )?;
+    // winreg's REG_MULTI_SZ encoder works on `Vec<&str>` too, and
+    // borrowing avoids cloning each ID. One allocation for the
+    // pointer Vec; the strings stay in-place.
+    let ids_ref: Vec<&str> = ids.iter().map(String::as_str).collect();
+    key.set_value(NRPT_RULE_IDS_VALUE, &ids_ref)?;
     Ok(())
 }
 
@@ -307,45 +305,6 @@ where
     Ok((rules, surplus))
 }
 
-/// Encode a `REG_MULTI_SZ` value: a sequence of NUL-terminated UTF-16LE
-/// strings followed by a trailing empty string (an extra NUL pair).
-/// Per the Windows registry value format — `widestring::U16CString`
-/// handles a single string but not the multi-string framing.
-fn encode_multi_sz<S: AsRef<str>>(strings: &[S]) -> Vec<u8> {
-    let mut out = Vec::new();
-    for s in strings {
-        for unit in s.as_ref().encode_utf16() {
-            out.extend_from_slice(&unit.to_le_bytes());
-        }
-        out.extend_from_slice(&0u16.to_le_bytes());
-    }
-    // Empty final string => extra NUL.
-    out.extend_from_slice(&0u16.to_le_bytes());
-    out
-}
-
-/// Decode a `REG_MULTI_SZ` value back into a `Vec<String>`. Stops at
-/// the first empty string (REG_MULTI_SZ's terminator) and skips any
-/// trailing bytes — Windows occasionally pads.
-fn decode_multi_sz(bytes: &[u8]) -> Vec<String> {
-    let mut out = Vec::new();
-    let units: Vec<u16> = bytes
-        .chunks_exact(2)
-        .map(|c| u16::from_le_bytes([c[0], c[1]]))
-        .collect();
-    let mut cursor = 0;
-    while cursor < units.len() {
-        let end = cursor + units[cursor..].iter().position(|&u| u == 0).unwrap_or(0);
-        if end == cursor {
-            break;
-        }
-        let s = String::from_utf16_lossy(&units[cursor..end]);
-        out.push(s);
-        cursor = end + 1;
-    }
-    out
-}
-
 /// Set-replace apply: delete surplus owned rules, write the desired
 /// set, persist the new GUID list. Optionally mirror to the GP key.
 /// Calls `RefreshPolicyEx` only if a GP-table write actually
@@ -360,28 +319,41 @@ pub(crate) fn apply_rules(
 ) -> io::Result<Vec<String>> {
     let mut gp_dirty = false;
 
-    // Delete surplus first: previous applies wrote more chunks than
-    // this one needs.
+    // Open each base once; the per-rule loops reuse these handles
+    // instead of paying for 2N `RegOpenKeyEx` calls.
+    let local_base = create_base_rw(NRPT_BASE_LOCAL)?;
+    // GP base may not exist yet — surplus delete still opens it
+    // best-effort (a prior GP-mode apply may have left rules there),
+    // but writes happen only when we'll actually fill it.
+    let gp_base_for_delete = open_base_rw(NRPT_BASE_GP)?;
+    let gp_base_for_write = if write_as_gp {
+        Some(create_base_rw(NRPT_BASE_GP)?)
+    } else {
+        None
+    };
+
     for id in surplus_ids {
-        if let Err(e) = delete_rule(NRPT_BASE_LOCAL, id) {
+        if let Err(e) = delete_rule(&local_base, id) {
             warn!(rule = %id, error = %e, "failed to delete surplus NRPT rule under local table");
         }
         // Try the GP table even when not currently in GP mode — a
         // previous apply in GP mode might have left rules there
         // that we need to clean up.
-        match delete_rule(NRPT_BASE_GP, id) {
-            Ok(()) => gp_dirty = true,
-            Err(e) => {
-                warn!(rule = %id, error = %e, "failed to delete surplus NRPT rule under GP table");
+        if let Some(base) = &gp_base_for_delete {
+            match delete_rule(base, id) {
+                Ok(()) => gp_dirty = true,
+                Err(e) => {
+                    warn!(rule = %id, error = %e, "failed to delete surplus NRPT rule under GP table");
+                }
             }
         }
     }
 
     let mut new_ids = Vec::with_capacity(rules.len());
     for rule in rules {
-        write_rule(NRPT_BASE_LOCAL, rule)?;
-        if write_as_gp {
-            write_rule(NRPT_BASE_GP, rule)?;
+        write_rule(&local_base, rule)?;
+        if let Some(base) = &gp_base_for_write {
+            write_rule(base, rule)?;
             gp_dirty = true;
         }
         new_ids.push(rule.id.clone());
@@ -419,14 +391,21 @@ pub(crate) fn clear_rules(write_as_gp: bool) -> io::Result<()> {
     let ids = load_owned_rule_ids()?;
     let count = ids.len();
     let mut gp_dirty = false;
+
+    let local_base = open_base_rw(NRPT_BASE_LOCAL)?;
+    let gp_base = open_base_rw(NRPT_BASE_GP)?;
     for id in &ids {
-        if let Err(e) = delete_rule(NRPT_BASE_LOCAL, id) {
-            warn!(rule = %id, error = %e, "failed to delete NRPT rule under local table during clear");
+        if let Some(base) = &local_base {
+            if let Err(e) = delete_rule(base, id) {
+                warn!(rule = %id, error = %e, "failed to delete NRPT rule under local table during clear");
+            }
         }
-        match delete_rule(NRPT_BASE_GP, id) {
-            Ok(()) => gp_dirty = true,
-            Err(e) => {
-                warn!(rule = %id, error = %e, "failed to delete NRPT rule under GP table during clear");
+        if let Some(base) = &gp_base {
+            match delete_rule(base, id) {
+                Ok(()) => gp_dirty = true,
+                Err(e) => {
+                    warn!(rule = %id, error = %e, "failed to delete NRPT rule under GP table during clear");
+                }
             }
         }
     }
@@ -494,68 +473,30 @@ fn delete_gp_base_key() -> io::Result<()> {
 /// (see `talpid-dns/src/windows/auto.rs` — falls back to a TCP/IP
 /// registry path when dnscache is unavailable). We accept the
 /// limitation since the corp-VPN target always has dnscache running.
+///
+/// Returns `true` on any lookup failure (couldn't open the SCM,
+/// service unknown, etc.) so a probe error doesn't surface as a
+/// false warning.
 pub(crate) fn dnscache_running() -> bool {
-    use widestring::U16CString;
-    use windows_sys::Win32::System::Services::{
-        OpenSCManagerW, OpenServiceW, QueryServiceStatus, SC_MANAGER_CONNECT, SERVICE_QUERY_STATUS,
-        SERVICE_RUNNING, SERVICE_STATUS,
-    };
+    use windows_service::service::{ServiceAccess, ServiceState};
+    use windows_service::service_manager::{ServiceManager, ServiceManagerAccess};
 
-    let Ok(name) = U16CString::from_str("Dnscache") else {
-        return true; // bias toward "assume ok" if we can't even build the string
+    let Ok(manager) = ServiceManager::local_computer(None::<&str>, ServiceManagerAccess::CONNECT)
+    else {
+        return true;
     };
-
-    // SAFETY: OpenSCManagerW(NULL, NULL, ...) opens the local SCM
-    // for the requested access; we never deref the returned handle
-    // directly. Closing handles is omitted because this is a
-    // process-lifetime probe called O(1) times per session; leak is
-    // tolerable and matches the pattern Windows samples use for
-    // short-lived queries.
-    let scm = unsafe { OpenSCManagerW(std::ptr::null(), std::ptr::null(), SC_MANAGER_CONNECT) };
-    if scm.is_null() {
+    let Ok(service) = manager.open_service("Dnscache", ServiceAccess::QUERY_STATUS) else {
         return true;
-    }
-    let svc = unsafe { OpenServiceW(scm, name.as_ptr(), SERVICE_QUERY_STATUS) };
-    if svc.is_null() {
-        return true;
-    }
-    let mut status: SERVICE_STATUS = unsafe { std::mem::zeroed() };
-    let ok = unsafe { QueryServiceStatus(svc, &raw mut status) };
-    if ok == 0 {
-        return true;
-    }
-    status.dwCurrentState == SERVICE_RUNNING
+    };
+    matches!(
+        service.query_status().map(|s| s.current_state),
+        Ok(ServiceState::Running)
+    )
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn multi_sz_roundtrip_single_string() {
-        let bytes = encode_multi_sz(&[".corp.example.com"]);
-        let decoded = decode_multi_sz(&bytes);
-        assert_eq!(decoded, vec![".corp.example.com".to_string()]);
-    }
-
-    #[test]
-    fn multi_sz_roundtrip_many_strings() {
-        let input = vec![
-            ".a.example.com".to_string(),
-            ".b.example.com".to_string(),
-            ".c.example.com".to_string(),
-        ];
-        let bytes = encode_multi_sz(&input);
-        let decoded = decode_multi_sz(&bytes);
-        assert_eq!(decoded, input);
-    }
-
-    #[test]
-    fn multi_sz_empty_input_decodes_to_empty() {
-        let bytes = encode_multi_sz::<&str>(&[]);
-        let decoded = decode_multi_sz(&bytes);
-        assert!(decoded.is_empty());
-    }
 
     #[test]
     fn build_rules_chunks_at_max_per_rule() {
