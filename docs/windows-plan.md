@@ -23,7 +23,7 @@ test loop on `jackson-dev`.
 | W6.5 — `net-route` Windows verification | **shipped** | The `Option<u32> ifindex` thread-through fixed `CreateIpForwardEntry2` returning `ERROR_NOT_FOUND` (2) for routes added without InterfaceIndex. All 20 Azure-pushed routes land on the wintun adapter |
 | W6.6 — `if-watch` Windows verification | **shipped** | Daemon log confirms reachability events fire on adapter Up/Down on jackson-dev. Wall-clock-jump path covers sleep/resume cleanup |
 | W6.7 — idempotent install-daemon | **shipped** | `cli::install_daemon::windows` uses `change_config` for upgrades; rerunning replaces the binary + reapplies service config without uninstall/install cycle |
-| W7 — MSI installer | **shipped** | `nix build .#azvpn-windows-msi` (wixl-built, reproducible cross-build) + `tools/codesign/sign-msi.sh` (osslsigncode-signed with DigiCert TSA) |
+| W7 — MSI installer | **shipped** | `cargo xtask release-windows --sign` (wraps `nix build .#azvpn-windows-msi` + `cargo xtask sign-msi`, osslsigncode-signed with DigiCert TSA) |
 
 ---
 

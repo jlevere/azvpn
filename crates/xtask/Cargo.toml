@@ -43,8 +43,9 @@ serde_json = { workspace = true }
 reqwest = { workspace = true, features = ["blocking"] }
 # Base64 the formula body for the GitHub Contents API.
 base64 = { workspace = true }
-
-[dev-dependencies]
+# Used at runtime by `gen-dev-cert` for the openssl ext-config
+# tempfile, and at test time by `sign-msi` / `release-windows` /
+# `release-macos` for fixture dirs.
 tempfile = { workspace = true }
 
 [lints]
