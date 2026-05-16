@@ -23,6 +23,8 @@ use std::process::Command;
 
 use anyhow::{Context as _, Result, bail};
 
+use crate::util;
+
 /// 4096-bit RSA. ECDSA would be smaller / faster but Windows's
 /// Authenticode verifier has had historical bugs with non-RSA signing
 /// keys (especially under legacy CAPI paths). Stick to RSA.
@@ -69,9 +71,9 @@ pub struct Args {
 // but consistency wins over saving a few clones.
 #[allow(clippy::needless_pass_by_value)]
 pub fn run(args: Args) -> Result<()> {
-    let signing_dir = resolve_signing_dir(args.output.as_deref());
-    let cert_path = signing_dir.join("dev-cert.pem");
-    let key_path = signing_dir.join("dev-key.pem");
+    let signing_dir = util::signing_dir(args.output.as_deref());
+    let cert_path = signing_dir.join(util::DEV_CERT_NAME);
+    let key_path = signing_dir.join(util::DEV_KEY_NAME);
 
     if !args.force && (cert_path.exists() || key_path.exists()) {
         bail!(
@@ -150,19 +152,6 @@ pub fn run(args: Args) -> Result<()> {
     Ok(())
 }
 
-fn resolve_signing_dir(flag: Option<&std::path::Path>) -> PathBuf {
-    if let Some(p) = flag {
-        return p.to_path_buf();
-    }
-    if let Some(env) = std::env::var_os("AZVPN_SIGNING_DIR") {
-        return PathBuf::from(env);
-    }
-    if let Some(home) = std::env::var_os("HOME") {
-        return PathBuf::from(home).join(".config").join("azvpn-signing");
-    }
-    PathBuf::from(".config/azvpn-signing")
-}
-
 #[cfg(unix)]
 fn set_dir_mode_0700(dir: &std::path::Path) -> Result<()> {
     use std::os::unix::fs::PermissionsExt as _;
@@ -192,27 +181,4 @@ fn set_file_mode(_path: &std::path::Path, _mode: u32) -> Result<()> {
     Ok(())
 }
 
-#[cfg(test)]
-#[allow(unsafe_code)] // env-var mutation is unsafe in edition 2024
-mod tests {
-    use super::*;
-
-    #[test]
-    fn resolve_signing_dir_prefers_flag() {
-        let flag = PathBuf::from("/flag/dir");
-        let got = resolve_signing_dir(Some(&flag));
-        assert_eq!(got, flag);
-    }
-
-    #[test]
-    fn resolve_signing_dir_uses_env() {
-        let prev = std::env::var_os("AZVPN_SIGNING_DIR");
-        unsafe { std::env::set_var("AZVPN_SIGNING_DIR", "/env/dir") };
-        let got = resolve_signing_dir(None);
-        match prev {
-            Some(v) => unsafe { std::env::set_var("AZVPN_SIGNING_DIR", v) },
-            None => unsafe { std::env::remove_var("AZVPN_SIGNING_DIR") },
-        }
-        assert_eq!(got, PathBuf::from("/env/dir"));
-    }
-}
+// Tests for `signing_dir` and the fallback chain live in `util::tests`.

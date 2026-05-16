@@ -24,7 +24,7 @@ use std::path::PathBuf;
 
 use anyhow::{Context as _, Result};
 
-use crate::commands::sign_msi;
+use crate::commands::sign_msi::sign_in_place;
 use crate::util::{emit_ci_outputs, human_size, nix_build, sha256_hex, verify_tag_matches_version};
 use crate::workspace;
 
@@ -88,10 +88,9 @@ pub fn run(args: Args) -> Result<()> {
     let nix_link = dist.join("nix-msi");
     nix_build(&root, MSI_FLAKE_ATTR, &nix_link)?;
 
-    // `pkgs.runCommandLocal` derivations have a single `$out` file
-    // (the MSI itself), not a directory. The `--out-link` symlink
-    // points straight at it, and we copy out of the read-only store
-    // to a writable, predictably-named path under `dist/`.
+    // `--out-link` points straight at the MSI in the nix store
+    // (`runCommandLocal` produces a single file). Copy to a writable
+    // `dist/` path so the signing step can overwrite it.
     let msi_name = format!("azvpn-{version}-{TARGET_LABEL}.msi");
     let final_msi = dist.join(&msi_name);
     if final_msi.exists() {
@@ -107,29 +106,27 @@ pub fn run(args: Args) -> Result<()> {
     })?;
 
     if args.sign {
-        // Sign in place — the unsigned MSI gets replaced. Two-step
-        // (sign into a temp suffix, then rename) means a failed signing
-        // run doesn't leave a half-written MSI at `final_msi`. The
-        // sha256 we emit below reflects the post-signing bytes, which
-        // is what users will actually download.
+        // Sign into a `.signing` staging path then atomically rename
+        // over `final_msi`. A failed sign mid-write (TSA timeout,
+        // bad cert, …) leaves the unsigned original intact rather
+        // than a half-written file at the canonical name.
         let staging = dist.join(format!("{msi_name}.signing"));
         println!();
         println!("==> signing MSI");
-        sign_msi::run(sign_msi::Args {
-            input: final_msi.clone(),
-            output: staging.clone(),
-            cert: args.cert,
-            key: args.key,
-            timestamp_url: args.timestamp_url,
-        })?;
+        sign_in_place(
+            &final_msi,
+            &staging,
+            args.cert.as_deref(),
+            args.key.as_deref(),
+            args.timestamp_url.as_deref(),
+        )?;
         fs::rename(&staging, &final_msi)
             .with_context(|| format!("rename {} → {}", staging.display(), final_msi.display()))?;
     }
 
-    // sha256 of the final on-disk file — signed if --sign was set,
-    // unsigned otherwise. Signing changes bytes; consumers of this
-    // sha (Scoop manifest, GH release upload, whatever) want the
-    // hash of the artifact users actually download.
+    // sha256 of the final on-disk file — reflects post-signing bytes
+    // when --sign was set, so a downstream Scoop manifest or release
+    // upload records the hash users will actually verify against.
     let sha = sha256_hex(&final_msi)?;
     let size_bytes = fs::metadata(&final_msi)?.len();
 
@@ -145,7 +142,6 @@ pub fn run(args: Args) -> Result<()> {
             ("version", &version),
             ("sha256", &sha),
             ("msi_name", &msi_name),
-            ("signed", if args.sign { "true" } else { "false" }),
         ])?;
     }
 
