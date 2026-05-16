@@ -430,8 +430,7 @@ fn lookup_account_name_from_token_user(token_user_buf: &[u8]) -> Result<String, 
     }
     let domain_str =
         unsafe { U16Str::from_ptr(domain.as_ptr(), domain_len as usize) }.to_string_lossy();
-    let name_str =
-        unsafe { U16Str::from_ptr(name.as_ptr(), name_len as usize) }.to_string_lossy();
+    let name_str = unsafe { U16Str::from_ptr(name.as_ptr(), name_len as usize) }.to_string_lossy();
     if domain_str.is_empty() {
         Ok(name_str)
     } else {
@@ -452,15 +451,8 @@ fn query_token_u32(
     use windows_sys::Win32::Security::GetTokenInformation;
     let mut value: u32 = 0;
     let mut size: u32 = 4;
-    let ok = unsafe {
-        GetTokenInformation(
-            token,
-            class,
-            (&raw mut value).cast(),
-            size,
-            &raw mut size,
-        )
-    };
+    let ok =
+        unsafe { GetTokenInformation(token, class, (&raw mut value).cast(), size, &raw mut size) };
     if ok == 0 {
         return Err(IdentityError::TokenInfo {
             class: class_name,

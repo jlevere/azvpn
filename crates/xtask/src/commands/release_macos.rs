@@ -19,8 +19,8 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use anyhow::{Context as _, Result, bail};
-use sha2::{Digest as _, Sha256};
 
+use crate::util::{emit_ci_outputs, human_size, nix_build, sha256_hex, verify_tag_matches_version};
 use crate::workspace;
 
 /// Single target we ship — Intel macs are out of scope per
@@ -86,7 +86,7 @@ pub fn run(args: Args) -> Result<()> {
 
     println!("==> building patched openvpn via nix");
     let nix_link = dist.join("nix-openvpn");
-    nix_build_openvpn(&root, &nix_link)?;
+    nix_build(&root, ".#openvpn-azvpn", &nix_link)?;
 
     println!("==> staging binaries");
     let layout = tarball_layout(&root, &nix_link, &stage);
@@ -128,32 +128,13 @@ pub fn run(args: Args) -> Result<()> {
     );
 
     if args.emit_ci_outputs {
-        emit_ci_outputs(&version, &sha, &tarball_name)?;
+        emit_ci_outputs(&[
+            ("version", &version),
+            ("sha256", &sha),
+            ("tarball_name", &tarball_name),
+        ])?;
     }
 
-    Ok(())
-}
-
-/// Append the release metadata to `$GITHUB_OUTPUT`. No-op outside CI
-/// (the env var is GitHub Actions' contract for step outputs; absent
-/// elsewhere) so the same `--emit-ci-outputs` invocation runs
-/// harmlessly during local `cargo xtask` calls.
-fn emit_ci_outputs(version: &str, sha: &str, tarball_name: &str) -> Result<()> {
-    use std::io::Write as _;
-
-    let Some(path) = std::env::var_os("GITHUB_OUTPUT") else {
-        eprintln!("--emit-ci-outputs: GITHUB_OUTPUT not set, skipping");
-        return Ok(());
-    };
-    let path = PathBuf::from(path);
-    let mut file = fs::OpenOptions::new()
-        .append(true)
-        .create(true)
-        .open(&path)
-        .with_context(|| format!("open {} for append", path.display()))?;
-    writeln!(file, "version={version}")?;
-    writeln!(file, "sha256={sha}")?;
-    writeln!(file, "tarball_name={tarball_name}")?;
     Ok(())
 }
 
@@ -215,32 +196,6 @@ fn tarball_layout(root: &Path, nix_link: &Path, stage: &Path) -> Vec<StagedFile>
     ]
 }
 
-/// Compare `$GITHUB_REF_NAME` against the workspace version on tag
-/// pushes. Silent when not in CI or when the ref is a branch — those
-/// are local builds / non-tag dispatches where mismatch is expected
-/// (the manual-dispatch case is supposed to produce artifacts for an
-/// unreleased Cargo.toml version).
-fn verify_tag_matches_version(version: &str) -> Result<()> {
-    let Some(ref_type) = std::env::var_os("GITHUB_REF_TYPE") else {
-        return Ok(());
-    };
-    if ref_type != "tag" {
-        return Ok(());
-    }
-    let Some(ref_name) = std::env::var_os("GITHUB_REF_NAME") else {
-        return Ok(());
-    };
-    let ref_name = ref_name.to_string_lossy().into_owned();
-    let tag_version = ref_name.strip_prefix('v').unwrap_or(&ref_name);
-    if tag_version != version {
-        bail!(
-            "tag {ref_name:?} doesn't match crates/cli/Cargo.toml version {version:?} — \
-             bump the Cargo.toml version before tagging",
-        );
-    }
-    Ok(())
-}
-
 fn require_host_arm64_macos() -> Result<()> {
     if !cfg!(target_os = "macos") {
         bail!("release-macos must run on macOS (override with --skip-host-check)");
@@ -264,23 +219,6 @@ fn cargo_build_release(root: &Path) -> Result<()> {
         .context("spawn cargo")?;
     if !status.success() {
         bail!("cargo build --release exited with {status}");
-    }
-    Ok(())
-}
-
-fn nix_build_openvpn(root: &Path, out_link: &Path) -> Result<()> {
-    // Content-addressed; a repeat run with no input changes is a
-    // near-instant cache hit. `--out-link <path>` keeps the result
-    // out of the workspace root so a previous `nix build .#azvpn`
-    // doesn't collide.
-    let status = Command::new("nix")
-        .current_dir(root)
-        .args(["build", ".#openvpn-azvpn", "--out-link"])
-        .arg(out_link)
-        .status()
-        .context("spawn nix")?;
-    if !status.success() {
-        bail!("nix build .#openvpn-azvpn exited with {status}");
     }
     Ok(())
 }
@@ -331,37 +269,6 @@ fn create_tarball(stage: &Path, tarball: &Path) -> Result<()> {
     tar.append_dir_all(archive_name, parent.join(archive_name))?;
     tar.finish()?;
     Ok(())
-}
-
-fn sha256_hex(path: &Path) -> Result<String> {
-    let mut hasher = Sha256::new();
-    let mut file = fs::File::open(path).with_context(|| format!("open {}", path.display()))?;
-    std::io::copy(&mut file, &mut hasher)?;
-    Ok(format!("{:x}", hasher.finalize()))
-}
-
-const SIZE_UNITS: [(&str, u64); 3] = [
-    ("GiB", 1024 * 1024 * 1024),
-    ("MiB", 1024 * 1024),
-    ("KiB", 1024),
-];
-
-fn human_size(bytes: u64) -> String {
-    // Special-case sub-KiB so we don't print "512.0 B" — bytes are
-    // integers, no decimal needed under the smallest scale.
-    if bytes < 1024 {
-        return format!("{bytes} B");
-    }
-    for (suffix, scale) in SIZE_UNITS {
-        if bytes >= scale {
-            // Precision loss is irrelevant here — we're printing one
-            // decimal place of a file size for a humans-on-a-terminal
-            // message.
-            #[allow(clippy::cast_precision_loss)]
-            return format!("{:.1} {}", bytes as f64 / scale as f64, suffix);
-        }
-    }
-    unreachable!("bytes >= 1024 must hit one of the unit branches")
 }
 
 #[cfg(test)]
@@ -426,26 +333,5 @@ mod tests {
         // The strip loop must hit exactly these three; running `strip`
         // on a text file is a hard error on some BSD strips.
         assert_eq!(binaries, vec!["azvpn", "azvpnd", "azvpn-openvpn"]);
-    }
-
-    #[test]
-    fn sha256_matches_known_value() {
-        // Sanity check on the hasher wiring. SHA-256 of an empty
-        // file is a well-known constant.
-        let tmp = tempfile::NamedTempFile::new().unwrap();
-        let got = sha256_hex(tmp.path()).unwrap();
-        assert_eq!(
-            got,
-            "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
-        );
-    }
-
-    #[test]
-    fn human_size_picks_right_unit() {
-        assert_eq!(human_size(0), "0 B");
-        assert_eq!(human_size(512), "512 B");
-        assert_eq!(human_size(1024), "1.0 KiB");
-        assert_eq!(human_size(1024 * 1024), "1.0 MiB");
-        assert_eq!(human_size(1536 * 1024), "1.5 MiB");
     }
 }
