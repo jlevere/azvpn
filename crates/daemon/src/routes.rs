@@ -79,6 +79,7 @@ fn is_posix_tunnel_name(name: &str) -> bool {
 }
 
 #[allow(unsafe_code)]
+#[cfg(unix)]
 fn interface_name(index: u32) -> Option<String> {
     use std::ffi::CStr;
     let mut buf = [0u8; libc::IF_NAMESIZE];
@@ -91,4 +92,13 @@ fn interface_name(index: u32) -> Option<String> {
     }
     let cstr = unsafe { CStr::from_ptr(buf.as_ptr().cast::<libc::c_char>()) };
     cstr.to_str().ok().map(str::to_owned)
+}
+
+/// Windows interface-index → name. W0 stub returns `None` so the
+/// `info` RPC still works (routes show without iface names). W6 wires
+/// `ConvertInterfaceIndexToLuid` + `ConvertInterfaceLuidToAlias` via
+/// `windows-sys::Win32::NetworkManagement::IpHelper`.
+#[cfg(windows)]
+fn interface_name(_index: u32) -> Option<String> {
+    None
 }
