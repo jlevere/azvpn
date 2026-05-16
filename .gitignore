@@ -2,6 +2,11 @@
 /dist
 result
 result-*
+# Locally-built signed MSIs from tools/codesign/sign-msi.sh.
+# Reproducible MSI build (via nix) goes to result/ — this dir
+# holds the signed copy, which is non-deterministic by design
+# (RFC3161 timestamping).
+/out
 .direnv
 *.swp
 *.swo
