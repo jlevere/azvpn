@@ -16,6 +16,21 @@ serde = { workspace = true }
 tarpc = { workspace = true }
 thiserror = { workspace = true }
 
+# Windows transport (W1.3): named-pipe security attributes built
+# from an SDDL string via
+# `ConvertStringSecurityDescriptorToSecurityDescriptorW`. The
+# transport itself is `tokio::net::windows::named_pipe::*` (built
+# into the tokio dep). No tokio feature flag needed beyond what
+# the workspace already enables.
+[target.'cfg(target_os = "windows")'.dependencies]
+windows-sys = { workspace = true, features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_Security_Authorization",
+    "Win32_System_Pipes",
+] }
+widestring = { workspace = true }
+
 [dev-dependencies]
 tokio = { workspace = true }
 

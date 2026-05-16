@@ -13,5 +13,19 @@ thiserror = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }
 
+# All payload deps are Windows-only. The crate as a whole is
+# `#![cfg(target_os = "windows")]`, but cargo still resolves these
+# on other platforms — gating here keeps `cargo metadata` /
+# cargo-deny clean on macOS and Linux.
+[target.'cfg(target_os = "windows")'.dependencies]
+windows-sys = { workspace = true, features = [
+    "Win32_Foundation",
+    "Win32_System_Registry",
+    "Win32_System_GroupPolicy",
+    "Win32_Security",
+] }
+winreg = { workspace = true }
+widestring = { workspace = true }
+
 [lints]
 workspace = true

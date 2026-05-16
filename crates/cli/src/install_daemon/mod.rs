@@ -17,6 +17,8 @@ use crate::{Error, Result};
 mod linux;
 #[cfg(target_os = "macos")]
 mod macos;
+#[cfg(target_os = "windows")]
+mod windows;
 
 /// Install + start the daemon for the current platform.
 pub async fn install(daemon: Option<PathBuf>, openvpn: Option<PathBuf>) -> Result<()> {
@@ -28,12 +30,16 @@ pub async fn install(daemon: Option<PathBuf>, openvpn: Option<PathBuf>) -> Resul
     {
         linux::install(daemon, openvpn).await
     }
-    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    #[cfg(target_os = "windows")]
+    {
+        windows::install(daemon, openvpn).await
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
     {
         let _ = (daemon, openvpn);
         Err(other(
-            "install-daemon is currently macOS and Linux only — see the README \
-             for manual install instructions on this platform",
+            "install-daemon is not supported on this platform — see the \
+             README for manual install instructions",
         ))
     }
 }
@@ -48,9 +54,13 @@ pub async fn uninstall() -> Result<()> {
     {
         linux::uninstall().await
     }
-    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    #[cfg(target_os = "windows")]
     {
-        Err(other("uninstall-daemon is currently macOS and Linux only"))
+        windows::uninstall().await
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+    {
+        Err(other("uninstall-daemon is not supported on this platform"))
     }
 }
 

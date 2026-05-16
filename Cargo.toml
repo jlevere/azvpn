@@ -101,6 +101,37 @@ zbus = { version = "5", default-features = false, features = ["tokio"] }
 # cross-platform so it also works for any future macOS/Windows code
 # that needs the same.
 if-addrs = "0.13"
+
+# ─── Windows-only deps (workspace pins; consumed via per-crate
+# `[target.'cfg(target_os = "windows")']` blocks) ────────────────
+#
+# `windows-service` — Mullvad's SCM wrapper (dual MIT/Apache-2.0).
+# `service_dispatcher`, `define_windows_service!`,
+# `service_control_handler`, `ServiceManager`. Saves ~200 LOC of
+# windows-sys::Services boilerplate per app. See docs/windows-plan.md
+# §2.4.
+windows-service = "0.8"
+# Raw Win32 FFI. Pulled in for: SCM dependencies (`Win32_System_Services`),
+# LSA logon enumeration in the hibernation detector
+# (`Win32_Security_Authentication_Identity`), `RefreshPolicyEx` for
+# NRPT GP refresh (`Win32_System_GroupPolicy`), admin-check
+# (`Win32_Security`), and named-pipe security attributes
+# (`Win32_Security`, `Win32_System_Pipes`). Cheap to compile vs the
+# higher-level `windows` crate. Per-crate Cargo.toml enables only
+# the feature subset that crate actually uses.
+windows-sys = "0.59"
+# Higher-level registry helper. Used for NRPT registry writes
+# (`HKLM\SYSTEM\CurrentControlSet\Services\Dnscache\Parameters\
+# DnsPolicyConfig\<guid>`). Less unsafe than driving the raw
+# windows-sys Registry APIs.
+winreg = "0.55"
+# UTF-16 marshalling for Win32 calls (`WideCString::from_str`).
+# Required for any string passed across a Win32 API boundary.
+widestring = "1"
+# Rolling-file logger for the daemon on Windows (no journald).
+# Writes to `C:\ProgramData\azvpn\logs\daemon.log` with size-based
+# rotation. Track G.7 prerequisite on Windows.
+tracing-appender = "0.2"
 # `async fn` in trait, dyn-compatible. The `DnsManager` trait is
 # `Box<dyn>`'d through `core::dns`, and the Linux backend calls
 # zbus's async D-Bus client — async-trait is the well-trodden
