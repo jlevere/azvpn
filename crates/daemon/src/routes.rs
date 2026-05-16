@@ -94,11 +94,43 @@ fn interface_name(index: u32) -> Option<String> {
     cstr.to_str().ok().map(str::to_owned)
 }
 
-/// Windows interface-index → name. W0 stub returns `None` so the
-/// `info` RPC still works (routes show without iface names). W6 wires
-/// `ConvertInterfaceIndexToLuid` + `ConvertInterfaceLuidToAlias` via
-/// `windows-sys::Win32::NetworkManagement::IpHelper`.
+/// Windows interface-index → friendly name (e.g. `"OpenVPN Wintun"`,
+/// `"Ethernet 2"`). Two-step: `ConvertInterfaceIndexToLuid` to get
+/// the persistent LUID for the index, then `ConvertInterfaceLuidToAlias`
+/// to read the user-visible alias as UTF-16. Returns `None` on any
+/// non-zero return so a missing iface degrades to "route shows
+/// without name" rather than failing the whole `info` RPC.
+#[allow(unsafe_code)]
 #[cfg(windows)]
-fn interface_name(_index: u32) -> Option<String> {
-    None
+fn interface_name(index: u32) -> Option<String> {
+    use windows_sys::Win32::Foundation::NO_ERROR;
+    use windows_sys::Win32::NetworkManagement::IpHelper::{
+        ConvertInterfaceIndexToLuid, ConvertInterfaceLuidToAlias,
+    };
+    use windows_sys::Win32::NetworkManagement::Ndis::NET_LUID_LH;
+
+    // SAFETY: NET_LUID_LH is plain integer-shaped; zero-init is a
+    // valid bit pattern that ConvertInterfaceIndexToLuid will
+    // overwrite on success.
+    let mut luid: NET_LUID_LH = unsafe { std::mem::zeroed() };
+    // SAFETY: we pass a writable pointer to a locally-owned LUID.
+    // The call returns NO_ERROR on success and never reads from
+    // `luid` (it writes only).
+    let r = unsafe { ConvertInterfaceIndexToLuid(index, &raw mut luid) };
+    if r != NO_ERROR {
+        return None;
+    }
+    // NDIS_IF_MAX_STRING_SIZE = 256 wide chars; +1 for the trailing
+    // NUL the API writes. Stack-allocate so we don't pay for an
+    // allocation on every route in the table.
+    let mut buf = [0u16; 257];
+    // SAFETY: `luid` is a valid LUID we just populated; `buf` is a
+    // writable UTF-16 buffer of `len` chars. The function writes a
+    // NUL-terminated string into the buffer on success.
+    let r = unsafe { ConvertInterfaceLuidToAlias(&raw const luid, buf.as_mut_ptr(), buf.len()) };
+    if r != NO_ERROR {
+        return None;
+    }
+    let nul = buf.iter().position(|&c| c == 0).unwrap_or(buf.len());
+    Some(String::from_utf16_lossy(&buf[..nul]))
 }
