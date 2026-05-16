@@ -54,7 +54,6 @@ oauth2 = { version = "5", default-features = false, features = ["reqwest", "rust
 keyring = { version = "3.6", default-features = false, features = ["apple-native", "windows-native", "sync-secret-service", "crypto-rust"] }
 open = "5"
 tempfile = "3"
-system-configuration = "0.7"
 base64 = "0.22"
 sha1 = "0.11"
 pem = "3"
