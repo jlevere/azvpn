@@ -102,6 +102,14 @@ impl<'a> ConfigBuilder<'a> {
 
         writeln!(config, "client").unwrap();
         writeln!(config, "dev tun").unwrap();
+        // openvpn 2.6 on Windows ships with both tap-windows6 and
+        // Wintun drivers. We bundle Wintun (signed by WireGuard LLC)
+        // in the MSI and pin to it explicitly — `tap-windows6` would
+        // require the legacy TAP driver we don't ship. wintun.dll
+        // must live next to openvpn.exe (the bundle layout puts both
+        // at <install>\openvpn\). See docs/windows-plan.md §2.1.
+        #[cfg(target_os = "windows")]
+        writeln!(config, "windows-driver wintun").unwrap();
         writeln!(config, "proto {proto}").unwrap();
         // Emit every <ServerEntry> as a `remote` line — openvpn 2.6
         // tries them in order and falls over to the next on connect
