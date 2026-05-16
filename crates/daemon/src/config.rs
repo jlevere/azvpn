@@ -57,20 +57,45 @@ fn resolve_openvpn_binary() -> PathBuf {
     PathBuf::from("openvpn")
 }
 
-/// Try `<exe>/../../libexec/azvpn/openvpn` (Linux package layout) then
-/// `<exe>/../../libexec/azvpn-openvpn` (macOS brew layout). Returns the
-/// first that exists. Two `parent()` hops: `/usr/sbin/azvpnd` → `/usr`,
-/// then join `libexec/...`. Returns `None` when there's no usable
-/// `current_exe` (sandboxing, broken `/proc`) — caller falls through
-/// to a `$PATH` lookup.
+/// Per-platform "look next to me" lookup. Unix: package + brew
+/// layouts. Windows: MSI / hand-installed bundle layout where
+/// openvpn.exe lives in a sibling `openvpn\` directory next to
+/// `azvpnd.exe`. Returns the first existing candidate, or `None`
+/// (in which case the caller falls through to a `$PATH` lookup).
 fn bundled_openvpn(exe: Option<&Path>) -> Option<PathBuf> {
-    let prefix = exe?.parent()?.parent()?;
-    for rel in ["libexec/azvpn/openvpn", "libexec/azvpn-openvpn"] {
-        let candidate = prefix.join(rel);
+    let exe = exe?;
+
+    #[cfg(target_os = "windows")]
+    {
+        // Windows bundle layout (matches install_daemon::windows::
+        // DEFAULT_INSTALL_DIR and the eventual W7 MSI):
+        //
+        //   <install>\azvpnd.exe
+        //   <install>\openvpn\openvpn.exe
+        //   <install>\openvpn\wintun.dll
+        //
+        // One `parent()` hop, sibling `openvpn\` dir.
+        let prefix = exe.parent()?;
+        let candidate = prefix.join("openvpn").join("openvpn.exe");
         if candidate.is_file() {
             return Some(candidate);
         }
     }
+
+    #[cfg(unix)]
+    {
+        // `/usr/sbin/azvpnd` → `/usr` (two parent() hops), then
+        // join `libexec/...`. Linux package = `libexec/azvpn/
+        // openvpn`; macOS brew = `libexec/azvpn-openvpn`.
+        let prefix = exe.parent()?.parent()?;
+        for rel in ["libexec/azvpn/openvpn", "libexec/azvpn-openvpn"] {
+            let candidate = prefix.join(rel);
+            if candidate.is_file() {
+                return Some(candidate);
+            }
+        }
+    }
+
     None
 }
 
@@ -98,6 +123,7 @@ mod tests {
         assert!(bundled_openvpn(None).is_none());
     }
 
+    #[cfg(unix)]
     #[test]
     fn bundled_openvpn_finds_linux_layout() {
         let tmp = tempfile::tempdir().unwrap();
@@ -115,6 +141,7 @@ mod tests {
         assert_eq!(found, openvpn);
     }
 
+    #[cfg(unix)]
     #[test]
     fn bundled_openvpn_finds_macos_layout() {
         let tmp = tempfile::tempdir().unwrap();
@@ -126,6 +153,22 @@ mod tests {
         let daemon = bin.join("azvpnd");
         std::fs::write(&daemon, b"").unwrap();
         let openvpn = libexec.join("azvpn-openvpn");
+        std::fs::write(&openvpn, b"").unwrap();
+
+        let found = bundled_openvpn(Some(&daemon)).unwrap();
+        assert_eq!(found, openvpn);
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn bundled_openvpn_finds_windows_layout() {
+        let tmp = tempfile::tempdir().unwrap();
+        let prefix = tmp.path();
+        let openvpn_dir = prefix.join("openvpn");
+        std::fs::create_dir_all(&openvpn_dir).unwrap();
+        let daemon = prefix.join("azvpnd.exe");
+        std::fs::write(&daemon, b"").unwrap();
+        let openvpn = openvpn_dir.join("openvpn.exe");
         std::fs::write(&openvpn, b"").unwrap();
 
         let found = bundled_openvpn(Some(&daemon)).unwrap();

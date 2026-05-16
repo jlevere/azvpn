@@ -68,16 +68,19 @@ const SERVICE_ACCESS: ServiceAccess = ServiceAccess::QUERY_CONFIG
     .union(ServiceAccess::STOP)
     .union(ServiceAccess::DELETE);
 
-/// Top-level install. Connect SCM → create-or-update service →
-/// configure recovery actions → start.
+/// Top-level install. Validate inputs → stage the daemon binary
+/// into the canonical bundle layout (so the daemon's bundled-
+/// openvpn resolution finds the sibling `openvpn\` dir at
+/// runtime) → connect SCM → create-or-update service → recovery
+/// actions → start.
 pub async fn install(daemon: Option<PathBuf>, openvpn: Option<PathBuf>) -> Result<()> {
-    let daemon = daemon.unwrap_or_else(|| PathBuf::from(DEFAULT_DAEMON_BIN));
+    let source_daemon = daemon.unwrap_or_else(|| PathBuf::from(DEFAULT_DAEMON_BIN));
     let openvpn = openvpn.unwrap_or_else(|| PathBuf::from(DEFAULT_OPENVPN_BIN));
 
-    if !daemon.is_file() {
+    if !source_daemon.is_file() {
         return Err(other(format!(
             "daemon binary not found at {} — pass `--daemon <path>` or run the MSI installer (Phase W7)",
-            daemon.display()
+            source_daemon.display()
         )));
     }
     if !openvpn.is_file() {
@@ -90,6 +93,21 @@ pub async fn install(daemon: Option<PathBuf>, openvpn: Option<PathBuf>) -> Resul
             "openvpn binary not present at the expected bundle path; tunnel start will fail until it's installed"
         );
     }
+
+    // Stage the daemon into the canonical bundle location if it
+    // isn't already there. This is how the daemon's
+    // `bundled_openvpn` finds `<exe>\openvpn\openvpn.exe` at
+    // runtime — without the canonical-location move, an SCM
+    // service launched from `C:\src\…\target\release\azvpnd.exe`
+    // would look for `C:\src\…\target\release\openvpn\openvpn.exe`
+    // (wrong) and fail with "program not found". The eventual W7
+    // MSI just lays this out at install time; until then, we copy.
+    let canonical_daemon = PathBuf::from(DEFAULT_DAEMON_BIN);
+    let daemon = if same_path(&source_daemon, &canonical_daemon) {
+        source_daemon
+    } else {
+        stage_daemon(&source_daemon, &canonical_daemon)?
+    };
 
     let manager = ServiceManager::local_computer(
         None::<&str>,
@@ -216,6 +234,52 @@ fn apply_recovery_actions(service: &Service) -> Result<()> {
         .set_failure_actions_on_non_crash_failures(true)
         .map_err(|e| other(format!("set recovery on non-crash: {e}")))?;
     Ok(())
+}
+
+/// Whether two paths refer to the same file. Used to skip the
+/// `stage_daemon` copy when the user already passed the canonical
+/// path. Falls back to a case-insensitive string compare if
+/// canonicalize fails (typical on a freshly-passed path whose
+/// target doesn't exist yet).
+fn same_path(a: &std::path::Path, b: &std::path::Path) -> bool {
+    match (std::fs::canonicalize(a), std::fs::canonicalize(b)) {
+        (Ok(ca), Ok(cb)) => ca == cb,
+        _ => a.to_string_lossy().eq_ignore_ascii_case(&b.to_string_lossy()),
+    }
+}
+
+/// Copy the source daemon binary to the canonical bundle path,
+/// stopping the existing service first (an open `.exe` is locked
+/// and can't be overwritten). Returns the canonical path on
+/// success.
+fn stage_daemon(source: &std::path::Path, canonical: &PathBuf) -> Result<PathBuf> {
+    // Stop the service (if any) so we can overwrite a locked exe.
+    // Errors are best-effort — uninstall_daemon will report the
+    // real reason if the service is wedged.
+    if let Ok(manager) = ServiceManager::local_computer(None::<&str>, ServiceManagerAccess::CONNECT)
+        && let Ok(service) = manager.open_service(SERVICE_NAME, SERVICE_ACCESS)
+    {
+        let _ = stop_and_wait(&service, Duration::from_secs(10));
+    }
+
+    if let Some(parent) = canonical.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|e| other(format!("create install dir {}: {e}", parent.display())))?;
+    }
+
+    std::fs::copy(source, canonical).map_err(|e| {
+        other(format!(
+            "copy daemon to bundle location {} from {}: {e}",
+            canonical.display(),
+            source.display()
+        ))
+    })?;
+    tracing::info!(
+        from = %source.display(),
+        to = %canonical.display(),
+        "staged daemon binary into bundle layout"
+    );
+    Ok(canonical.clone())
 }
 
 /// Send `Stop` (if needed) and busy-wait for `Stopped` with a
