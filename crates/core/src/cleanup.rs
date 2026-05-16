@@ -151,16 +151,28 @@ async fn clear_routes(routes: &[RouteEntry]) {
             .with_gateway(entry.gateway);
         match handle.delete(&route).await {
             Ok(()) => info!(dest = %entry.destination, "orphan route deleted"),
-            Err(e) if e.raw_os_error() == Some(libc::ESRCH) => {
+            Err(e) if is_orphan_already_gone(&e) => {
                 // Already gone — the kernel typically releases routes
                 // when the tun they pointed at goes away, which is
                 // exactly the crash sequence we're cleaning up after.
+                // On Windows this is the common path: the wintun
+                // adapter from the prior process is destroyed and
+                // every route bound to it disappears with it.
             }
             Err(e) => {
                 warn!(dest = %entry.destination, error = %e, "orphan route delete failed");
             }
         }
     }
+}
+
+/// `delete` failure that means "this entry is already gone" rather
+/// than "couldn't reach the kernel." `ESRCH` on Unix; std maps Win32
+/// `ERROR_NOT_FOUND` to `NotFound` for the `IpHelper` return path.
+fn is_orphan_already_gone(e: &io::Error) -> bool {
+    e.kind() == io::ErrorKind::NotFound
+        || e.raw_os_error() == Some(libc::ESRCH)
+        || e.raw_os_error() == Some(2)
 }
 
 #[cfg(target_os = "macos")]
@@ -170,10 +182,25 @@ fn clear_orphan_dns() {
     }
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(target_os = "windows")]
 fn clear_orphan_dns() {
-    // Linux / Windows DNS cleanup will land with those platforms'
-    // DNS impls. No state to clean today.
+    // NRPT rule IDs persist in the registry under our own
+    // `NRPTRuleIDs` value; the platform `DnsManager::revert` reads
+    // that value and deletes each rule. So a fresh manager off a
+    // crashed daemon's leftover state cleans itself up without any
+    // cross-process manifest plumbing. Idempotent — does nothing
+    // when the value is absent or empty.
+    let mut mgr = azvpn_tunnel_windows::DnsManager::new();
+    mgr.revert();
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+fn clear_orphan_dns() {
+    // Linux DNS cleanup will land with that platform's DNS impl.
+    // systemd-resolved per-link state goes away when the link does
+    // and the `/etc/resolv.conf` fallback path takes its own
+    // backup, so there's nothing to clean at the manifest layer
+    // today.
 }
 
 #[cfg(test)]
