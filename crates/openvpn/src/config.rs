@@ -138,6 +138,15 @@ impl<'a> ConfigBuilder<'a> {
         // emits them on the mgmt socket so we know what to install.
         writeln!(config, "route-noexec").unwrap();
         writeln!(config, "verb {}", self.verb).unwrap();
+        // openvpn on Windows can't write to its inherited stderr
+        // when launched by the SCM (the service's stdio is NUL),
+        // so any pre-management-socket error — bad config, wintun
+        // driver missing, TLS chain rejection — is lost. Tell
+        // openvpn to write its own log to a file we own. Same
+        // path on Unix would conflict with journald / launchd's
+        // capture, so this is Windows-only.
+        #[cfg(target_os = "windows")]
+        writeln!(config, "log \"C:\\\\ProgramData\\\\azvpn\\\\logs\\\\openvpn.log\"").unwrap();
         writeln!(config).unwrap();
 
         writeln!(
