@@ -156,6 +156,25 @@ pub fn new_manager() -> Box<dyn DnsManager> {
     Box::new(NoopManager)
 }
 
+/// One-shot initialisation called by the daemon at startup so any
+/// per-process state directories the platform impls need are present
+/// before the first `apply` runs. Today only Linux uses this — the
+/// Direct backend snapshots `/etc/resolv.conf` into
+/// `/var/run/azvpn/resolv.conf.bak`, and that parent directory has to
+/// exist before write. macOS / Windows are no-ops.
+///
+/// Failures are reported to the caller; the daemon logs and continues
+/// — a missing state directory only matters if the Direct backend ends
+/// up being selected, and the runtime apply will surface a clearer
+/// `Error::Io` if so.
+pub fn init_state_dirs() -> std::io::Result<()> {
+    #[cfg(target_os = "linux")]
+    {
+        azvpn_tunnel_linux::init_state_dir()?;
+    }
+    Ok(())
+}
+
 /// Last-resort impl for unsupported platforms — exists so the build
 /// succeeds even on, say, FreeBSD. All operations return
 /// `Error::NotImplemented`.

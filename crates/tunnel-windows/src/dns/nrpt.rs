@@ -137,6 +137,62 @@ fn write_rule(base: &RegKey, rule: &NrptRule) -> io::Result<()> {
     Ok(())
 }
 
+/// Flush a base registry key to disk. Without this, registry writes
+/// live only in the configuration manager's in-memory cache and
+/// survive a clean shutdown via the lazy-flush thread — but a hard
+/// crash (power loss, BSOD, force-kill) before that lazy flush
+/// completes loses our NRPT rules, leaving the user with broken split
+/// DNS on next boot and no obvious recovery signal.
+///
+/// Microsoft's `RegFlushKey` docs explicitly recommend *against*
+/// routine use ("rarely necessary, can negatively affect system
+/// performance"), but our writes are infrequent (a handful per
+/// tunnel up/down) and the cost of a lost rule is high. Mullvad's
+/// `talpid-dns` makes the same trade-off.
+///
+/// Implementation note: we open the key with `windows-sys`
+/// end-to-end rather than reach into `winreg::RegKey`'s opaque
+/// `HKEY` — the cast between `winreg`'s `winapi::HKEY` and
+/// `windows-sys`'s `HKEY` is fragile across crate versions, and
+/// `RegFlushKey` is already documented as slow so the extra
+/// `RegOpenKeyEx` roundtrip is in the noise.
+///
+/// Errors are returned for the caller to log but never fail the
+/// surrounding apply — the rules *are* in the registry, just not
+/// guaranteed durable yet.
+#[allow(unsafe_code)]
+fn flush_path(path: &str) -> io::Result<()> {
+    use widestring::U16CString;
+    use windows_sys::Win32::Foundation::ERROR_SUCCESS;
+    use windows_sys::Win32::System::Registry::{
+        HKEY, HKEY_LOCAL_MACHINE as HKLM, KEY_READ, RegCloseKey, RegFlushKey, RegOpenKeyExW,
+    };
+
+    let wide = U16CString::from_str(path)
+        .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e.to_string()))?;
+    let mut handle: HKEY = std::ptr::null_mut();
+    // SAFETY: `wide.as_ptr()` is a valid NUL-terminated UTF-16 string;
+    // `&raw mut handle` is a writable output pointer. `RegOpenKeyExW`
+    // returns a Win32 error code (ERROR_SUCCESS on success).
+    let rc = unsafe { RegOpenKeyExW(HKLM, wide.as_ptr(), 0, KEY_READ, &raw mut handle) };
+    if rc != ERROR_SUCCESS {
+        return Err(io::Error::from_raw_os_error(rc as i32));
+    }
+    // SAFETY: `handle` is a live HKEY we just opened. `RegFlushKey`
+    // takes only the HKEY; no buffers, no callbacks. `RegCloseKey`
+    // is called below regardless of the flush outcome so we don't
+    // leak the handle.
+    let flush_rc = unsafe { RegFlushKey(handle) };
+    // SAFETY: `handle` is the live HKEY from above; `RegCloseKey`
+    // takes ownership and is idempotent against a NULL we never pass.
+    let _ = unsafe { RegCloseKey(handle) };
+    if flush_rc == ERROR_SUCCESS {
+        Ok(())
+    } else {
+        Err(io::Error::from_raw_os_error(flush_rc as i32))
+    }
+}
+
 /// Delete a single rule by GUID under the already-opened `base`.
 /// `NotFound` is success — the rule may have been pruned manually
 /// between apply and clear, or the base key itself may be absent
@@ -347,6 +403,25 @@ pub(crate) fn apply_rules(
 
     save_owned_rule_ids(&new_ids)?;
 
+    // Force the configuration manager's lazy flush to disk so a hard
+    // crash before the natural ~5s flush window doesn't lose our
+    // freshly-written rules. Per-base flushes (not per-subkey) — the
+    // Win32 docs are explicit that a flush on the ancestor commits
+    // every descendant subkey + value. Logged-not-fatal: the rules
+    // are valid in-memory and a clean shutdown will flush them
+    // naturally.
+    if let Err(e) = flush_path(NRPT_BASE_LOCAL) {
+        warn!(path = NRPT_BASE_LOCAL, error = %e, "RegFlushKey failed for NRPT local base");
+    }
+    if write_as_gp {
+        if let Err(e) = flush_path(NRPT_BASE_GP) {
+            warn!(path = NRPT_BASE_GP, error = %e, "RegFlushKey failed for NRPT GP base");
+        }
+    }
+    if let Err(e) = flush_path(AZVPN_REGKEY) {
+        warn!(path = AZVPN_REGKEY, error = %e, "RegFlushKey failed for owned-ID tracker");
+    }
+
     if gp_dirty {
         if let Err(e) = refresh_machine_policy() {
             // GP refresh failure leaves the registry correctly
@@ -415,6 +490,23 @@ pub(crate) fn clear_rules(write_as_gp: bool) -> io::Result<()> {
 
     if gp_dirty || write_as_gp {
         let _ = refresh_machine_policy();
+    }
+
+    // Flush deletes to disk for the same reason apply flushes writes:
+    // a crash between clear and the lazy-flush window would leave
+    // dangling rules in the on-disk hive that re-emerge on next boot
+    // pointing at a tunnel that no longer exists. Best-effort.
+    if let Err(e) = flush_path(NRPT_BASE_LOCAL) {
+        warn!(path = NRPT_BASE_LOCAL, error = %e, "RegFlushKey failed for NRPT local base during clear");
+    }
+    if let Err(e) = flush_path(NRPT_BASE_GP) {
+        // GP base may have been deleted above; treat NotFound as success.
+        if e.kind() != io::ErrorKind::NotFound {
+            warn!(path = NRPT_BASE_GP, error = %e, "RegFlushKey failed for NRPT GP base during clear");
+        }
+    }
+    if let Err(e) = flush_path(AZVPN_REGKEY) {
+        warn!(path = AZVPN_REGKEY, error = %e, "RegFlushKey failed for owned-ID tracker during clear");
     }
 
     info!(removed = count, "NRPT rules cleared");

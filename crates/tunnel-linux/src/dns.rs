@@ -414,7 +414,24 @@ fn find_ifindex_by_local_ip(addr: IpAddr) -> Result<i32> {
 // ─── direct /etc/resolv.conf backend ────────────────────────────────
 
 const RESOLV_CONF: &str = "/etc/resolv.conf";
+
+/// Per-process state directory the daemon owns. The Direct backend
+/// snapshots `/etc/resolv.conf` into [`RESOLV_CONF_BAK`] here before
+/// taking it over; the cleanup-on-startup manifest re-reads it across
+/// daemon restarts. Created once at daemon startup via
+/// [`init_state_dir`] so the apply path doesn't have to race a
+/// create-then-write inside its own first call.
+pub const STATE_DIR: &str = "/var/run/azvpn";
 const RESOLV_CONF_BAK: &str = "/var/run/azvpn/resolv.conf.bak";
+
+/// Ensure [`STATE_DIR`] exists. Called once at daemon startup by
+/// `azvpn-core::dns::init_state_dirs` so the Direct backend's first
+/// apply can write its snapshot without first having to materialise
+/// the parent directory under load. Idempotent — succeeds when the
+/// directory already exists.
+pub fn init_state_dir() -> std::io::Result<()> {
+    fs::create_dir_all(STATE_DIR)
+}
 
 struct DirectBackend {
     /// In-memory copy of pre-takeover `resolv.conf` content. `Some`
@@ -449,13 +466,13 @@ impl DirectBackend {
                 Err(e) if e.kind() == std::io::ErrorKind::NotFound => Vec::new(),
                 Err(e) => return Err(Error::Io(e)),
             };
-            // Persist the snapshot to disk too — if azvpnd dies before
-            // it can call clear(), the cleanup-manifest restart path
-            // can spot this file and restore. Best-effort dir-create:
-            // a failure here surfaces via the subsequent fs::write.
-            if let Some(parent) = self.backup_path.parent() {
-                let _ = fs::create_dir_all(parent);
-            }
+            // Persist the snapshot to disk so the cleanup-manifest
+            // restart path can find and restore it if azvpnd dies before
+            // it can call clear(). The parent dir is created once at
+            // daemon startup by `init_state_dir()` — fail loudly if it
+            // somehow isn't there (operator removed it manually,
+            // tmpfs vanished, ...). Tests pass a tempdir-relative path
+            // so this branch only fires in production.
             fs::write(&self.backup_path, &current)?;
             self.backup = Some(current);
         }

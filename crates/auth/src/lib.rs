@@ -169,6 +169,20 @@ impl AadConfig {
     pub fn default_scope(&self) -> String {
         format!("{}/.default offline_access", self.audience)
     }
+
+    /// Pull the AAD block out of a parsed [`VpnProfile`] and lift it
+    /// into the auth-crate-flavoured config. Returns `None` for
+    /// non-AAD profiles (cert / username-pass / radius) and for AAD
+    /// profiles missing the `<aad>` block — callers distinguish
+    /// "no config needed" from "broken config" via their own surrounding
+    /// error type.
+    #[must_use]
+    pub fn from_profile(profile: &azvpn_profile::VpnProfile) -> Option<Self> {
+        if profile.clientauth.auth_type != azvpn_profile::AuthType::Aad {
+            return None;
+        }
+        profile.clientauth.aad.as_ref().map(Self::from)
+    }
 }
 
 impl From<&azvpn_profile::AadConfig> for AadConfig {
@@ -190,12 +204,23 @@ impl From<&azvpn_profile::AadConfig> for AadConfig {
 /// both live, so the daemon and CLI can share one resolver.
 #[must_use]
 pub fn aad_cache_key(profile: &azvpn_profile::VpnProfile) -> Option<CacheKey> {
-    if profile.clientauth.auth_type != azvpn_profile::AuthType::Aad {
-        return None;
-    }
-    let aad_profile = profile.clientauth.aad.as_ref()?;
-    let config = AadConfig::from(aad_profile);
-    Some(CacheKey::from(&config))
+    AadConfig::from_profile(profile).as_ref().map(CacheKey::from)
+}
+
+/// Canonical RT-to-AT exchange against AAD. The single transport path
+/// both the CLI's user-cache silent refresh and the daemon's boot-time
+/// converge go through — previously two near-identical wrappers,
+/// now the only place that knows the `RefreshGrant::new` +
+/// `exchange` + `default_scope()` shape.
+///
+/// Pure HTTP — no cache touch, no eprintln. Caller logs and persists
+/// via the appropriate cache's `save_refresh_result` (which handles
+/// the AAD-doesn't-rotate-the-RT case).
+pub async fn silent_refresh(config: &AadConfig, refresh_token: &str) -> Result<Token> {
+    let grant = RefreshGrant::new(&config.tenant_id, config.client_id())?;
+    grant
+        .exchange(refresh_token, &config.default_scope())
+        .await
 }
 
 #[derive(Debug, Clone)]

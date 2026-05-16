@@ -28,6 +28,9 @@ windows-service = { workspace = true }
 winreg = { workspace = true }
 # UUID v4 for NRPT rule subkey names. Pure Rust; no Win32 call.
 uuid = { workspace = true }
+# UTF-16 NUL-terminated marshalling for the registry paths we hand
+# to `RegOpenKeyExW` in the `RegFlushKey` durability path.
+widestring = { workspace = true }
 
 [lints]
 workspace = true

@@ -246,6 +246,23 @@ async fn unix_main() -> ExitCode {
         "azvpnd starting"
     );
 
+    // Create per-process state dirs before any DNS / cleanup work
+    // touches them. Today this only matters on Linux — the Direct
+    // resolv.conf backend writes its pre-takeover snapshot under
+    // `/var/run/azvpn/` and we'd rather fail at startup with a clear
+    // log line than race a `create_dir_all` inside the first apply.
+    // Logged-but-not-fatal: the systemd-resolved backend doesn't need
+    // the dir, so a `/var/run` permission gotcha shouldn't refuse to
+    // start the daemon on systems where resolved will win.
+    if let Err(e) = azvpn_core::dns::init_state_dirs() {
+        warn!(
+            error = %e,
+            "couldn't create DNS state directory at startup; \
+             direct resolv.conf backend will surface a clearer error \
+             if it ends up being selected"
+        );
+    }
+
     // Sweep up anything a prior daemon left in the kernel before
     // accepting new connections — kernel routes and the SCDynamicStore
     // DNS supplemental key don't auto-revert on SIGKILL / panic /

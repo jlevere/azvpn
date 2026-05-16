@@ -21,13 +21,11 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use azvpn_profile::{AuthType, VpnProfile};
+use azvpn_profile::VpnProfile;
 use tracing::{info, warn};
 
 use crate::cache_shared::{CachedToken, write_atomic_private};
-use crate::{
-    AadConfig, CacheKey, Error, ExposeSecret, RefreshGrant, Result, SecretString, Token,
-};
+use crate::{AadConfig, CacheKey, Error, ExposeSecret, Result, SecretString, Token};
 
 /// Where the daemon stores its per-profile token caches. Created with
 /// mode 0700 on Unix the first time the daemon writes — only root can
@@ -129,23 +127,18 @@ impl DaemonTokenCache {
     /// Exchange the stored refresh token for a fresh AT+RT pair and
     /// persist atomically. The single canonical path for any daemon-
     /// side refresh — boot-time converge and the F.9 periodic
-    /// refresher both go through this. Errors propagate untyped HTTP
-    /// / JSON failures via the crate `Error` enum.
+    /// refresher both go through this.
+    ///
+    /// Transport lives in [`crate::silent_refresh`]; this wrapper owns
+    /// the daemon-cache load/persist + the AAD-vs-non-AAD profile
+    /// gate. The CLI's user-cache uses the same transport but pairs
+    /// it with the keyring/file backend and an `Option`-not-`Result`
+    /// failure model that falls through to interactive sign-in.
     pub async fn silent_refresh(&self, profile: &VpnProfile) -> Result<Token> {
-        if !matches!(profile.clientauth.auth_type, AuthType::Aad) {
-            return Err(Error::Other("profile is not AAD-auth".into()));
-        }
-        let aad_profile = profile
-            .clientauth
-            .aad
-            .as_ref()
-            .ok_or_else(|| Error::Other("AAD profile missing <aad> config block".into()))?;
+        let aad_config =
+            AadConfig::from_profile(profile).ok_or(Error::Other("profile is not AAD-auth".into()))?;
         let rt = self.load_refresh_token().ok_or(Error::NoRefreshToken)?;
-        let aad_config = AadConfig::from(aad_profile);
-        let grant = RefreshGrant::new(&aad_config.tenant_id, aad_config.client_id())?;
-        let token = grant
-            .exchange(rt.expose_secret(), &aad_config.default_scope())
-            .await?;
+        let token = crate::silent_refresh(&aad_config, rt.expose_secret()).await?;
         Ok(self.save_refresh_result(token, rt.expose_secret()))
     }
 }

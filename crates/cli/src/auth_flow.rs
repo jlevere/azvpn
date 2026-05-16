@@ -5,7 +5,7 @@
 
 use azvpn_auth::{
     AadConfig, AuthCodeFlow, CacheAttempt, CacheKey, DeviceCodeFlow, DeviceCodePrompt, ExposeSecret,
-    RefreshGrant, SecretString, Token, TokenCache,
+    SecretString, Token, TokenCache,
 };
 use azvpn_profile::{AuthType, VpnProfile};
 
@@ -102,10 +102,9 @@ pub async fn acquire(
             Ok(AadTokens::default())
         }
         AuthType::Aad => {
-            let aad_profile = profile.clientauth.aad.as_ref().ok_or(
+            let aad_config = AadConfig::from_profile(profile).ok_or(
                 azvpn_core::Error::ProfileIncomplete("AAD auth requires <aad> config block"),
             )?;
-            let aad_config = AadConfig::from(aad_profile);
             let cache = TokenCache::for_profile(CacheKey::from(&aad_config));
 
             // Single backend read covers both the fresh-AT and the
@@ -134,24 +133,23 @@ pub async fn acquire(
 }
 
 /// Exchange a cached refresh token for a fresh access token bound to the
-/// gateway audience, with the same scope shape device-code uses. Returns
-/// `None` on any AAD-side failure (RT past rotation grace, conditional-
-/// access change, revocation, network hiccup) so the caller falls
-/// through to interactive sign-in — never silently fails the verb.
+/// gateway audience. Returns `None` on any AAD-side failure (RT past
+/// rotation grace, conditional-access change, revocation, network
+/// hiccup) so the caller falls through to interactive sign-in — never
+/// silently fails the verb.
+///
+/// The transport is `azvpn_auth::silent_refresh`; the wrapper here owns
+/// the UX side (eprintln on success), the user-cache persist, and the
+/// fall-through-to-interactive policy. Daemon-side converge goes
+/// through `DaemonTokenCache::silent_refresh` instead, which keeps the
+/// same `azvpn_auth::silent_refresh` core but pairs it with the
+/// root-owned cache and an `Err`-not-`None` failure model.
 async fn try_silent_refresh(
     config: &AadConfig,
     cache: &TokenCache,
     refresh_token: &str,
 ) -> Option<Token> {
-    let grant = match RefreshGrant::new(&config.tenant_id, config.client_id()) {
-        Ok(g) => g,
-        Err(e) => {
-            tracing::warn!(error = %e, "refresh-grant init failed");
-            return None;
-        }
-    };
-    let scope = config.default_scope();
-    match grant.exchange(refresh_token, &scope).await {
+    match azvpn_auth::silent_refresh(config, refresh_token).await {
         Ok(t) => {
             eprintln!("refreshed cached session silently — no sign-in needed");
             Some(cache.save_refresh_result(t, refresh_token))
