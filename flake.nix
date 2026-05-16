@@ -357,6 +357,12 @@
             cargo-edit
             cargo-watch
             openvpn-azvpn
+            # Windows MSI signing toolchain. `osslsigncode` is a
+            # Linux-native Authenticode signer — no Wine, no
+            # signtool. `msitools` provides `msiinfo` for sanity-
+            # inspecting the MSIs we produce.
+            osslsigncode
+            msitools
           ];
         };
       });
