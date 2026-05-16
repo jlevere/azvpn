@@ -8,8 +8,10 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use azvpn_core::commands::connect::{self, ConnectOptions, ConnectionStatus};
 use azvpn_core::metrics::ConnectionMetrics;
+use azvpn_core::target::{self, State as TargetState, TargetState as Target};
 use azvpn_ipc::{
-    AzvpnApi, ConnectRequest, DisconnectOutcome, InfoReport, IpcError, PushOptions, StatusReport,
+    AzvpnApi, DisconnectOutcome, DownRequest, InfoReport, IpcError, PushOptions, StatusReport,
+    UpRequest,
 };
 use azvpn_openvpn::VpnState;
 use tarpc::context::Context;
@@ -88,7 +90,7 @@ impl AzvpnApi for AzvpndServer {
         azvpn_ipc::WIRE_VERSION
     }
 
-    async fn connect(self, _: Context, req: ConnectRequest) -> Result<(), IpcError> {
+    async fn up(self, _: Context, req: UpRequest) -> Result<(), IpcError> {
         let mut active = self.state.active.lock().await;
         if active.is_some() {
             return Err(IpcError::AlreadyConnected);
@@ -102,6 +104,34 @@ impl AzvpnApi for AzvpndServer {
             .ok_or_else(|| IpcError::Profile("no server in profile".into()))?
             .fqdn
             .clone();
+
+        // Persist user intent before the connect task spawns —
+        // Tailscale's `WantRunning` shape. The target reflects what
+        // the user asked for, regardless of whether the connect
+        // ultimately succeeds; the retry / converge loop is
+        // responsible for getting from intent → reality. Skip on
+        // `ephemeral` so CI scripts can run one-shot connects
+        // without poisoning the persisted state.
+        if !req.ephemeral {
+            let target = Target {
+                schema_version: target::SCHEMA_VERSION,
+                state: TargetState::Connected,
+                profile: Some(req.profile.clone()),
+                profile_label: Some(req.profile_label.clone()),
+                verbose: req.verbose,
+            };
+            let target_path = target::default_path();
+            if let Err(e) = target.save(&target_path) {
+                // Don't fail the up call — the user wants the tunnel
+                // up; we just can't persist intent. Surface as a
+                // warning so a later `azvpn status` can show it.
+                error!(
+                    path = %target_path.display(),
+                    error = %e,
+                    "failed to persist target state; daemon won't auto-converge after reboot",
+                );
+            }
+        }
 
         // Static mgmt port — the daemon owns the only openvpn child.
         let mgmt_addr = SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 7505));
@@ -176,7 +206,26 @@ impl AzvpnApi for AzvpndServer {
         }
     }
 
-    async fn disconnect(self, _: Context) -> Result<DisconnectOutcome, IpcError> {
+    async fn down(self, _: Context, req: DownRequest) -> Result<DisconnectOutcome, IpcError> {
+        // Update target state first so a daemon-crash-mid-shutdown
+        // doesn't leave us re-converging to a tunnel the user just
+        // told us they don't want. The disconnect signal goes out
+        // after — even if the file write fails, we still tear down.
+        if !req.ephemeral {
+            let target_path = target::default_path();
+            let mut target = Target::load(&target_path);
+            // Profile snapshot stays so `azvpn up` (no --profile)
+            // works after a `down`/`up` cycle.
+            target.state = TargetState::Disconnected;
+            if let Err(e) = target.save(&target_path) {
+                error!(
+                    path = %target_path.display(),
+                    error = %e,
+                    "failed to persist target state on down",
+                );
+            }
+        }
+
         let active = self.state.active.lock().await;
         match active.as_ref() {
             None => Ok(DisconnectOutcome::NotConnected),

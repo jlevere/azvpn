@@ -1,18 +1,26 @@
-//! `azvpn connect` — acquires an AAD access token (interactive
-//! browser flow or device-code, per `--auth`), then asks the daemon
-//! to bring up the tunnel via tarpc.
+//! `azvpn up` — acquires an AAD access token (interactive browser
+//! flow or device-code, per `--auth`), then asks the daemon to bring
+//! the tunnel up and persist the user's intent so a reboot
+//! re-converges.
 //!
 //! The CLI runs as the user and owns auth; the daemon runs as root and
-//! owns the privileged tunnel work. The two talk over a Unix socket.
+//! owns the privileged tunnel work plus the target-state file. The two
+//! talk over a Unix socket.
+//!
+//! On first invocation, `--profile PATH` is required; on subsequent
+//! invocations (after the daemon has stored a snapshot) it's optional.
+//! `--ephemeral` skips the persist step for CI / one-shot use, leaving
+//! the existing target state untouched.
 
-use std::path::Path;
+use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use azvpn_auth::{
     AadConfig, AuthCodeFlow, CacheKey, DeviceCodeFlow, DeviceCodePrompt, RefreshGrant, Token,
     TokenCache,
 };
-use azvpn_ipc::ConnectRequest;
+use azvpn_core::target::TargetState as Target;
+use azvpn_ipc::UpRequest;
 use azvpn_profile::{AuthType, VpnProfile};
 
 use crate::Result;
@@ -34,36 +42,49 @@ pub enum AuthMode {
     DeviceCode,
 }
 
-/// How long we let the daemon's `Connect` RPC stay open. The whole
+/// How long we let the daemon's `Up` RPC stay open. The whole
 /// device-code path runs in the CLI before we even call the daemon, so
 /// this only needs to cover openvpn handshake + first push reply —
 /// generous 3 minutes covers slow gateways.
-const CONNECT_DEADLINE: Duration = Duration::from_mins(3);
-const DISCONNECT_DEADLINE: Duration = Duration::from_secs(30);
+const UP_DEADLINE: Duration = Duration::from_mins(3);
+const DOWN_DEADLINE: Duration = Duration::from_secs(30);
 
-pub async fn run(profile_path: &Path, verbose: bool, auth_mode: AuthMode) -> Result<()> {
-    let profile = VpnProfile::from_file(profile_path)?;
+pub async fn run(
+    profile_path: Option<PathBuf>,
+    verbose: bool,
+    auth_mode: AuthMode,
+    ephemeral: bool,
+) -> Result<()> {
+    // Resolve which profile to use. Explicit `--profile` wins; else
+    // fall back to whatever the daemon has persisted from a previous
+    // non-ephemeral `up`. First-ever `up` requires the explicit path.
+    let resolved = resolve_profile(profile_path)?;
 
     // Hint-only captive-portal probe. Warns if the network looks
     // intercepted; doesn't block — false positives (corporate proxies,
     // transient 5xx) shouldn't stop a legitimate connect.
     crate::captive::warn_if_mediated().await;
 
-    let access_token = ensure_access_token(&profile, auth_mode).await?;
+    let access_token = ensure_access_token(&resolved.profile, auth_mode).await?;
 
     let client = connect_to_daemon().await?;
 
-    let req = ConnectRequest {
-        profile_label: profile_path.display().to_string(),
-        profile,
+    let req = UpRequest {
+        profile_label: resolved.label,
+        profile: resolved.profile,
         access_token,
         verbose,
+        ephemeral,
     };
 
     let mut ctx = tarpc::context::current();
-    ctx.deadline = Instant::now() + CONNECT_DEADLINE;
-    eprintln!("requesting connection from daemon...");
-    client.connect(ctx, req).await??;
+    ctx.deadline = Instant::now() + UP_DEADLINE;
+    if ephemeral {
+        eprintln!("requesting one-shot connection from daemon (ephemeral)...");
+    } else {
+        eprintln!("requesting connection from daemon...");
+    }
+    client.up(ctx, req).await??;
     eprintln!("connected. Ctrl-C to disconnect.");
 
     // Park until the user signals. The daemon owns the tunnel
@@ -72,9 +93,41 @@ pub async fn run(profile_path: &Path, verbose: bool, auth_mode: AuthMode) -> Res
     eprintln!("\ndisconnecting...");
 
     let mut ctx = tarpc::context::current();
-    ctx.deadline = Instant::now() + DISCONNECT_DEADLINE;
-    let _ = client.disconnect(ctx).await??;
+    ctx.deadline = Instant::now() + DOWN_DEADLINE;
+    // Ctrl-C from an `up` session is "I want this stopped now and
+    // I don't want it to come back on reboot" — match the
+    // explicitness by sending the persistent `down` (not ephemeral).
+    let _ = client
+        .down(ctx, azvpn_ipc::DownRequest { ephemeral: false })
+        .await??;
     Ok(())
+}
+
+struct ResolvedProfile {
+    profile: VpnProfile,
+    label: String,
+}
+
+/// Pick which profile to use for this `up`. The daemon-side target
+/// snapshot is the fallback path — once a non-ephemeral `up` has
+/// landed, subsequent `up`s don't need `--profile` again. We re-read
+/// the file (not the in-daemon snapshot) so user edits to the XML
+/// take effect; the snapshot is for daemon-side converge after
+/// reboot, not for human re-up.
+fn resolve_profile(cli_profile: Option<PathBuf>) -> Result<ResolvedProfile> {
+    let target = Target::load(&azvpn_core::target::default_path());
+    let path = cli_profile
+        .or_else(|| target.profile_label.as_deref().map(PathBuf::from))
+        .ok_or_else(|| {
+            crate::Error::Core(azvpn_core::Error::Other(
+                "no profile stored yet — first `azvpn up` needs `--profile PATH`".into(),
+            ))
+        })?;
+    let profile = VpnProfile::from_file(&path)?;
+    Ok(ResolvedProfile {
+        label: path.display().to_string(),
+        profile,
+    })
 }
 
 /// Resolve a usable AAD access token for the profile. Returns `None`
