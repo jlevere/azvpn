@@ -115,7 +115,6 @@ jobs:
       version: ${{ steps.msi.outputs.version }}
       sha256: ${{ steps.msi.outputs.sha256 }}
       msi_name: ${{ steps.msi.outputs.msi_name }}
-      signed: ${{ steps.msi.outputs.signed }}
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable

@@ -20,6 +20,8 @@ use std::process::Command;
 
 use anyhow::{Context as _, Result, bail};
 
+use crate::util;
+
 /// Authenticode `ProductName` — shown in the UAC prompt and the
 /// Properties → Digital Signatures pane.
 const PRODUCT_NAME: &str = "azvpn";
@@ -60,34 +62,61 @@ pub struct Args {
     pub timestamp_url: Option<String>,
 }
 
+// Consume `args` by value to match the convention every other xtask
+// command follows; we delegate to `sign_in_place` which takes refs,
+// so we don't actually move anything out — but consistency wins.
+#[allow(clippy::needless_pass_by_value)]
 pub fn run(args: Args) -> Result<()> {
-    let input = resolve_msi_input(&args.input)?;
+    sign_in_place(
+        &args.input,
+        &args.output,
+        args.cert.as_deref(),
+        args.key.as_deref(),
+        args.timestamp_url.as_deref(),
+    )
+}
 
-    let cert = resolve_with_fallbacks(args.cert.as_deref(), "AZVPN_SIGNING_CERT", "dev-cert.pem");
-    let key = resolve_with_fallbacks(args.key.as_deref(), "AZVPN_SIGNING_KEY", "dev-key.pem");
-    let tsa = args
-        .timestamp_url
+/// Sign one MSI, called both by `cargo xtask sign-msi` (CLI) and
+/// `cargo xtask release-windows --sign` (programmatic). Resolves
+/// the cert/key/TSA via the documented fallback chain, runs
+/// `osslsigncode sign`, then verifies the signature.
+///
+/// Returns Ok on a successfully-verified signed output. Verify
+/// failures with a self-signed cert are caught and retried with
+/// `-CAfile <cert>` so the dev path still passes.
+pub fn sign_in_place(
+    input: &Path,
+    output: &Path,
+    cert_flag: Option<&Path>,
+    key_flag: Option<&Path>,
+    tsa_flag: Option<&str>,
+) -> Result<()> {
+    let resolved_input = resolve_msi_input(input)?;
+    let cert = resolve_with_fallbacks(cert_flag, "AZVPN_SIGNING_CERT", util::DEV_CERT_NAME);
+    let key = resolve_with_fallbacks(key_flag, "AZVPN_SIGNING_KEY", util::DEV_KEY_NAME);
+    let tsa = tsa_flag
+        .map(str::to_owned)
         .or_else(|| std::env::var("AZVPN_TIMESTAMP_URL").ok())
         .unwrap_or_else(|| DEFAULT_TSA.to_owned());
 
     require_file(&cert, "signing cert")?;
     require_file(&key, "signing key")?;
 
-    println!(">>> signing {}", input.display());
+    println!(">>> signing {}", resolved_input.display());
     println!("    cert: {}", cert.display());
     println!("    tsa:  {tsa}");
-    println!("    out:  {}", args.output.display());
+    println!("    out:  {}", output.display());
 
-    osslsigncode_sign(&input, &args.output, &cert, &key, &tsa)?;
+    osslsigncode_sign(&resolved_input, output, &cert, &key, &tsa)?;
 
     println!();
     println!(">>> verifying signature");
     // Best-effort: self-signed certs fail the default CA-chain check
-    // but still produce a structurally valid signature. We retry with
-    // `-CAfile <cert>` so the self-signed dev path also succeeds.
-    if osslsigncode_verify(&args.output, None).is_err() {
+    // but still produce a structurally valid signature. Retry with
+    // `-CAfile <cert>` so the dev path passes.
+    if osslsigncode_verify(output, None).is_err() {
         eprintln!("(default verify failed — retrying with --CAfile for self-signed certs)");
-        osslsigncode_verify(&args.output, Some(&cert))?;
+        osslsigncode_verify(output, Some(&cert))?;
     }
 
     println!();
@@ -135,10 +164,9 @@ fn resolve_msi_input(path: &Path) -> Result<PathBuf> {
 }
 
 /// Resolve a cert/key path through the fallback chain. The CLI flag
-/// wins; then the env var; then `$AZVPN_SIGNING_DIR/<default_name>`
-/// (or `~/.config/azvpn-signing/<default_name>`). Pure path
-/// construction — does NOT verify the file exists yet, that's
-/// [`require_file`]'s job.
+/// wins; then the per-credential env var (e.g. `$AZVPN_SIGNING_CERT`);
+/// then [`util::signing_dir`]`/<default_name>`. Pure path
+/// construction — file existence is [`require_file`]'s job.
 fn resolve_with_fallbacks(flag: Option<&Path>, env_var: &str, default_name: &str) -> PathBuf {
     if let Some(p) = flag {
         return p.to_path_buf();
@@ -146,13 +174,7 @@ fn resolve_with_fallbacks(flag: Option<&Path>, env_var: &str, default_name: &str
     if let Some(val) = std::env::var_os(env_var) {
         return PathBuf::from(val);
     }
-    let signing_dir = std::env::var_os("AZVPN_SIGNING_DIR")
-        .map(PathBuf::from)
-        .or_else(|| {
-            std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".config").join("azvpn-signing"))
-        })
-        .unwrap_or_else(|| PathBuf::from(".config/azvpn-signing"));
-    signing_dir.join(default_name)
+    util::signing_dir(None).join(default_name)
 }
 
 fn require_file(path: &Path, what: &str) -> Result<()> {
@@ -213,10 +235,9 @@ fn osslsigncode_verify(signed: &Path, ca_file: Option<&Path>) -> Result<()> {
 }
 
 #[cfg(test)]
-#[allow(unsafe_code)] // env-var mutation is unsafe in edition 2024
 mod tests {
     use super::*;
-    use std::ffi::OsString;
+    use crate::util::test_support::{EnvGuard, env_lock};
 
     #[test]
     fn resolve_msi_input_passes_regular_file() {
@@ -267,27 +288,17 @@ mod tests {
 
     #[test]
     fn resolve_with_fallbacks_uses_env_var() {
-        let key = "XTASK_TEST_AZVPN_SIGNING_CERT";
-        let prev = std::env::var_os(key);
-        unsafe { std::env::set_var(key, "/env/cert.pem") };
-        let got = resolve_with_fallbacks(None, key, "dev-cert.pem");
-        match prev {
-            Some(v) => unsafe { std::env::set_var(key, v) },
-            None => unsafe { std::env::remove_var(key) },
-        }
+        let _l = env_lock();
+        let _g = EnvGuard::set("XTASK_TEST_AZVPN_SIGNING_CERT", "/env/cert.pem");
+        let got = resolve_with_fallbacks(None, "XTASK_TEST_AZVPN_SIGNING_CERT", "dev-cert.pem");
         assert_eq!(got, PathBuf::from("/env/cert.pem"));
     }
 
     #[test]
     fn resolve_with_fallbacks_uses_signing_dir() {
-        let key = "XTASK_TEST_NEVER_SET";
-        let prev_dir: Option<OsString> = std::env::var_os("AZVPN_SIGNING_DIR");
-        unsafe { std::env::set_var("AZVPN_SIGNING_DIR", "/sign/dir") };
-        let got = resolve_with_fallbacks(None, key, "dev-cert.pem");
-        match prev_dir {
-            Some(v) => unsafe { std::env::set_var("AZVPN_SIGNING_DIR", v) },
-            None => unsafe { std::env::remove_var("AZVPN_SIGNING_DIR") },
-        }
-        assert_eq!(got, PathBuf::from("/sign/dir/dev-cert.pem"));
+        let _l = env_lock();
+        let _g = EnvGuard::set("AZVPN_SIGNING_DIR", "/sign/dir");
+        let got = resolve_with_fallbacks(None, "XTASK_TEST_NEVER_SET", util::DEV_CERT_NAME);
+        assert_eq!(got, PathBuf::from("/sign/dir").join(util::DEV_CERT_NAME));
     }
 }
