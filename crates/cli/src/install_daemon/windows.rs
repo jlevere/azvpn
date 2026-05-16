@@ -36,17 +36,17 @@ pub const SERVICE_NAME: &str = "azvpnd";
 /// `daemon::windows::SERVICE_DISPLAY_NAME`.
 pub const SERVICE_DISPLAY_NAME: &str = "azvpn — Azure VPN daemon";
 
-/// Default install prefix; the MSI installer (Phase W7) drops the
-/// daemon, CLI, and bundled `openvpn\` subdir under here. Until W7
-/// the user lays it out by hand per `docs/windows-plan.md` §5.
-pub const DEFAULT_INSTALL_DIR: &str = r"C:\Program Files\azvpn";
+/// Default install prefix — same string the MSI's wixl invocation
+/// substitutes for `[INSTALLDIR]`. Source of truth in
+/// [`azvpn_core::layout`].
+pub const DEFAULT_INSTALL_DIR: &str = azvpn_core::layout::WIN_INSTALL_DIR_ABS;
 
 /// Default daemon binary path under [`DEFAULT_INSTALL_DIR`].
-pub const DEFAULT_DAEMON_BIN: &str = r"C:\Program Files\azvpn\azvpnd.exe";
+pub const DEFAULT_DAEMON_BIN: &str = azvpn_core::layout::WIN_DAEMON_ABS;
 
 /// Default bundled openvpn binary path. Pinned upstream binary
-/// from the W7 MSI bundle.
-pub const DEFAULT_OPENVPN_BIN: &str = r"C:\Program Files\azvpn\openvpn\openvpn.exe";
+/// from the MSI bundle.
+pub const DEFAULT_OPENVPN_BIN: &str = azvpn_core::layout::WIN_OPENVPN_ABS;
 
 /// SCM service-start dependencies. The daemon needs these alive
 /// before it tries to bind the pipe / use IP Helper / write NRPT:
