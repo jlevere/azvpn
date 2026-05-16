@@ -15,6 +15,11 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  # Loose binaries for Linux + Windows — uploaded as standalone
+  # artifacts on the GH release for users who don't want a .deb /
+  # .rpm / installer. macOS is handled by `build-macos` below
+  # because it produces a tarball (CLI + daemon + bundled openvpn)
+  # rather than a bare binary.
   build:
     runs-on: ${{ matrix.os }}
     strategy:
@@ -30,9 +35,6 @@ jobs:
           - os: ubuntu-22.04
             target: x86_64-unknown-linux-gnu
             artifact: azvpn-linux-x86_64
-          - os: macos-latest
-            target: aarch64-apple-darwin
-            artifact: azvpn-macos-aarch64
           - os: windows-latest
             target: x86_64-pc-windows-msvc
             artifact: azvpn-windows-x86_64
@@ -50,7 +52,7 @@ jobs:
           key: release-${{ matrix.os }}-${{ matrix.target }}
       # libdbus-1-dev: the keyring crate's sync-secret-service feature
       # links to system libdbus on Linux (not pure-Rust like zbus). The
-      # macOS / Windows runners pick a native backend and don't need it.
+      # Windows runner picks a native backend and doesn't need it.
       - name: Install Linux system deps
         if: startsWith(matrix.os, 'ubuntu')
         run: sudo apt-get update && sudo apt-get install -y libdbus-1-dev pkg-config
@@ -68,6 +70,40 @@ jobs:
         with:
           name: ${{ matrix.artifact }}
           path: ${{ matrix.artifact }}*
+
+  # macOS release tarball — what `brew install jlevere/tap/azvpn`
+  # consumes. The whole flow (cargo build, nix build of patched
+  # openvpn, stage bin/+libexec/, tar, sha256, write CI outputs)
+  # lives in `cargo xtask release-macos` — see crates/xtask/.
+  # Putting the orchestration in Rust means we can unit-test the
+  # layout against the formula's `install` block; the YAML here
+  # is now just the runner setup.
+  build-macos:
+    runs-on: macos-latest
+    outputs:
+      version: ${{ steps.tarball.outputs.version }}
+      sha256: ${{ steps.tarball.outputs.sha256 }}
+      tarball_name: ${{ steps.tarball.outputs.tarball_name }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: build-macos-aarch64
+      # Nix is needed for the patched openvpn — `pkgsCross` /
+      # the openvpn-azvpn derivation in flake.nix. Magic-nix-cache
+      # gives a fresh runner a populated store within seconds.
+      - uses: DeterminateSystems/nix-installer-action@main
+      - uses: DeterminateSystems/magic-nix-cache-action@main
+      - name: Build release tarball
+        id: tarball
+        run: cargo xtask release-macos --emit-ci-outputs
+      - uses: actions/upload-artifact@v4
+        with:
+          name: azvpn-macos-aarch64
+          path: dist/azvpn-*-aarch64-apple-darwin.tar.gz
 
   # Patched openvpn binary for Linux .deb / .rpm packaging.
   #
@@ -190,7 +226,7 @@ jobs:
           path: target/generate-rpm/*.rpm
 
   release:
-    needs: [build, build-openvpn, build-deb, build-rpm]
+    needs: [build, build-macos, build-openvpn, build-deb, build-rpm]
     # Only publish a GH release on tag pushes — manual dispatches still
     # produce artifacts (visible from the run page) but don't create
     # a draft release out of nowhere.
@@ -205,3 +241,35 @@ jobs:
         with:
           files: artifacts/*
           generate_release_notes: true
+
+  # After the release lands, template the Homebrew formula with this
+  # release's version + sha256 and PUT it into jlevere/homebrew-tap
+  # so `brew install jlevere/tap/azvpn` resolves the new tarball.
+  #
+  # Needs a fine-grained PAT at the org level (not the default
+  # GITHUB_TOKEN — that scope is per-repo, can't write to the tap).
+  # Setup:
+  #   1. Generate fine-grained PAT at https://github.com/settings/tokens
+  #      with `Contents: read & write` scoped to `jlevere/homebrew-tap`.
+  #   2. Add as `HOMEBREW_TAP_TOKEN` repo secret at
+  #      https://github.com/jlevere/azvpn/settings/secrets/actions.
+  # `needs: release` so we don't push a formula pointing at a tarball
+  # URL that doesn't exist yet.
+  publish-formula:
+    needs: [build-macos, release]
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: publish-formula-ubuntu
+      - name: Push templated formula to tap
+        env:
+          HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+        run: |
+          cargo xtask publish-formula \
+            --version "${{ needs.build-macos.outputs.version }}" \
+            --sha256 "${{ needs.build-macos.outputs.sha256 }}" \
+            --push
