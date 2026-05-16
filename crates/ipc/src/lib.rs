@@ -20,7 +20,10 @@ pub use azvpn_openvpn::{AddrFamily, Ifconfig, PushOptions, PushedRoute};
 pub use azvpn_profile::VpnProfile;
 use serde::{Deserialize, Serialize};
 
+pub mod identity;
 pub mod transport;
+
+pub use identity::ClientIdentity;
 
 /// Monotonic counter bumped on every wire-shape change — new request
 /// fields, request renames, enum variant additions, etc. Independent
@@ -45,7 +48,9 @@ pub mod transport;
 ///   `ephemeral` flag for F.1 declarative target state
 /// - 3: `UpRequest.refresh_token` for daemon-side RT cache + reboot
 ///   auto-converge
-pub const WIRE_VERSION: u32 = 3;
+/// - 4: added `IpcError::PermissionDenied` variant for G.1 per-RPC
+///   admin check on Windows
+pub const WIRE_VERSION: u32 = 4;
 
 #[tarpc::service]
 pub trait AzvpnApi {
@@ -234,6 +239,14 @@ pub enum IpcError {
     Route(String),
     #[error("io: {0}")]
     Io(String),
+    /// RPC requires admin context; caller doesn't have it. The
+    /// daemon checks the IPC peer's identity (Windows: SID +
+    /// `BUILTIN\Administrators` membership after UAC linked-token
+    /// resolution; Unix: TBD) at accept time and gates mutating
+    /// RPCs (`up`, `down`) behind admin status. Caller string is
+    /// for the user-facing error; it never carries secret material.
+    #[error("operation `{operation}` requires admin; caller={caller}")]
+    PermissionDenied { operation: String, caller: String },
     #[error("{0}")]
     Other(String),
 }

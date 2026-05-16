@@ -11,8 +11,8 @@ use azvpn_core::commands::connect::{self, ConnectOptions, ConnectionStatus};
 use azvpn_core::metrics::ConnectionMetrics;
 use azvpn_core::target::{self, State as TargetState, TargetState as Target};
 use azvpn_ipc::{
-    AzvpnApi, DisconnectOutcome, DownRequest, InfoReport, IpcError, PushOptions, StatusReport,
-    UpRequest, VpnProfile,
+    AzvpnApi, ClientIdentity, DisconnectOutcome, DownRequest, InfoReport, IpcError, PushOptions,
+    StatusReport, UpRequest, VpnProfile,
 };
 use azvpn_openvpn::VpnState;
 use tarpc::context::Context;
@@ -44,6 +44,13 @@ struct ActiveConnection {
 #[derive(Clone)]
 pub struct AzvpndServer {
     state: Arc<DaemonState>,
+    /// Caller identity for the current connection. `None` on the
+    /// base server (used by `try_converge` startup work that runs
+    /// without an IPC peer); `Some` on per-connection clones the
+    /// accept loop creates via [`with_identity`]. Cheap `Option<Arc>`
+    /// clone — the inner identity is read-only per connection so
+    /// `Arc` keeps the sharing free of locks.
+    identity: Option<Arc<ClientIdentity>>,
 }
 
 impl AzvpndServer {
@@ -53,7 +60,49 @@ impl AzvpndServer {
                 active: Mutex::new(None),
                 openvpn_binary,
             }),
+            identity: None,
         }
+    }
+
+    /// Clone the base server with `identity` attached. The accept
+    /// loop calls this per accepted connection so each RPC handler
+    /// can consult [`AzvpndServer::require_admin`] to gate mutating
+    /// operations. The underlying `DaemonState` Arc is shared, so
+    /// this is cheap and concurrent-safe.
+    ///
+    /// Windows-only today; the Unix half of G.1 (per-RPC enforcement
+    /// keyed on `SO_PEERCRED` / `LOCAL_PEERCRED`) lands later.
+    #[must_use]
+    #[cfg(target_os = "windows")]
+    pub fn with_identity(&self, identity: ClientIdentity) -> Self {
+        Self {
+            state: self.state.clone(),
+            identity: Some(Arc::new(identity)),
+        }
+    }
+
+    /// Reject the current RPC if the caller isn't admin. Returns a
+    /// human-readable `IpcError::PermissionDenied` that the CLI
+    /// prints verbatim.
+    ///
+    /// **Behavior when no identity is attached** (the `None` case):
+    /// permit the call. This covers two contexts —
+    /// `try_converge`-spawned work that runs without a peer (boot-
+    /// time auto-reconnect), and the Unix accept path which
+    /// doesn't yet populate `ClientIdentity` (G.1's Unix half).
+    /// Once Unix lands we'll make this stricter; for now Unix
+    /// callers retain the existing socket-perm-based gating.
+    fn require_admin(&self, operation: &str) -> Result<(), IpcError> {
+        let Some(identity) = self.identity.as_deref() else {
+            return Ok(());
+        };
+        if identity.is_admin() {
+            return Ok(());
+        }
+        Err(IpcError::PermissionDenied {
+            operation: operation.to_owned(),
+            caller: identity.display(),
+        })
     }
 
     /// Spawn the openvpn-side connect machinery for the given profile
@@ -184,6 +233,7 @@ impl AzvpnApi for AzvpndServer {
     }
 
     async fn up(self, _: Context, req: UpRequest) -> Result<(), IpcError> {
+        self.require_admin("up")?;
         // Persist user intent before the connect task spawns —
         // Tailscale's `WantRunning` shape. The target reflects what
         // the user asked for, regardless of whether the connect
@@ -206,6 +256,7 @@ impl AzvpnApi for AzvpndServer {
     }
 
     async fn down(self, _: Context, req: DownRequest) -> Result<DisconnectOutcome, IpcError> {
+        self.require_admin("down")?;
         // Update target state first so a daemon-crash-mid-shutdown
         // doesn't leave us re-converging to a tunnel the user just
         // told us they don't want. The disconnect signal goes out

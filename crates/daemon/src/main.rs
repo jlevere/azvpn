@@ -189,12 +189,31 @@ async fn accept_loop_windows(
                 };
                 let connected = std::mem::replace(&mut current, next);
 
-                info!("client accepted on named pipe");
+                // Probe the peer's identity synchronously, *before*
+                // handing the pipe off to the tarpc task. Done here
+                // because `ImpersonateNamedPipeClient` impersonates
+                // the current OS thread, and the spawned task may
+                // resume on a different one. If probing fails we
+                // drop the connection entirely — refusing to serve
+                // RPCs to an unidentifiable caller is the safe
+                // default (matches Tailscale).
+                let identity = match azvpn_ipc::identity::fetch_pipe_identity(&connected) {
+                    Ok(id) => id,
+                    Err(e) => {
+                        warn!(error = %e, "client identity probe failed; refusing connection");
+                        // `connected` is dropped here; the kernel closes
+                        // the pipe instance and the client sees an EOF.
+                        continue;
+                    }
+                };
+                let client_identity = azvpn_ipc::ClientIdentity::Windows(identity);
+                info!(client = %client_identity.display(), "client accepted on named pipe");
+                let server_for_conn = server.with_identity(client_identity);
 
                 let framed = codec_builder.new_framed(connected);
                 let transport = serde_transport::new(framed, Bincode::default());
                 let conn_fut = BaseChannel::with_defaults(transport)
-                    .execute(azvpn_ipc::AzvpnApi::serve(server.clone()))
+                    .execute(azvpn_ipc::AzvpnApi::serve(server_for_conn))
                     .for_each(|rpc| async move {
                         tokio::spawn(rpc);
                     });
