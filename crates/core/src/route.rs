@@ -390,8 +390,37 @@ impl RouteManager {
 
 /// Build a `Route` for the given CIDR + gateway, attaching `ifindex`
 /// when known. Keeps the `with_ifindex` branching out of the hot loops.
+///
+/// On macOS we deliberately drop the gateway when we have an ifindex.
+/// The `PF_ROUTE` message format puts one sockaddr in each `rtm_addrs`
+/// slot; `net_route`'s macOS backend serializes both the IPv4 gateway
+/// and an `AF_LINK` sockaddr when both are passed, but the message
+/// header only declares three slots (`RTA_DST | RTA_GATEWAY |
+/// RTA_NETMASK`). The kernel then reads the `AF_LINK` at the
+/// `RTAX_NETMASK` position — junk netmask, and the route either gets
+/// silently dropped or installed with a garbage mask. The interface
+/// form (no gateway, `AF_LINK` consumed at the `RTAX_GATEWAY` slot) is
+/// exactly what `route add -net <cidr> -interface utun<N>` produces,
+/// and it's also what openvpn itself uses on macOS for its own local
+/// tun /25. Azure always pushes `route-gateway` = the tunnel peer
+/// (only reachable through the very iface we're installing the route
+/// on), so the gateway is redundant information for the kernel anyway.
+///
+/// Linux uses separate netlink attributes (`RTA_GATEWAY` + `RTA_OIF`)
+/// so passing both is harmless and we keep the gateway form to keep
+/// the route deterministic if the iface lookup ever races. Windows
+/// requires `InterfaceIndex` either way; the gateway is also
+/// accepted.
 fn build_route(net: &IpNet, gateway: IpAddr, ifindex: Option<u32>) -> Route {
-    let mut route = Route::new(net.network(), net.prefix_len()).with_gateway(gateway);
+    let mut route = Route::new(net.network(), net.prefix_len());
+    #[cfg(target_os = "macos")]
+    if ifindex.is_none() {
+        route = route.with_gateway(gateway);
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        route = route.with_gateway(gateway);
+    }
     if let Some(idx) = ifindex {
         route = route.with_ifindex(idx);
     }
@@ -558,5 +587,38 @@ mod tests {
         let (to_add, to_remove) = diff(&current, &desired);
         assert_eq!(to_add, vec![net("10.0.0.0/24")]);
         assert_eq!(to_remove, vec![net("10.0.0.0/24")]);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn build_route_macos_with_ifindex_drops_gateway() {
+        // On macOS, sending both gateway + ifindex through net_route
+        // makes the AF_LINK sockaddr land at the RTAX_NETMASK position
+        // and the route gets silently mis-installed. When we have an
+        // ifindex, the gateway must be omitted so the AF_LINK occupies
+        // the RTAX_GATEWAY slot.
+        let r = build_route(&net("10.0.0.0/24"), gw("10.0.8.1"), Some(7));
+        assert_eq!(r.gateway, None);
+        assert_eq!(r.ifindex, Some(7));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn build_route_macos_without_ifindex_keeps_gateway() {
+        // Fallback path: if the ifindex lookup failed (warn already
+        // logged), we still emit a gateway route. Better-than-nothing
+        // — the route may not land in the kernel, but the apply
+        // behavior is no worse than the pre-fix shape.
+        let r = build_route(&net("10.0.0.0/24"), gw("10.0.8.1"), None);
+        assert_eq!(r.gateway, Some(gw("10.0.8.1")));
+        assert_eq!(r.ifindex, None);
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    #[test]
+    fn build_route_non_macos_keeps_gateway_and_ifindex() {
+        let r = build_route(&net("10.0.0.0/24"), gw("10.0.8.1"), Some(7));
+        assert_eq!(r.gateway, Some(gw("10.0.8.1")));
+        assert_eq!(r.ifindex, Some(7));
     }
 }

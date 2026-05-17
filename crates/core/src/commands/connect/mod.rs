@@ -259,9 +259,9 @@ async fn attempt(
     // the tun device. Any routes we installed on the *previous* tun get
     // orphaned by the kernel when the interface goes away, and we never
     // see another PUSH_REPLY to retrigger an apply. Re-applying on every
-    // CONNECTED catches that case — the new tun is already up by the
-    // time CONNECTED fires (per docs/openvpn-gaps.md §6), so the routes
-    // land on the live interface.
+    // CONNECTED catches that case — with `--pull`, openvpn's lifecycle
+    // is PUSH_REPLY → tun open + ifconfig → STATE:CONNECTED, so the new
+    // tun is live by the time the event fires.
     let mut have_connected = false;
     let mut reneg_creds = RenegCreds::for_profile(profile);
     // Set inside the event loop to record why we broke out. None means

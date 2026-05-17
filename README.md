@@ -173,7 +173,6 @@ crates/
   xtask/           # release-engineering tool — tarball / MSI / formula publish
 packaging/         # launchd plist, systemd unit, .deb scripts, RPM manifest,
                    # Homebrew formula, WiX (MSI) source
-docs/              # OpenVPN coverage gaps, Graph/ARM notes, Windows plan
 ```
 
 Architectural decisions (also captured in PLAN.md):
