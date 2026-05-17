@@ -29,7 +29,7 @@ jobs:
     # produce a binary that apt rejects on Debian 12 with
     # "libc6 (>= 2.39) but 2.36-9+deb12u13 is to be installed".
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: x86_64-unknown-linux-gnu
@@ -68,7 +68,7 @@ jobs:
       sha256: ${{ steps.tarball.outputs.sha256 }}
       tarball_name: ${{ steps.tarball.outputs.tarball_name }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - uses: DeterminateSystems/nix-installer-action@main
       - uses: DeterminateSystems/magic-nix-cache-action@main
       - name: Build release tarball
@@ -122,7 +122,7 @@ jobs:
       sha256: ${{ steps.msi.outputs.sha256 }}
       msi_name: ${{ steps.msi.outputs.msi_name }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
         with:
@@ -182,7 +182,7 @@ jobs:
   build-openvpn:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - uses: DeterminateSystems/nix-installer-action@main
       - uses: DeterminateSystems/magic-nix-cache-action@main
       - name: Build static openvpn
@@ -210,7 +210,7 @@ jobs:
     # host's glibc version, and Debian 12 ships 2.36.
     runs-on: ubuntu-22.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
         with:
@@ -255,7 +255,7 @@ jobs:
     # on RHEL 9 (glibc 2.34) and Fedora's current stable.
     runs-on: ubuntu-22.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
         with:
@@ -328,7 +328,7 @@ jobs:
     if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
         with:
