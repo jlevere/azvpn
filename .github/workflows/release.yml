@@ -47,7 +47,7 @@ jobs:
       - run: cargo build --release --target x86_64-unknown-linux-gnu
       - name: Rename binary
         run: mv target/x86_64-unknown-linux-gnu/release/azvpn azvpn-linux-x86_64
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: azvpn-linux-x86_64
           path: azvpn-linux-x86_64
@@ -87,7 +87,7 @@ jobs:
             echo "sha256=${sha}"
             echo "tarball_name=${name}"
           } >> "$GITHUB_OUTPUT"
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: azvpn-macos-aarch64
           path: dist/azvpn-*-aarch64-apple-darwin.tar.gz
@@ -164,7 +164,7 @@ jobs:
         env:
           SIGN_FLAG: ${{ env.HAS_SIGNING == 'true' && '--sign' || '' }}
         run: cargo xtask release-windows $SIGN_FLAG --emit-ci-outputs
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: azvpn-msi-x86_64
           path: dist/azvpn-*-x86_64-windows.msi
@@ -195,7 +195,7 @@ jobs:
           chmod +x out/openvpn-azvpn-linux-x86_64
           file out/openvpn-azvpn-linux-x86_64
           ./out/openvpn-azvpn-linux-x86_64 --version || true
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: openvpn-azvpn-linux-x86_64
           path: out/openvpn-azvpn-linux-x86_64
@@ -239,7 +239,7 @@ jobs:
         run: cargo deb -p azvpn --no-build --output target/debian/
       - name: List produced .deb
         run: ls -la target/debian/
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: azvpn-deb-linux-x86_64
           path: target/debian/*.deb
@@ -284,7 +284,7 @@ jobs:
           cargo generate-rpm -p crates/cli --output target/generate-rpm/
       - name: List produced .rpm
         run: ls -la target/generate-rpm/
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: azvpn-rpm-linux-x86_64
           path: target/generate-rpm/*.rpm
