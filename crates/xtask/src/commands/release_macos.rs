@@ -20,7 +20,7 @@ use std::process::Command;
 
 use anyhow::{Context as _, Result, bail};
 
-use crate::util::{emit_ci_outputs, human_size, nix_build, sha256_hex, verify_tag_matches_version};
+use crate::util::{emit_ci_outputs, human_size, sha256_hex, verify_tag_matches_version};
 use crate::workspace;
 
 /// Single target we ship — Intel macs are out of scope per
@@ -80,16 +80,16 @@ pub fn run(args: Args) -> Result<()> {
     }
     fs::create_dir_all(stage.join("bin"))?;
     fs::create_dir_all(stage.join("libexec"))?;
+    fs::create_dir_all(stage.join("patches"))?;
 
     println!("==> building azvpn + azvpnd (release)");
     cargo_build_release(&root)?;
 
-    println!("==> building patched openvpn via nix");
-    let nix_link = dist.join("nix-openvpn");
-    nix_build(&root, ".#openvpn-azvpn", &nix_link)?;
-
-    println!("==> staging binaries");
-    let layout = tarball_layout(&root, &nix_link, &stage);
+    // No openvpn build here — the brew formula's `def install`
+    // compiles patched openvpn locally on the user's mac. We ship
+    // the patch file in the tarball so the formula can apply it.
+    println!("==> staging binaries + patch");
+    let layout = tarball_layout(&root, &dist, &stage);
     for entry in &layout {
         install_file(&entry.src, &entry.dst, entry.mode).with_context(|| {
             format!("install {} → {}", entry.src.display(), entry.dst.display())
@@ -159,8 +159,8 @@ impl StagedFile {
 /// come from `azvpn_core::layout` — same constants the
 /// `install-daemon` CLI uses to discover the binaries at runtime,
 /// so a rename only needs to land in one place.
-fn tarball_layout(root: &Path, nix_link: &Path, stage: &Path) -> Vec<StagedFile> {
-    use azvpn_core::layout::{BREW_DAEMON_REL, BREW_OPENVPN_REL};
+fn tarball_layout(root: &Path, _nix_link: &Path, stage: &Path) -> Vec<StagedFile> {
+    use azvpn_core::layout::BREW_DAEMON_REL;
 
     vec![
         StagedFile {
@@ -173,10 +173,16 @@ fn tarball_layout(root: &Path, nix_link: &Path, stage: &Path) -> Vec<StagedFile>
             dst: stage.join(BREW_DAEMON_REL),
             mode: 0o755,
         },
+        // openvpn is intentionally absent — the brew formula's `def
+        // install` compiles patched openvpn locally with mbedtls
+        // (~30s on M1). Cross-compiling C from Linux to darwin is
+        // structurally broken in nixpkgs; native macOS runners bill
+        // 10×. Ship the patch in the tarball so the formula can
+        // apply it.
         StagedFile {
-            src: nix_link.join("bin/openvpn"),
-            dst: stage.join(BREW_OPENVPN_REL),
-            mode: 0o755,
+            src: root.join("patches/openvpn-increase-user-pass-len.patch"),
+            dst: stage.join("patches/openvpn-increase-user-pass-len.patch"),
+            mode: 0o644,
         },
         StagedFile {
             src: root.join("LICENSE-MIT"),
@@ -286,11 +292,15 @@ mod tests {
     /// The formula installs:
     ///   bin.install     "bin/azvpn"
     ///   libexec.install "libexec/azvpnd"
-    ///   libexec.install "libexec/azvpn-openvpn"
     ///   pkgshare.install "LICENSE-MIT", "LICENSE-APACHE"
     ///   doc.install      "README.md"
-    /// Any drift between that list and our staged paths means
-    /// `brew install` blows up. This test pins them together.
+    ///
+    /// The formula compiles openvpn itself in `def install` (no
+    /// `libexec/azvpn-openvpn` from the tarball), but it reads our
+    /// `patches/openvpn-increase-user-pass-len.patch` to apply
+    /// USER_PASS_LEN bump — so that path is also pinned here.
+    /// Any drift between this list and the formula means `brew
+    /// install` blows up.
     #[test]
     fn layout_matches_formula_install_block() {
         let layout = fake_layout();
@@ -304,13 +314,10 @@ mod tests {
                     .to_string()
             })
             .collect();
-        // Required paths pinned against the formula's `install` block.
-        // The two `libexec/` entries route through `azvpn_core::layout`
-        // so a rename can't silently desync formula and tarball.
         for required in [
             "bin/azvpn",
             azvpn_core::layout::BREW_DAEMON_REL,
-            azvpn_core::layout::BREW_OPENVPN_REL,
+            "patches/openvpn-increase-user-pass-len.patch",
             "LICENSE-MIT",
             "LICENSE-APACHE",
             "README.md",
@@ -330,8 +337,8 @@ mod tests {
             .filter(|e| e.is_binary())
             .map(|e| e.dst.file_name().unwrap().to_string_lossy().into_owned())
             .collect();
-        // The strip loop must hit exactly these three; running `strip`
+        // The strip loop must hit exactly these two; running `strip`
         // on a text file is a hard error on some BSD strips.
-        assert_eq!(binaries, vec!["azvpn", "azvpnd", "azvpn-openvpn"]);
+        assert_eq!(binaries, vec!["azvpn", "azvpnd"]);
     }
 }

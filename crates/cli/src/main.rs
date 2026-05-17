@@ -237,7 +237,7 @@ async fn dispatch(command: Command, openvpn_verbose: bool) -> anyhow::Result<()>
         Command::Profile(ProfileCommand::List) => profile_cmd::list(),
         Command::Profile(ProfileCommand::Remove { name }) => profile_cmd::remove(&name)?,
         Command::Dns(DnsCommand::Lookup { host, via }) => {
-            dns::lookup(&host, via.as_deref()).await?
+            dns::lookup(&host, via.as_deref()).await?;
         }
         #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
         Command::InstallDaemon { daemon, openvpn } => {

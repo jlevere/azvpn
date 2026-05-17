@@ -14,10 +14,27 @@
 #                              formula on PATH; the daemon picks it up
 #                              from a relative `../libexec/` lookup)
 #
-# Tailscale's pattern: the daemon bootstrap is a CLI subcommand
-# (`sudo azvpn install-daemon`) that writes the launchd plist with
-# absolute paths to the freshly-installed binaries, then calls
-# `launchctl bootstrap system`. The formula never touches
+# Why we build openvpn from source here instead of vendoring a prebuilt
+# binary: cross-compiling openvpn from Linux to aarch64-apple-darwin is
+# structurally broken in nixpkgs today (apple-sdk propagate-inputs
+# infinite recursion; nixpkgs Hydra doesn't test that path; see
+# https://github.com/NixOS/nixpkgs/issues/273442). The fallback —
+# building openvpn natively on a macos-latest runner — bills 10× the
+# ubuntu rate. Compiling openvpn on the user's mac via brew at install
+# time takes ~30s on M1, comes pre-loaded with the C toolchain via
+# Xcode CLI tools, and costs us nothing in CI minutes. Mullvad's
+# posture is the same shape (build natively where you ship from).
+#
+# The USER_PASS_LEN patch is load-bearing for AAD: vanilla openvpn
+# truncates passwords at 128 bytes, AAD bearer tokens are ~2–3 KB JWTs,
+# and the gateway's TLS handshake fails opaquely with truncated input.
+# Patch is shipped in the release tarball under patches/ so this
+# formula is self-contained.
+#
+# Tailscale's pattern for the daemon: the bootstrap is a CLI
+# subcommand (`sudo azvpn install-daemon`) that writes the launchd
+# plist with absolute paths to the freshly-installed binaries, then
+# calls `launchctl bootstrap system`. The formula never touches
 # /Library/LaunchDaemons/ — `brew install`/`brew uninstall` only
 # manages cellar contents, and the user owns the launchd lifecycle.
 class Azvpn < Formula
@@ -26,21 +43,68 @@ class Azvpn < Formula
   license any_of: ["MIT", "Apache-2.0"]
 
   # ===== TEMPLATE FILL: replaced on every release by CI =====
-  # `scripts/release-macos.sh` prints these three values when it
-  # builds a fresh tarball.
+  # `cargo xtask release-macos` / `nix build .#azvpn-darwin-tarball`
+  # both produce a tarball with the matching version/sha256 baked into
+  # `dist/manifest.txt` for the publish-formula step to copy in.
   version "0.1.0"
   url "https://github.com/jlevere/azvpn/releases/download/v#{version}/azvpn-#{version}-aarch64-apple-darwin.tar.gz"
   sha256 "REPLACE_ME_WITH_AARCH64_SHA256"
   depends_on arch: :arm64
   # =========================================================
 
+  depends_on "pkg-config" => :build
+  # Patched openvpn links against these at runtime. mbedtls@3 because
+  # openvpn 2.6 supports mbedtls 2.x/3.x but not 4.x (major API
+  # rewrite); brew's default `mbedtls` formula is 4.x. lzo gives the
+  # legacy LZO compression openvpn defaults to, distinct from LZ4
+  # (which we --disable since Azure profiles don't push LZ4-compressed
+  # data).
+  depends_on "mbedtls@3"
+  depends_on "lzo"
+
+  # Upstream openvpn source — pinned to the same 2.6.x release the .deb
+  # pipeline builds against, so the macOS and Linux installs end up
+  # with the same wire-compatible openvpn binary.
+  resource "openvpn" do
+    url "https://swupdate.openvpn.net/community/releases/openvpn-2.6.19.tar.gz"
+    sha256 "13702526f687c18b2540c1a3f2e189187baaa65211edcf7ff6772fa69f0536cf"
+  end
+
   def install
+    # Rust binaries from our release tarball — cross-built on Linux
+    # via cargo-zigbuild + nix (see flake.nix). No compilation here.
     bin.install     "bin/azvpn"
     libexec.install "libexec/azvpnd"
-    libexec.install "libexec/azvpn-openvpn"
 
     pkgshare.install "LICENSE-MIT", "LICENSE-APACHE"
     doc.install      "README.md"
+
+    # Patched openvpn — compile from upstream source with our
+    # USER_PASS_LEN patch applied. ~30s on M1. The patch file ships
+    # in the release tarball at `patches/`.
+    patch_file = buildpath/"patches/openvpn-increase-user-pass-len.patch"
+    resource("openvpn").stage do
+      system "patch", "-p1", "-i", patch_file
+
+      mbedtls = Formula["mbedtls@3"]
+      lzo = Formula["lzo"]
+      ENV.append "PKG_CONFIG_PATH", "#{mbedtls.opt_lib}/pkgconfig:#{lzo.opt_lib}/pkgconfig"
+
+      system "./configure",
+             "--prefix=#{prefix}",
+             "--with-crypto-library=mbedtls",
+             "--disable-lz4",
+             "--disable-plugins",
+             "--disable-dependency-tracking",
+             "--disable-silent-rules"
+      system "make"
+
+      # Bypass `make install` — it would lay down man pages and
+      # sample configs we don't want a brew install to scatter. Pluck
+      # just the binary into our `libexec/` with the namespaced name
+      # the daemon's resolver looks for.
+      libexec.install "src/openvpn/openvpn" => "azvpn-openvpn"
+    end
   end
 
   def caveats
@@ -66,24 +130,18 @@ class Azvpn < Formula
     EOS
   end
 
-  # `brew uninstall --zap` deep-cleans everything we plant outside the
-  # cellar — the launchd plist, the daemon's system-state dir, log
-  # dir, and the runtime socket dir. The dedicated `uninstall-daemon`
-  # path (which talks to launchctl) still runs first via the caveats;
-  # zap is the safety net for "I already removed the brew cellar but
-  # forgot to uninstall-daemon."
-  zap trash: [
-    "/Library/LaunchDaemons/com.jlevere.azvpn.daemon.plist",
-    "/Library/Application Support/com.jlevere.azvpn",
-    "/Library/Logs/com.jlevere.azvpn",
-    "/var/run/azvpn",
-  ]
+  # No `zap` stanza — that's a cask-only directive. The deep-clean
+  # path is `sudo azvpn uninstall-daemon --purge` (already mentioned
+  # in caveats), which wipes the launchd plist, system-state dir,
+  # log dir, and runtime socket dir end-to-end.
 
   test do
     assert_match version.to_s, shell_output("#{bin}/azvpn --version")
     # `azvpn-openvpn --version` exits 1 even on success — openvpn returns
     # non-zero from --version for historical reasons. The output is what
     # we actually want to inspect.
-    assert_match "OpenVPN", shell_output("#{libexec}/azvpn-openvpn --version 2>&1", 1)
+    output = shell_output("#{libexec}/azvpn-openvpn --version 2>&1", 1)
+    assert_match "OpenVPN", output
+    assert_match "mbed TLS", output
   end
 end

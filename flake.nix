@@ -1,15 +1,6 @@
 {
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixpkgs-unstable";
-    # 25.05 stable pinned for darwin cross-compilation. Unstable
-    # nixpkgs has a recurring breakage in the apple-sdk pipeline
-    # (atf 0.23's autoconf trips "cannot run test program while
-    # cross-compiling" on the libiconv→apple-sdk chain). 25.05 is
-    # known-working for `pkgsCross.aarch64-darwin.openvpn`, and we
-    # don't gain anything by pulling openvpn-2.6.x from unstable.
-    # Stable only flows into the macOS cross derivation; the rest
-    # of the build tree stays on unstable for current toolchains.
-    nixpkgs-stable.url = "github:NixOS/nixpkgs/nixos-25.05";
     crane.url = "github:ipetkov/crane";
     rust-overlay = {
       url = "github:oxalica/rust-overlay";
@@ -18,21 +9,12 @@
     flake-utils.url = "github:numtide/flake-utils";
   };
 
-  outputs = { self, nixpkgs, nixpkgs-stable, crane, rust-overlay, flake-utils, ... }:
+  outputs = { self, nixpkgs, crane, rust-overlay, flake-utils, ... }:
     flake-utils.lib.eachDefaultSystem (system:
       let
         pkgs = import nixpkgs {
           inherit system;
           overlays = [ (import rust-overlay) ];
-        };
-
-        # `pkgsCross.aarch64-darwin` from nixpkgs 25.05 — the cross-
-        # stdenv is shared across packages built for darwin, so we
-        # construct it once and pull `openvpn` (and any future darwin
-        # cross targets) out of it.
-        pkgsDarwinCross = import nixpkgs-stable {
-          inherit system;
-          crossSystem.config = "aarch64-apple-darwin";
         };
 
         rustToolchain = pkgs.rust-bin.fromRustupToolchainFile ./rust-toolchain.toml;
@@ -74,22 +56,14 @@
             ];
           });
 
-        # Cross-compiled patched openvpn for aarch64-apple-darwin, used
-        # by the brew tarball assembly so the macOS release artifact can
-        # be produced on a Linux runner — `macos-latest` GitHub runners
-        # bill 10× the rate and a private-ish work-VPN project doesn't
-        # justify that surcharge on every tag push.
-        #
-        # `nixpkgs-stable` (25.05) is pinned for this single derivation
-        # because unstable's apple-sdk pipeline is currently broken on a
-        # transitive autoconf dep (atf 0.23). The Rust cross via crane +
-        # cargo-zigbuild doesn't touch the apple-sdk chain so it stays
-        # on unstable; only the C-toolchain-using paths need stable.
-        openvpn-azvpn-darwin-cross = pkgsDarwinCross.openvpn.overrideAttrs (old: {
-          patches = (old.patches or [ ]) ++ [
-            ./patches/openvpn-increase-user-pass-len.patch
-          ];
-        });
+        # No darwin cross-compile for openvpn: nixpkgs cross-darwin from
+        # Linux is structurally broken (apple-sdk propagate-inputs
+        # infinite recursion, cctools meta.platforms gate; see
+        # https://github.com/NixOS/nixpkgs/issues/273442 + #354146).
+        # We compile the patched openvpn locally via the Homebrew
+        # formula's `def install` instead — `mbedtls@3` + ~30s build on
+        # the user's mac, zero macOS CI cost. The Linux runner ships
+        # only the Rust binaries cross-built via cargo-zigbuild.
 
         # Cross-compiled openvpn.exe for Windows x86_64, our patches
         # applied. Bundled into the W7 MSI alongside wintun.dll. Same
@@ -394,23 +368,26 @@
           cargoArtifacts = azvpn-darwin-cross-deps;
         });
 
-        # Final brew tarball — assembles the Rust binaries (cross-built
-        # via zigbuild) and the patched openvpn (cross-built via
-        # pkgsCross.aarch64-darwin from nixpkgs-stable) into the layout
-        # the Homebrew formula's `def install` expects:
+        # Final brew tarball — Rust binaries cross-built on Linux via
+        # cargo-zigbuild, plus the openvpn `USER_PASS_LEN` patch shipped
+        # in `patches/` for the formula to apply during its local
+        # openvpn build. Layout:
         #
         #   azvpn-<v>-aarch64-apple-darwin/
         #     bin/azvpn
         #     libexec/azvpnd
-        #     libexec/azvpn-openvpn
+        #     patches/openvpn-increase-user-pass-len.patch
         #     LICENSE-MIT, LICENSE-APACHE, README.md
         #
-        # Produces the .tar.gz directly so release.yml only has to
-        # upload it. SHA-256 lands in a sibling .sha256 file the
-        # publish-formula job consumes.
+        # Note `libexec/azvpn-openvpn` is intentionally absent — the
+        # brew formula's `def install` compiles openvpn 2.6.19 +
+        # patches/ on the user's mac (~30s on M1) and drops the binary
+        # there. Cross-compiling C from Linux to darwin is broken in
+        # nixpkgs (see `azvpn-darwin-cross` comment above for the
+        # macOS-runner cost rationale).
         #
-        # `pname` matches the xtask's release-macos output so brew
-        # formula expectations stay one source of truth.
+        # Produces the .tar.gz directly so release.yml only has to
+        # upload it.
         azvpn-darwin-tarball =
           let
             version = "0.1.0";
@@ -419,11 +396,13 @@
           pkgs.runCommandLocal "${stageDir}.tar.gz" {
             nativeBuildInputs = [ pkgs.gnutar pkgs.gzip pkgs.coreutils ];
           } ''
-            mkdir -p ${stageDir}/bin ${stageDir}/libexec
+            mkdir -p ${stageDir}/bin ${stageDir}/libexec ${stageDir}/patches
 
             install -m 0755 ${azvpn-darwin-cross}/bin/azvpn ${stageDir}/bin/azvpn
             install -m 0755 ${azvpn-darwin-cross}/bin/azvpnd ${stageDir}/libexec/azvpnd
-            install -m 0755 ${openvpn-azvpn-darwin-cross}/bin/openvpn ${stageDir}/libexec/azvpn-openvpn
+
+            install -m 0644 ${./patches/openvpn-increase-user-pass-len.patch} \
+              ${stageDir}/patches/openvpn-increase-user-pass-len.patch
 
             install -m 0644 ${./LICENSE-MIT} ${stageDir}/LICENSE-MIT
             install -m 0644 ${./LICENSE-APACHE} ${stageDir}/LICENSE-APACHE
@@ -496,7 +475,7 @@
           default = azvpn;
           inherit azvpn openvpn-azvpn openvpn-azvpn-win64 openvpn-azvpn-win64-bundle
                   azvpn-windows-cross azvpn-windows-msi
-                  azvpn-darwin-cross openvpn-azvpn-darwin-cross
+                  azvpn-darwin-cross
                   azvpn-darwin-tarball;
         } // pkgs.lib.optionalAttrs pkgs.stdenv.isLinux {
           inherit openvpn-azvpn-static;
