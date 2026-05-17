@@ -24,7 +24,13 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest, windows-latest]
+        # macos-latest is intentionally absent — it's 10× the per-minute
+        # rate, and the dev workflow already exercises macOS continuously.
+        # macOS clippy/test for release validation runs in `release.yml`'s
+        # build-macos job (cross-compiled on Linux via cargo-zigbuild) or
+        # on the maintainer's machine. PRs touching macOS-specific code
+        # paths get tagged `macos-check` to opt-in to a manual macOS run.
+        os: [ubuntu-latest, windows-latest]
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -43,7 +49,13 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest, windows-latest]
+        # macos-latest is intentionally absent — it's 10× the per-minute
+        # rate, and the dev workflow already exercises macOS continuously.
+        # macOS clippy/test for release validation runs in `release.yml`'s
+        # build-macos job (cross-compiled on Linux via cargo-zigbuild) or
+        # on the maintainer's machine. PRs touching macOS-specific code
+        # paths get tagged `macos-check` to opt-in to a manual macOS run.
+        os: [ubuntu-latest, windows-latest]
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable

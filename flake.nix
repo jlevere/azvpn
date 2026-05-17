@@ -303,6 +303,62 @@
           cargoArtifacts = azvpn-windows-cross-deps;
         });
 
+        # Cross-compile the workspace for aarch64-apple-darwin from a
+        # Linux host via cargo-zigbuild. zig ships SDK shims (libSystem
+        # tbd files + headers) so we don't need Apple's redistribution-
+        # restricted SDK in the nix store. Works because our macOS
+        # tunnel crate is pure Rust filesystem I/O — no
+        # `system-configuration`, no `core-foundation`, no framework
+        # links. The keyring backend is file-only on macOS this
+        # session, so no `Security.framework` either.
+        #
+        # Motivation: macos-latest runners bill 10× ubuntu rate. The
+        # whole point of brew/.deb/.msi delivery is end users never
+        # build, so CI just has to produce the artifacts — no need to
+        # run them. The dev machine catches macOS-specific runtime
+        # regressions.
+        darwinCrossArgs = commonArgs // {
+          # zig provides the darwin shim; we don't need nixpkgs's
+          # darwin SDK in the picture.
+          nativeBuildInputs = [ pkgs.zig pkgs.cargo-zigbuild ];
+          buildInputs = [ ];
+
+          CARGO_BUILD_TARGET = "aarch64-apple-darwin";
+          # crane wraps `cargo build`; replace the command so deps
+          # also use zigbuild's linker. The `HOME` redirect is
+          # because `cargo-zigbuild` writes a symlink-shim cache to
+          # `dirs::cache_dir()` (`~/Library/Caches/` on darwin,
+          # `~/.cache/` on linux) on first invocation — nix's sandbox
+          # has `$HOME=/homeless-shelter` read-only, so we point it at
+          # the build's own writable workdir.
+          preBuild = ''
+            export HOME=$TMPDIR
+            export ZIG_GLOBAL_CACHE_DIR=$TMPDIR/zig-cache
+          '';
+          cargoBuildCommand =
+            "cargo zigbuild --release --target aarch64-apple-darwin";
+          cargoCheckCommand =
+            "cargo zigbuild --release --target aarch64-apple-darwin --tests";
+
+          # Can't execute aarch64-apple-darwin Mach-O on a Linux host
+          # without rosetta/wine equivalents (there are none worth
+          # using). Maintainer's dev mac runs the test suite.
+          doCheck = false;
+
+          # No explicit `CC_*` / `CXX_*` overrides — `cargo-zigbuild`
+          # installs PATH shims (`cc`, `c++`, `ar`, `ranlib`) that
+          # re-exec into `zig cc --target=…`. Setting the env-var form
+          # would re-enter cargo-zigbuild's frontend and confuse cc-rs.
+          # Vendored-C deps (ring, libz-sys) pick up the shims via PATH.
+          pname = "azvpn-darwin-cross";
+        };
+
+        azvpn-darwin-cross-deps = craneLib.buildDepsOnly darwinCrossArgs;
+
+        azvpn-darwin-cross = craneLib.buildPackage (darwinCrossArgs // {
+          cargoArtifacts = azvpn-darwin-cross-deps;
+        });
+
         # Linux-native MSI build driven by `wixl` from `msitools`.
         # No Wine, no .NET, no Windows host — `wixl` is a pure C
         # implementation of the WiX 3 compiler/linker that emits
@@ -366,7 +422,8 @@
         packages = {
           default = azvpn;
           inherit azvpn openvpn-azvpn openvpn-azvpn-win64 openvpn-azvpn-win64-bundle
-                  azvpn-windows-cross azvpn-windows-msi;
+                  azvpn-windows-cross azvpn-windows-msi
+                  azvpn-darwin-cross;
         } // pkgs.lib.optionalAttrs pkgs.stdenv.isLinux {
           inherit openvpn-azvpn-static;
         };
