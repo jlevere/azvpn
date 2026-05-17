@@ -88,7 +88,7 @@ pub fn run_as_service() -> std::io::Result<()> {
 /// Skipping the SCM path: services that aren't admin would fail at
 /// the first privileged syscall anyway, but the failure mode
 /// (cryptic `Access is denied` from a deep call site) is worse than
-/// a one-line boot warning. Matches `windows-plan.md` §2.8.
+/// a one-line boot warning.
 #[allow(unsafe_code)]
 pub fn is_running_as_admin() -> bool {
     use windows_sys::Win32::Security::{

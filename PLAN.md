@@ -5,18 +5,10 @@ deliberately not next." Replaces the old PLAN.md (inception-era
 milestone doc) and `docs/backlog.md` (deferred-work register), which
 both drifted out of sync with the code.
 
-Deep-dive companions, kept separate so this doc stays read-in-one-sitting:
+Deep-dive companion, kept separate so this doc stays read-in-one-sitting:
 - [`docs/openvpn-gaps.md`](docs/openvpn-gaps.md) — per-directive
   OpenVPN coverage list. Most P0/P1 items are now shipped; treat as
   the working record for the long tail.
-- [`docs/graph-and-arm-notes.md`](docs/graph-and-arm-notes.md) — Graph
-  scope-ceiling investigation and the open ARM-query thread.
-- [`docs/refactor-plan.md`](docs/refactor-plan.md) — historical record
-  of the POC→base refactor. The refactor shipped; doc is preserved as
-  the postmortem.
-- [`docs/windows-plan.md`](docs/windows-plan.md) — concrete
-  implementation plan for the Windows track (C). Owns the build
-  target, design decisions, phased work items, and crate inventory.
 
 ---
 
@@ -118,8 +110,9 @@ Architectural decisions that aren't up for debate:
   is why platform DNS/routing integration is load-bearing for us —
   contrast with tailscale-rs, which dodges system DNS by being a
   userspace embedded library.
-- **Per-crate error enums, single CLI handler.** Shipped via the
-  refactor; see `docs/refactor-plan.md`.
+- **Per-crate error enums, single CLI handler.** Each library crate
+  exposes its own typed `Error`; the CLI's `Error` wraps them via
+  `#[from]` and renders a unified message.
 
 DNS-per-platform: `SCDynamicStore` supplemental match domains on
 macOS, systemd-resolved D-Bus (`SetLinkDomains` + `SetLinkDNS`) on

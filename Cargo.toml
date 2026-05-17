@@ -124,8 +124,7 @@ if-addrs = "0.13"
 # `windows-service` — Mullvad's SCM wrapper (dual MIT/Apache-2.0).
 # `service_dispatcher`, `define_windows_service!`,
 # `service_control_handler`, `ServiceManager`. Saves ~200 LOC of
-# windows-sys::Services boilerplate per app. See docs/windows-plan.md
-# §2.4.
+# windows-sys::Services boilerplate per app.
 windows-service = "0.8"
 # Raw Win32 FFI. Pulled in for: SCM dependencies (`Win32_System_Services`),
 # LSA logon enumeration in the hibernation detector

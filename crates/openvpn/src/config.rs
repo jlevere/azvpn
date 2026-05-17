@@ -123,7 +123,7 @@ impl<'a> ConfigBuilder<'a> {
         // in the MSI and pin to it explicitly — `tap-windows6` would
         // require the legacy TAP driver we don't ship. wintun.dll
         // must live next to openvpn.exe (the bundle layout puts both
-        // at <install>\openvpn\). See docs/windows-plan.md §2.1.
+        // at <install>\openvpn\).
         #[cfg(target_os = "windows")]
         writeln!(config, "windows-driver wintun").unwrap();
         writeln!(config, "proto {proto}").unwrap();

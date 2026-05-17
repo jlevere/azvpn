@@ -3,8 +3,8 @@
 //! members of the configured group can connect.
 //!
 //! Unix-only. The Windows equivalent is a named-pipe transport in
-//! `azvpn-ipc::transport::windows` (W1.3 in `docs/windows-plan.md`);
-//! the daemon's Windows entry uses that instead of this module.
+//! `azvpn-ipc::transport::windows`; the daemon's Windows entry uses
+//! that instead of this module.
 
 #![cfg(unix)]
 

@@ -106,5 +106,3 @@ The CLI binary (`crates/cli`) is a thin wrapper.
   also the one with the original bug we're fixing.
 - The user runs Determinate Systems Nix; the project must build via flake.
 - No global pip / global Python; use uv if any Python tooling appears.
-- pnpm or bun for any JS/TS (unlikely in this project, but if any tooling
-  needs it).
