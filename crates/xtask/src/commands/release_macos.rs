@@ -1,11 +1,13 @@
 //! `cargo xtask release-macos` — build the macOS release tarball.
 //!
-//! Replaces `scripts/release-macos.sh`. Same shape: `cargo build` for
-//! the two Rust binaries, `nix build .#openvpn-azvpn` for the patched
-//! openvpn (`USER_PASS_LEN` lifted to 4096 so AAD bearer tokens don't
-//! truncate), stage everything under `bin/` + `libexec/` matching
-//! what the Homebrew formula's `install` block expects, tar + gzip,
-//! print the sha256 ready for `publish-formula`.
+//! Replaces `scripts/release-macos.sh`. Shape: `cargo build` for the
+//! two Rust binaries (host-native on a maintainer's mac; CI uses the
+//! flake's `azvpn-darwin-tarball` cross-build instead), stage under
+//! `bin/` + `libexec/` matching what the Homebrew formula's `install`
+//! block expects, tar + gzip, print the sha256 ready for
+//! `publish-formula`. The patched openvpn is built locally by the
+//! brew formula's `def install` on the user's mac — we just ship the
+//! patch file in `patches/` so the formula can apply it.
 //!
 //! Why Rust over shell: the layout constants live in
 //! [`crate::workspace`] and the formula's expected paths in
@@ -89,7 +91,7 @@ pub fn run(args: Args) -> Result<()> {
     // compiles patched openvpn locally on the user's mac. We ship
     // the patch file in the tarball so the formula can apply it.
     println!("==> staging binaries + patch");
-    let layout = tarball_layout(&root, &dist, &stage);
+    let layout = tarball_layout(&root, &stage);
     for entry in &layout {
         install_file(&entry.src, &entry.dst, entry.mode).with_context(|| {
             format!("install {} → {}", entry.src.display(), entry.dst.display())
@@ -159,8 +161,8 @@ impl StagedFile {
 /// come from `azvpn_core::layout` — same constants the
 /// `install-daemon` CLI uses to discover the binaries at runtime,
 /// so a rename only needs to land in one place.
-fn tarball_layout(root: &Path, _nix_link: &Path, stage: &Path) -> Vec<StagedFile> {
-    use azvpn_core::layout::BREW_DAEMON_REL;
+fn tarball_layout(root: &Path, stage: &Path) -> Vec<StagedFile> {
+    use azvpn_core::layout::{BREW_DAEMON_REL, OPENVPN_PATCH_REL};
 
     vec![
         StagedFile {
@@ -180,8 +182,8 @@ fn tarball_layout(root: &Path, _nix_link: &Path, stage: &Path) -> Vec<StagedFile
         // 10×. Ship the patch in the tarball so the formula can
         // apply it.
         StagedFile {
-            src: root.join("patches/openvpn-increase-user-pass-len.patch"),
-            dst: stage.join("patches/openvpn-increase-user-pass-len.patch"),
+            src: root.join(OPENVPN_PATCH_REL),
+            dst: stage.join(OPENVPN_PATCH_REL),
             mode: 0o644,
         },
         StagedFile {
@@ -284,7 +286,6 @@ mod tests {
     fn fake_layout() -> Vec<StagedFile> {
         tarball_layout(
             Path::new("/ws"),
-            Path::new("/ws/dist/nix-openvpn"),
             Path::new("/ws/dist/azvpn-0.0.0-aarch64-apple-darwin"),
         )
     }
@@ -317,7 +318,7 @@ mod tests {
         for required in [
             "bin/azvpn",
             azvpn_core::layout::BREW_DAEMON_REL,
-            "patches/openvpn-increase-user-pass-len.patch",
+            azvpn_core::layout::OPENVPN_PATCH_REL,
             "LICENSE-MIT",
             "LICENSE-APACHE",
             "README.md",

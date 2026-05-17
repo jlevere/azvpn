@@ -81,15 +81,12 @@ class Azvpn < Formula
 
     # Patched openvpn — compile from upstream source with our
     # USER_PASS_LEN patch applied. ~30s on M1. The patch file ships
-    # in the release tarball at `patches/`.
+    # in the release tarball at `patches/`. Homebrew's superenv
+    # auto-injects `-I/-L` flags and `PKG_CONFIG_PATH` for the
+    # `depends_on` deps above, so no manual env munging here.
     patch_file = buildpath/"patches/openvpn-increase-user-pass-len.patch"
     resource("openvpn").stage do
       system "patch", "-p1", "-i", patch_file
-
-      mbedtls = Formula["mbedtls@3"]
-      lzo = Formula["lzo"]
-      ENV.append "PKG_CONFIG_PATH", "#{mbedtls.opt_lib}/pkgconfig:#{lzo.opt_lib}/pkgconfig"
-
       system "./configure",
              "--prefix=#{prefix}",
              "--with-crypto-library=mbedtls",
@@ -109,6 +106,10 @@ class Azvpn < Formula
 
   def caveats
     <<~EOS
+      First install compiles the patched openvpn from source
+      (~30s on Apple Silicon). Subsequent upgrades reuse the cellar
+      unless the openvpn version pin changes.
+
       Next:
         1. sudo azvpn install-daemon
            (one-time: writes the launchd plist and starts the daemon;

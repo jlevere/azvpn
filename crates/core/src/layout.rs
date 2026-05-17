@@ -35,6 +35,14 @@ pub const BREW_OPENVPN_REL: &str = "libexec/azvpn-openvpn";
 /// Brew layout: daemon binary at `<prefix>/libexec/azvpnd`.
 pub const BREW_DAEMON_REL: &str = "libexec/azvpnd";
 
+/// The `USER_PASS_LEN`-bumping openvpn patch, relative path inside
+/// our source tree AND inside the brew release tarball. The flake's
+/// `azvpn-darwin-tarball` and the xtask's `release-macos` both stage
+/// the patch at this path; the Homebrew formula's `def install`
+/// looks for it at `buildpath/this`. Single source of truth so a
+/// rename of the patch file doesn't silently break the formula.
+pub const OPENVPN_PATCH_REL: &str = "patches/openvpn-increase-user-pass-len.patch";
+
 // ─── Debian / RPM — absolute, matches cargo-deb assets ─────────────
 
 /// Daemon binary, package-installed. cargo-deb places executables
