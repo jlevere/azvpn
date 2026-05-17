@@ -1,10 +1,14 @@
 [toolchain]
 channel = "stable"
 components = ["rustfmt", "clippy", "rust-analyzer"]
-# `x86_64-pc-windows-gnu` is needed by the cross-compile path in
-# `flake.nix` — `nix build .#azvpn-windows-cross` (and the MSI
-# derivation that depends on it). On non-Windows hosts the
-# toolchain pulls in the mingw target rust-std automatically when
-# this is listed. Adding it here is harmless on Windows/Linux
-# native builds (the target just sits unused).
-targets = ["x86_64-pc-windows-gnu"]
+# Cross-compile targets pulled into the toolchain by
+# `pkgs.rust-bin.fromRustupToolchainFile` (the rust-std for each
+# triple lands in the nix-built toolchain). Required by the
+# Linux-hosted cross-build derivations in `flake.nix`:
+#   - `x86_64-pc-windows-gnu`  → `nix build .#azvpn-windows-cross`
+#                                 (and the MSI derivation built on it)
+#   - `aarch64-apple-darwin`   → `nix build .#azvpn-darwin-cross`
+#                                 (and `.#azvpn-darwin-tarball`)
+# Listing extra targets is a no-op on native builds — the
+# unused rust-std just sits in the toolchain.
+targets = ["x86_64-pc-windows-gnu", "aarch64-apple-darwin"]

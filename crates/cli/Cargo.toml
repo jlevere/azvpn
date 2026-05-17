@@ -161,7 +161,15 @@ windows-sys = { workspace = true, features = [
 ] }
 
 [build-dependencies]
-shadow-rs = { version = "1", default-features = false, features = ["build", "git2"] }
+# `git2` feature is intentionally NOT enabled. shadow-rs would pull in
+# `libgit2-sys` to read git metadata; libgit2-sys's vendored C breaks
+# against the newer mingw_w64-pthreads in nixpkgs during the Windows
+# cross-build (`pthread_mutex_timedlock64` signature mismatch). Without
+# `git2`, shadow-rs invokes the `git` binary as a subprocess at build
+# time instead — same metadata, no C dep. Build-time shell-outs don't
+# violate the runtime no-shelling-out rule, and `git` is on every
+# runner image and in the flake's devShell.
+shadow-rs = { version = "1", default-features = false, features = ["build"] }
 
 [lints]
 workspace = true
