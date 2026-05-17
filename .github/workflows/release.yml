@@ -301,6 +301,13 @@ jobs:
         with:
           path: artifacts
           merge-multiple: true
+      # Drop the intermediate static openvpn — it's used internally by
+      # build-deb / build-rpm (which already bundle a copy at
+      # `/usr/libexec/azvpn/openvpn`), not a user-facing artifact.
+      # Shipping it to the release listing just confuses readers
+      # ("what's this raw openvpn binary doing here?").
+      - name: Strip intermediate build artifacts from release set
+        run: rm -f artifacts/openvpn-azvpn-linux-x86_64
       - uses: softprops/action-gh-release@v2
         with:
           files: artifacts/*
@@ -324,7 +331,9 @@ jobs:
   # `needs: release` so we don't push a formula pointing at a tarball
   # URL that doesn't exist yet.
   publish-formula:
-    needs: [build-macos, release]
+    # `release` already transitively needs `build-macos`; listing
+    # both would be redundant.
+    needs: release
     if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     steps:

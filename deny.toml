@@ -36,6 +36,12 @@ allow = [
     # CDLA-Permissive-2.0: webpki-roots (via hyper-rustls). Permissive
     # data license used by Mozilla's bundled CA list.
     "CDLA-Permissive-2.0",
+    # Zlib: const_format, foldhash (hashbrown 0.15 hasher), konst,
+    # konst_macro_rules, and a handful of multi-licensed crates. OSI
+    # approved (https://opensource.org/license/zlib), permissive,
+    # equivalent in effect to MIT/ISC — attribution-only with a
+    # "don't claim you wrote it" rider.
+    "Zlib",
 ]
 confidence-threshold = 0.93
 

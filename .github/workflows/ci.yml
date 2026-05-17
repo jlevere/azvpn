@@ -5,6 +5,13 @@ on:
     branches: [main]
   pull_request:
 
+# Cancel earlier in-flight CI runs for the same ref when a new push or
+# PR update lands. Saves minutes on rapid-fire pushes; the latest
+# commit is the only one whose result matters.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 env:
   CARGO_TERM_COLOR: always
   RUSTFLAGS: -Dwarnings

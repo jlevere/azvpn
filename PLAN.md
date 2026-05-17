@@ -62,7 +62,7 @@ official client gets wrong.
 | CI matrix | green | green | green |
 
 Distribution targets: `aarch64-apple-darwin`, `x86_64-linux`,
-`aarch64-linux`, `x86_64-pc-windows-msvc`. No macOS Intel.
+`x86_64-pc-windows-msvc`. No macOS Intel and no aarch64-linux.
 
 ---
 

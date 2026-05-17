@@ -328,11 +328,22 @@
         # regressions.
         darwinCrossArgs = commonArgs // {
           # zig provides the darwin shim; we don't need nixpkgs's
-          # darwin SDK in the picture.
-          nativeBuildInputs = [ pkgs.zig pkgs.cargo-zigbuild ];
+          # darwin SDK in the picture. `libclang` is needed by
+          # `net-route`'s build.rs (it runs `bindgen` against macOS
+          # PF_ROUTE headers when `CARGO_CFG_TARGET_OS == macos`,
+          # which holds even when cross-compiling). The
+          # `LIBCLANG_PATH` env var below points `bindgen` at the
+          # right `libclang.so` — without it, the build panics with
+          # "Unable to find libclang".
+          nativeBuildInputs = [
+            pkgs.zig
+            pkgs.cargo-zigbuild
+            pkgs.libclang.lib
+          ];
           buildInputs = [ ];
 
           CARGO_BUILD_TARGET = "aarch64-apple-darwin";
+          LIBCLANG_PATH = "${pkgs.libclang.lib}/lib";
           # crane wraps `cargo build`; replace the command so deps
           # also use zigbuild's linker. The `HOME` redirect is
           # because `cargo-zigbuild` writes a symlink-shim cache to
