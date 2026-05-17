@@ -82,17 +82,16 @@ The CLI binary (`crates/cli`) is a thin wrapper.
 - Profile XML schema reference: the Microsoft docs at
   <https://learn.microsoft.com/en-us/azure/vpn-gateway/azure-vpn-client-optional-configurations>.
   Same schema across VPN Gateway and Virtual WAN.
-- Real working profile to test against: the user has a vWAN P2S gateway with
-  AAD auth at `wan.<your-vwan-id>.vpn.azure.com`. Profile XML
-  lives at `~/Library/Containers/com.microsoft.AzureVpnMac/Data/Library/
+- Profile XML location on macOS (Microsoft's official client writes here):
+  `~/Library/Containers/com.microsoft.AzureVpnMac/Data/Library/
   Application Support/com.microsoft.AzureVpnMac/*.AzureVpnProfile.xml`.
-- Decompiled reference: full Ghidra decomp of the Microsoft macOS tunnel
-  extension lives at `/tmp/azurevpn-ghidra/output/` (588 functions, primary
-  + OpenVPN-layer). Useful when verifying our wire format matches the
-  official client's. Re-runnable via the Ghidra setup in that dir.
-- Related Linear ticket: **internal-ticket** — the original split-horizon DNS issue.
-  This project is one of two paths to unblock it; the other is waiting on
-  Microsoft.
+  Download a profile from your Virtual Network Gateway → Point-to-site
+  configuration → "Download VPN client" if you don't already have one.
+- For protocol-level reference, decompiling the Microsoft macOS tunnel
+  extension with Ghidra is straightforward — the binary lives inside
+  `Azure VPN Client.app/Contents/PlugIns/PacketTunnel.appex/Contents/
+  MacOS/PacketTunnel`. Useful for verifying our wire format matches
+  the official client's during compatibility work.
 
 ## Commit style
 

@@ -294,11 +294,12 @@ impl RouteManager {
         // via a non-tunnel route — the kernel's longest-prefix-match
         // will resolve same-length CIDRs in favor of the existing
         // entry (link routes are protocol=kernel, ours are
-        // protocol=static, kernel wins the tiebreak). This is the bug
-        // we hit on the the lab VM: profile pushed 10.1.10.0/24, the VM
-        // was on 10.1.10.0/24, the LAN link route silently won, and
-        // we had no idea until tcpdump told us. Best-effort — a
-        // failure to enumerate kernel routes shouldn't block apply.
+        // protocol=static, kernel wins the tiebreak). Common failure
+        // mode: the VPN profile pushes a /24 that overlaps the host's
+        // existing LAN CIDR; the LAN link route silently wins, and the
+        // only diagnostic is "tunnel up but nothing reachable through
+        // it." Best-effort — a failure to enumerate kernel routes
+        // shouldn't block apply.
         warn_on_lan_overlap(&self.handle, desired, gateway).await;
 
         let desired_map: HashMap<IpNet, IpAddr> =

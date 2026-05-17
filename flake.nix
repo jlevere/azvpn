@@ -296,9 +296,9 @@
           CARGO_TARGET_X86_64_PC_WINDOWS_GNU_RUSTFLAGS =
             "-L native=${mingwPkgs.windows.pthreads}/lib";
 
-          # Can't execute *.exe on darwin / linux without wine, and we
-          # are explicitly not using wine. The MSI smoke test on
-          # win-test-vm exercises the binaries.
+          # Can't execute *.exe on darwin / linux without wine, and
+          # we are explicitly not using wine. A downstream MSI smoke
+          # test against a real Windows host exercises the binaries.
           doCheck = false;
 
           # crane defaults the artifact name from `pname`; making it

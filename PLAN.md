@@ -16,8 +16,7 @@ Deep-dive companions, kept separate so this doc stays read-in-one-sitting:
   the postmortem.
 - [`docs/windows-plan.md`](docs/windows-plan.md) — concrete
   implementation plan for the Windows track (C). Owns the build
-  target, design decisions, phased work items, crate inventory, and
-  the win-test-vm test loop.
+  target, design decisions, phased work items, and crate inventory.
 
 ---
 
@@ -216,7 +215,7 @@ What the official client does that we don't yet:
 
 ### C. Windows tunnel
 
-*Shipped (merged in `5cb8985`, exercised live on win-test-vm).*
+*Shipped (merged in `5cb8985`, exercised live on a Windows Server 2025 test box).*
 Track preserved here as a record of what landed and where; the open
 Windows-shaped polish lives in tracks A (push-directive tail), F
 (set-and-forget), G (production hardening).
@@ -256,10 +255,10 @@ What remains Windows-shaped, in their natural homes:
 - **B.1 Tier B / B.3** — cert-store-by-thumbprint and broker auth
   live in Track B alongside their macOS counterparts.
 
-Acceptance criteria verified on win-test-vm: tunnel up,
-`Get-DnsClientNrptPolicy` shows expected entries, `sc.exe stop
-azvpnd` cleans up routes + NRPT entries, suspend/resume keeps the
-tunnel healthy.
+Acceptance criteria verified end-to-end on a Windows Server 2025 box:
+tunnel up, `Get-DnsClientNrptPolicy` shows expected entries, `sc.exe
+stop azvpnd` cleans up routes + NRPT entries, suspend/resume keeps
+the tunnel healthy.
 
 ### D. Hygiene & test discipline (cribbed from tailscale-rs survey)
 
@@ -796,9 +795,7 @@ G.1 is shipped (2026-05-16). The remaining three, in order:
     — self-update via native package manager. F.6.
   - `cmd/tailscale/cli/ffcomplete/scripts.go` — shell completion
     generation. F.7.
-- Decompiled official client (Ghidra): `/tmp/azurevpn-ghidra/output/`
-  (588 functions; primary + OpenVPN layer).
-- Original Microsoft tunnel extension under study:
-  `/Applications/Azure VPN Client.app/Contents/PlugIns/MacTunnelExtension.appex/Contents/MacOS/MacTunnelExtension`
-- Linear ticket this project unblocks: internal-ticket (split-horizon DNS
-  on macOS).
+- Original Microsoft tunnel extension under study (decompilable with
+  Ghidra for protocol-level reference): `/Applications/Azure VPN
+  Client.app/Contents/PlugIns/MacTunnelExtension.appex/Contents/MacOS/
+  MacTunnelExtension`

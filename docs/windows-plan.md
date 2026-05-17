@@ -495,7 +495,7 @@ Notably **not** depending on:
 domain `corp.example.com`) running on the the lab Proxmox host at
 `<proxmox-host>` (Tailscale node `lab-bastion` /
 `<lab-bastion-tsip>`). It lives on the the lab internal range
-`10.1.10.0/24` at `<win-test-ip>`, which lab-bastion advertises as a
+`10.0.0.0/24` at `<win-test-ip>`, which lab-bastion advertises as a
 Tailscale subnet route.
 
 ### SSH access
@@ -511,7 +511,7 @@ ssh -J lab-bastion localuser@<win-test-ip>
 - `localuser` is a member of `BUILTIN\Administrators` on the
   box; our SSH pubkey is already in its `authorized_keys` (via
   the lab standard provisioning). No password needed.
-- A `whoami` returns `jackson\localuser` — the lab joins it to the
+- A `whoami` returns `corp\testuser` — the lab joins it to the
   `corp.example.com` AD domain at provisioning time.
 - The SSH session is **already elevated** —
   `whoami /groups` reports `Mandatory Label\High Mandatory
@@ -527,7 +527,7 @@ Known wart in `~/.ssh/config`: the `Host win-test-vm` block has
 `HostName <win-test-ip>` but no `ProxyJump lab-bastion`, so plain
 `ssh win-test-vm` from this Mac times out (subnet routing through
 lab-bastion is the advertised path, but Tailscale's accept-routes path
-to `10.1.10.0/24` isn't working from this host — independent of
+to `10.0.0.0/24` isn't working from this host — independent of
 the Windows plan). Fix when convenient:
 
 ```sshconfig
