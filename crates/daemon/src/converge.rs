@@ -22,6 +22,28 @@ use tracing::{info, warn};
 
 use crate::server::AzvpndServer;
 
+/// What can go wrong acquiring an access token for the boot-time
+/// converge. Kept structured (rather than the previous `Result<_,
+/// String>`) so the daemon log gets a useful Display chain and a
+/// future health subsystem (PLAN.md F.4) can pattern-match on the
+/// variant — e.g. "RT-not-cached" calls for a different recovery
+/// hint than "AAD rejected our refresh".
+#[derive(Debug, thiserror::Error)]
+enum AcquireError {
+    /// Target profile is AAD but the file cache hasn't been seeded
+    /// yet — user has never run a non-ephemeral `up`. Recovery is
+    /// for the user to do that once interactively.
+    #[error("no daemon-side refresh token cached — run `azvpn up` once")]
+    NoRefreshToken,
+
+    /// AAD or HTTP failure during the silent refresh exchange. The
+    /// `Display` chain (`{0}` follows `Error::source`) preserves
+    /// the underlying reason — previously `.to_string()` flattened
+    /// it.
+    #[error("AAD refresh failed: {0}")]
+    Refresh(#[from] azvpn_auth::Error),
+}
+
 /// Read target state and, if the user wants `Connected`, attempt to
 /// converge. Runs as a background task spawned from `main` so the
 /// listener can accept connections while the (potentially slow)
@@ -77,18 +99,32 @@ pub async fn try_converge(server: AzvpndServer) {
 /// user interaction. Cert-auth profiles return `None` (no AT needed).
 /// AAD profiles use the daemon's stored RT — never the user's
 /// keyring cache, which the daemon can't read.
+///
+/// Errors come back typed so `try_converge` can render a useful
+/// Display chain and a future health surface can distinguish
+/// "user hasn't seeded the RT yet" from "AAD rejected the RT we
+/// have" without parsing strings.
 async fn acquire_access_token(
     profile: &azvpn_profile::VpnProfile,
-) -> Result<Option<SecretString>, String> {
+) -> Result<Option<SecretString>, AcquireError> {
     if !matches!(profile.clientauth.auth_type, AuthType::Aad) {
         return Ok(None);
     }
-    let key = aad_cache_key(profile)
-        .ok_or_else(|| "AAD profile missing <aad> config block".to_owned())?;
+    // `aad_cache_key` returning None means the profile is AAD-typed
+    // but has no `<aad>` block — a malformed profile. Surfaces as
+    // an Auth error rather than a separate variant: it's structurally
+    // the same as "we can't authenticate this profile at boot."
+    let Some(key) = aad_cache_key(profile) else {
+        return Err(AcquireError::Refresh(azvpn_auth::Error::ProfileNotAad));
+    };
     let cache = DaemonTokenCache::for_profile(&key);
-    let token = cache
-        .silent_refresh(profile)
-        .await
-        .map_err(|e| e.to_string())?;
-    Ok(Some(token.access_token))
+    // `silent_refresh` itself reports `NoRefreshToken` when the
+    // daemon cache file is missing — preserve that as a distinct
+    // variant so the warn at the call site can hint at the right
+    // recovery step.
+    match cache.silent_refresh(profile).await {
+        Ok(token) => Ok(Some(token.access_token)),
+        Err(azvpn_auth::Error::NoRefreshToken) => Err(AcquireError::NoRefreshToken),
+        Err(e) => Err(AcquireError::Refresh(e)),
+    }
 }

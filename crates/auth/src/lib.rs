@@ -42,20 +42,32 @@ pub(crate) const GROUPS_CLAIMS_JSON: &str = r#"{"access_token":{"groups":{"essen
 
 /// `https://login.microsoftonline.com/{tenant}/oauth2/v2.0/token`.
 pub(crate) fn aad_token_url(tenant: &str) -> Result<TokenUrl> {
-    TokenUrl::new(format!("{AAD_AUTHORITY}/{tenant}/oauth2/v2.0/token"))
-        .map_err(|e| Error::Other(format!("invalid token URL for tenant {tenant}: {e}")))
+    TokenUrl::new(format!("{AAD_AUTHORITY}/{tenant}/oauth2/v2.0/token")).map_err(|source| {
+        Error::InvalidUrl {
+            what: "token endpoint",
+            source,
+        }
+    })
 }
 
 /// `https://login.microsoftonline.com/{tenant}/oauth2/v2.0/devicecode`.
 pub(crate) fn aad_device_url(tenant: &str) -> Result<DeviceAuthorizationUrl> {
-    DeviceAuthorizationUrl::new(format!("{AAD_AUTHORITY}/{tenant}/oauth2/v2.0/devicecode"))
-        .map_err(|e| Error::Other(format!("invalid device-code URL for tenant {tenant}: {e}")))
+    DeviceAuthorizationUrl::new(format!("{AAD_AUTHORITY}/{tenant}/oauth2/v2.0/devicecode")).map_err(
+        |source| Error::InvalidUrl {
+            what: "device-code endpoint",
+            source,
+        },
+    )
 }
 
 /// `https://login.microsoftonline.com/{tenant}/oauth2/v2.0/authorize`.
 pub(crate) fn aad_authorize_url(tenant: &str) -> Result<oauth2::AuthUrl> {
-    oauth2::AuthUrl::new(format!("{AAD_AUTHORITY}/{tenant}/oauth2/v2.0/authorize"))
-        .map_err(|e| Error::Other(format!("invalid authorize URL for tenant {tenant}: {e}")))
+    oauth2::AuthUrl::new(format!("{AAD_AUTHORITY}/{tenant}/oauth2/v2.0/authorize")).map_err(
+        |source| Error::InvalidUrl {
+            what: "authorize endpoint",
+            source,
+        },
+    )
 }
 
 /// `reqwest::Client` configured for `OAuth2` token endpoints — `redirect(none)`
@@ -125,8 +137,26 @@ pub enum Error {
         status: reqwest::StatusCode,
         body: String,
     },
-    #[error("{0}")]
-    Other(String),
+
+    /// One of the AAD endpoint URLs (`token`, `devicecode`,
+    /// `authorize`, redirect-loopback) didn't parse. `what` names the
+    /// endpoint so a failure is diagnosable without a stack trace.
+    /// `source` preserves the `url::ParseError` for `Error::source`
+    /// chains.
+    #[error("invalid {what} URL: {source}")]
+    InvalidUrl {
+        what: &'static str,
+        #[source]
+        source: url::ParseError,
+    },
+
+    /// A code path that requires an AAD profile got handed something
+    /// else (cert / username-pass / radius). Cleaner than
+    /// `Other("profile is not AAD-auth")` because callers can
+    /// pattern-match — e.g. the daemon converge can fall through to
+    /// "user must `up` interactively" without inspecting strings.
+    #[error("profile is not AAD-auth")]
+    ProfileNotAad,
 }
 
 #[derive(Debug, Clone)]

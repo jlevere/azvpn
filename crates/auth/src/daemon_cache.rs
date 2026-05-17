@@ -135,8 +135,7 @@ impl DaemonTokenCache {
     /// it with the keyring/file backend and an `Option`-not-`Result`
     /// failure model that falls through to interactive sign-in.
     pub async fn silent_refresh(&self, profile: &VpnProfile) -> Result<Token> {
-        let aad_config =
-            AadConfig::from_profile(profile).ok_or(Error::Other("profile is not AAD-auth".into()))?;
+        let aad_config = AadConfig::from_profile(profile).ok_or(Error::ProfileNotAad)?;
         let rt = self.load_refresh_token().ok_or(Error::NoRefreshToken)?;
         let token = crate::silent_refresh(&aad_config, rt.expose_secret()).await?;
         Ok(self.save_refresh_result(token, rt.expose_secret()))

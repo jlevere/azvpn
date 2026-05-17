@@ -349,7 +349,20 @@ impl PushOptions {
             // `route-ipv6 <addr>/<prefix> [gateway]`
             let mut parts = rest.split_whitespace();
             if let Some(cidr) = parts.next() {
-                let (dest_str, prefix_str) = cidr.split_once('/').unwrap_or((cidr, "128"));
+                let (dest_str, prefix_str) = if let Some(pair) = cidr.split_once('/') {
+                    pair
+                } else {
+                    // RFC-compliant pushes always carry `/<prefix>`.
+                    // A gateway pushing a bare address is malformed
+                    // (or hostile). Default to /128 as a host route
+                    // — same behavior as before, but surface the
+                    // anomaly so a buggy gateway doesn't go silent.
+                    tracing::warn!(
+                        cidr,
+                        "route-ipv6 push missing /prefix; defaulting to /128 host route"
+                    );
+                    (cidr, "128")
+                };
                 if let (Ok(destination), Ok(prefix)) =
                     (dest_str.parse::<IpAddr>(), prefix_str.parse::<u8>())
                 {
@@ -360,6 +373,11 @@ impl PushOptions {
                         gateway,
                         family: AddrFamily::V6,
                     });
+                } else {
+                    tracing::warn!(
+                        cidr,
+                        "route-ipv6 push has unparseable address/prefix; dropping route"
+                    );
                 }
             }
             return true;
@@ -416,7 +434,13 @@ impl PushOptions {
                 // openvpn pushes `<addr>/<prefix>` for the local side.
                 // Strip the prefix for the typed address; the prefix is
                 // recoverable from the matching route-ipv6 directive.
-                let local_str = local_cidr.split('/').next().unwrap_or(local_cidr);
+                // `split_once` returns either the addr-before-slash or
+                // the whole string when no slash is present — covers
+                // both the canonical "fd00::1/64" form and a stripped
+                // "fd00::1" without a dead `unwrap_or` fallback.
+                let local_str = local_cidr
+                    .split_once('/')
+                    .map_or(local_cidr, |(addr, _)| addr);
                 if let Ok(local) = local_str.parse() {
                     opts.ifconfig_ipv6 = Some(Ifconfig {
                         local,

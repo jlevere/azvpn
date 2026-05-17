@@ -60,8 +60,11 @@ impl AuthCodeFlow {
     pub fn new(config: AadConfig) -> Result<Self, Error> {
         let token_url = aad_token_url(&config.tenant_id)?;
         let auth_url = aad_authorize_url(&config.tenant_id)?;
-        let redirect = RedirectUrl::new(REDIRECT_URI.to_owned())
-            .map_err(|e| Error::Other(format!("invalid redirect URL: {e}")))?;
+        let redirect =
+            RedirectUrl::new(REDIRECT_URI.to_owned()).map_err(|source| Error::InvalidUrl {
+                what: "loopback redirect",
+                source,
+            })?;
 
         let client = BasicClient::new(ClientId::new(config.client_id().to_owned()))
             .set_auth_uri(auth_url)

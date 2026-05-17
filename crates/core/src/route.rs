@@ -232,6 +232,18 @@ impl RouteManager {
     /// finishes `netsh interface ip set address`, so we poll briefly
     /// until the host route appears. Returns `None` after timeout
     /// (Unix happy path falls through immediately if not found).
+    ///
+    /// **Polling vs callback (deferred):** the Windows branch could
+    /// be rewritten as a callback-driven wait via `NotifyRouteChange2`
+    /// (Mullvad's `talpid-routing/src/windows/default_route_monitor.rs`
+    /// is the reference) — register a callback, signal an
+    /// `mpsc::Sender` from inside it, await with `tokio::time::timeout`.
+    /// Real win would be lower wake latency for the typical sub-500 ms
+    /// route-publish case, but the polling worst-case (5 s) is already
+    /// bounded and the rewrite is ~100 lines of Win32 FFI + channel
+    /// plumbing that wants live `jackson-dev` verification before it
+    /// merges. Kept as polling until that work happens; the failure
+    /// mode is "slightly slow apply," not anything destructive.
     pub async fn resolve_local_ifindex(&self, local_ip: IpAddr) -> Option<u32> {
         let host_prefix = match local_ip {
             IpAddr::V4(_) => 32u8,
