@@ -25,9 +25,7 @@ use azvpn_profile::{AuthType, VpnProfile};
 use tracing::{info, warn};
 
 use crate::cache_shared::{CachedToken, write_atomic_private};
-use crate::{
-    AadConfig, CacheKey, Error, ExposeSecret, RefreshGrant, Result, SecretString, Token,
-};
+use crate::{AadConfig, CacheKey, Error, ExposeSecret, RefreshGrant, Result, SecretString, Token};
 
 /// Where the daemon stores its per-profile token caches. Created with
 /// mode 0700 on Unix the first time the daemon writes — only root can
@@ -195,9 +193,15 @@ mod tests {
         let mut new_token = token();
         new_token.refresh_token = None;
         let saved = cache.save_refresh_result(new_token, "rt-from-prev");
-        assert_eq!(saved.refresh_token.as_ref().map(expose), Some("rt-from-prev"));
+        assert_eq!(
+            saved.refresh_token.as_ref().map(expose),
+            Some("rt-from-prev")
+        );
         let loaded = cache.load().unwrap();
-        assert_eq!(loaded.refresh_token.as_ref().map(expose), Some("rt-from-prev"));
+        assert_eq!(
+            loaded.refresh_token.as_ref().map(expose),
+            Some("rt-from-prev")
+        );
     }
 
     #[cfg(unix)]

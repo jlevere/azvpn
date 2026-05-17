@@ -55,8 +55,12 @@ pub async fn run(
     let req = UpRequest {
         profile_label: resolved.label,
         profile: resolved.profile,
-        access_token: aad_tokens.access_token.map(|s| s.expose_secret().to_owned()),
-        refresh_token: aad_tokens.refresh_token.map(|s| s.expose_secret().to_owned()),
+        access_token: aad_tokens
+            .access_token
+            .map(|s| s.expose_secret().to_owned()),
+        refresh_token: aad_tokens
+            .refresh_token
+            .map(|s| s.expose_secret().to_owned()),
         verbose,
         ephemeral,
     };

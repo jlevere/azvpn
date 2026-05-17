@@ -367,11 +367,9 @@ impl TokenCache {
             return CacheAttempt::Fresh(cached.into());
         }
         info!("cached token expired");
-        cached
-            .refresh_token
-            .map_or(CacheAttempt::Empty, |rt| {
-                CacheAttempt::RefreshOnly(SecretString::from(rt))
-            })
+        cached.refresh_token.map_or(CacheAttempt::Empty, |rt| {
+            CacheAttempt::RefreshOnly(SecretString::from(rt))
+        })
     }
 
     /// Read the raw access token without expiry filtering. Callers that
@@ -574,10 +572,7 @@ mod tests {
         cache.save(&token);
         assert!(cache.load().is_none());
         // Refresh token survives expiry by design.
-        assert_eq!(
-            cache.load_refresh_token().as_ref().map(expose),
-            Some("rt")
-        );
+        assert_eq!(cache.load_refresh_token().as_ref().map(expose), Some("rt"));
     }
 
     #[test]
@@ -619,11 +614,17 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let cache = TokenCache::with_file_at(dir.path(), test_key());
         let saved = cache.save_refresh_result(tok("new-at", None), "original-rt");
-        assert_eq!(saved.refresh_token.as_ref().map(expose), Some("original-rt"));
+        assert_eq!(
+            saved.refresh_token.as_ref().map(expose),
+            Some("original-rt")
+        );
 
         let loaded = cache.load().unwrap();
         assert_eq!(expose(&loaded.access_token), "new-at");
-        assert_eq!(loaded.refresh_token.as_ref().map(expose), Some("original-rt"));
+        assert_eq!(
+            loaded.refresh_token.as_ref().map(expose),
+            Some("original-rt")
+        );
     }
 
     #[test]
@@ -634,7 +635,10 @@ mod tests {
         assert_eq!(saved.refresh_token.as_ref().map(expose), Some("rotated-rt"));
 
         let loaded = cache.load().unwrap();
-        assert_eq!(loaded.refresh_token.as_ref().map(expose), Some("rotated-rt"));
+        assert_eq!(
+            loaded.refresh_token.as_ref().map(expose),
+            Some("rotated-rt")
+        );
     }
 
     /// Forge a JWT-ish access token containing `tid` and `aud` so the
