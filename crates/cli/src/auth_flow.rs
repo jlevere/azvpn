@@ -4,8 +4,8 @@
 //! the AAD round-trip.
 
 use azvpn_auth::{
-    AadConfig, AuthCodeFlow, CacheAttempt, CacheKey, DeviceCodeFlow, DeviceCodePrompt, ExposeSecret,
-    RefreshGrant, SecretString, Token, TokenCache,
+    AadConfig, AuthCodeFlow, CacheAttempt, CacheKey, DeviceCodeFlow, DeviceCodePrompt,
+    ExposeSecret, RefreshGrant, SecretString, Token, TokenCache,
 };
 use azvpn_profile::{AuthType, VpnProfile};
 

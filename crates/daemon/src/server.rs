@@ -6,7 +6,9 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use azvpn_auth::{ExposeSecret, SecretString, Token, aad_cache_key, daemon_cache::DaemonTokenCache};
+use azvpn_auth::{
+    ExposeSecret, SecretString, Token, aad_cache_key, daemon_cache::DaemonTokenCache,
+};
 use azvpn_core::commands::connect::{self, ConnectOptions, ConnectionStatus};
 use azvpn_core::metrics::ConnectionMetrics;
 use azvpn_core::target::{self, State as TargetState, TargetState as Target};
@@ -156,9 +158,15 @@ impl AzvpndServer {
         let state = self.state.clone();
         tokio::spawn(async move {
             info!("starting connect task");
-            let result =
-                connect::run(opts, access_token_plain, status_tx, pushed_tx, metrics_tx, cancel)
-                    .await;
+            let result = connect::run(
+                opts,
+                access_token_plain,
+                status_tx,
+                pushed_tx,
+                metrics_tx,
+                cancel,
+            )
+            .await;
             if let Err(e) = result {
                 error!(error = %e, "connect task ended in error");
             } else {
