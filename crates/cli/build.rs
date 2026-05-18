@@ -48,8 +48,13 @@ fn apply_overrides() {
         if value.is_empty() {
             continue;
         }
-        let needle = format!(r##"pub const {const_name} :&str = r#""#;"##);
-        let replacement = format!(r##"pub const {const_name} :&str = r#"{value}"#;"##);
+        // shadow-rs emits e.g. `pub const BRANCH :&str = r#""#;` when its
+        // git probe finds nothing — match that exact literal so we only
+        // overwrite the empty case (never clobber a real auto-detected
+        // value). The needle/replacement need `r##` not `r#` because
+        // they contain `"#` themselves.
+        let needle = format!("pub const {const_name} :&str = r#\"\"#;");
+        let replacement = format!("pub const {const_name} :&str = r#\"{value}\"#;");
         patched = patched.replace(&needle, &replacement);
     }
 
