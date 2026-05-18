@@ -51,11 +51,24 @@ fn apply_overrides() {
         // shadow-rs emits e.g. `pub const BRANCH :&str = r#""#;` when its
         // git probe finds nothing — match that exact literal so we only
         // overwrite the empty case (never clobber a real auto-detected
-        // value). The needle/replacement need `r##` not `r#` because
-        // they contain `"#` themselves.
+        // value).
         let needle = format!("pub const {const_name} :&str = r#\"\"#;");
         let replacement = format!("pub const {const_name} :&str = r#\"{value}\"#;");
+        let before = patched.clone();
         patched = patched.replace(&needle, &replacement);
+        // Fail the build if the env var was set but we couldn't find
+        // shadow-rs's empty-literal needle. Without this, a shadow-rs
+        // codegen drift (e.g. it switches to `X: &str` or `X :&'static str`,
+        // or stops using raw strings) silently turns this whole module
+        // into a no-op and `azvpn --version` regresses to the blank-field
+        // state we shipped this code to fix — and we wouldn't notice
+        // because the override is only exercised in nix-sandbox /
+        // Windows-CI builds, not local `cargo build`.
+        assert!(
+            patched != before,
+            "AZVPN_BUILD_INFO_{const_name} is set but the shadow.rs needle was not found — \
+             shadow-rs's codegen format probably changed. Update the `needle` template in build.rs."
+        );
     }
 
     if patched != content {

@@ -180,14 +180,18 @@ pub(super) fn other(msg: impl Into<String>) -> Error {
 /// still booting and not yet `listen`ing) with a short deadline before
 /// reporting success. Best-effort — if the daemon never comes up we
 /// let the user's next CLI call surface a real error.
+///
+/// Uses [`crate::daemon_client::socket_path`] so an `AZVPND_SOCKET`
+/// override applies symmetrically to the install probe and to every
+/// subsequent CLI call.
 #[cfg(unix)]
 pub(super) async fn wait_for_daemon_socket() {
     const POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(100);
     const TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
-    let socket = Path::new(DAEMON_SOCKET_PATH);
+    let socket = crate::daemon_client::socket_path();
     let deadline = std::time::Instant::now() + TIMEOUT;
     while std::time::Instant::now() < deadline {
-        if tokio::net::UnixStream::connect(socket).await.is_ok() {
+        if tokio::net::UnixStream::connect(&socket).await.is_ok() {
             return;
         }
         tokio::time::sleep(POLL_INTERVAL).await;
@@ -197,12 +201,6 @@ pub(super) async fn wait_for_daemon_socket() {
         "daemon socket did not accept a connection within 5s — falling through; the next CLI call will surface the real error"
     );
 }
-
-/// Canonical daemon socket on Unix. Mirrors `daemon_client::DEFAULT_SOCKET`
-/// and the daemon's bind path; kept here too so the install-side wait
-/// doesn't have to pull in the daemon-client module.
-#[cfg(unix)]
-pub(super) const DAEMON_SOCKET_PATH: &str = "/var/run/azvpn/azvpnd.sock";
 
 /// Canonical "you just installed the daemon, here's what to do next"
 /// block. Shared by the macOS launchd path, the Linux systemd path,

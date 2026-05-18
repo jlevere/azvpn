@@ -92,7 +92,7 @@ pub async fn connect_to_daemon() -> Result<AzvpnApiClient, Error> {
 }
 
 #[cfg(unix)]
-fn socket_path() -> PathBuf {
+pub(crate) fn socket_path() -> PathBuf {
     std::env::var_os("AZVPND_SOCKET").map_or_else(|| PathBuf::from(DEFAULT_SOCKET), PathBuf::from)
 }
 

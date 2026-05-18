@@ -348,43 +348,36 @@ async fn attempt(
                         // during establishment (CONNECTING fires ~5×
                         // before AUTH) and tight-loops through
                         // TcpConnect/Wait/Resolve/Reconnecting when a
-                        // tunnel is thrashing — tens of thousands of
-                        // dupes per day. Gate the log on actual change
-                        // via send_if_modified so the daemon log stays
-                        // proportional to real state churn instead of
-                        // openvpn's re-emit cadence.
-                        let new_status = ConnectionStatus::OpenVpn {
-                            state: state.clone(),
-                            local_ip,
-                        };
+                        // tunnel is thrashing. Compare first, allocate
+                        // only on actual change — avoids the
+                        // `state.clone()` (cheap for typed variants,
+                        // but `Unknown(String)` heap-allocs) on the
+                        // common dedup-hit path.
                         let changed = status_tx.send_if_modified(|cur| {
-                            if *cur == new_status {
-                                false
-                            } else {
-                                *cur = new_status;
-                                true
+                            if let ConnectionStatus::OpenVpn { state: s, local_ip: lip } = cur
+                                && s == state
+                                && *lip == local_ip
+                            {
+                                return false;
                             }
+                            *cur = ConnectionStatus::OpenVpn {
+                                state: state.clone(),
+                                local_ip,
+                            };
+                            true
                         });
                         if changed {
-                            // Operationally significant transitions
-                            // (Connecting / Auth / Connected /
-                            // Reconnecting / Exiting / Unknown) at
-                            // info; the intermediate ones (Resolve,
-                            // TcpConnect, Wait, GetConfig, AssignIp,
-                            // AddRoutes) at debug — every healthy
-                            // connect cycles through all of them and
-                            // they're noise unless the operator is
-                            // already digging in with RUST_LOG=debug.
-                            if state.is_operationally_significant() {
-                                if let Some(ip) = local_ip {
-                                    info!(?state, %ip, "vpn state");
-                                } else {
-                                    info!(?state, "vpn state");
-                                }
-                            } else if let Some(ip) = local_ip {
-                                debug!(?state, %ip, "vpn state");
-                            } else {
-                                debug!(?state, "vpn state");
+                            // info for operationally-significant
+                            // transitions, debug for the rest — see
+                            // `VpnState::is_operationally_significant`.
+                            // Flat match because `tracing::event!`
+                            // needs a const Level; can't dispatch
+                            // through a runtime variable.
+                            match (state.is_operationally_significant(), local_ip) {
+                                (true, Some(ip)) => info!(?state, %ip, "vpn state"),
+                                (true, None) => info!(?state, "vpn state"),
+                                (false, Some(ip)) => debug!(?state, %ip, "vpn state"),
+                                (false, None) => debug!(?state, "vpn state"),
                             }
                         }
                         if *state == VpnState::Reconnecting {
