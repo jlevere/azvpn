@@ -139,7 +139,7 @@ windows-sys = "0.59"
 # (`HKLM\SYSTEM\CurrentControlSet\Services\Dnscache\Parameters\
 # DnsPolicyConfig\<guid>`). Less unsafe than driving the raw
 # windows-sys Registry APIs.
-winreg = "0.55"
+winreg = "0.56"
 # UTF-16 marshalling for Win32 calls (`WideCString::from_str`).
 # Required for any string passed across a Win32 API boundary.
 widestring = "1"
