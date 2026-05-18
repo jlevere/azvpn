@@ -308,8 +308,24 @@
 
         azvpn-windows-cross-deps = craneLib.buildDepsOnly windowsCrossArgs;
 
+        # Populate `azvpn --version` for the cross build. shadow-rs
+        # shells out to `git` at build time, but inside the nix sandbox
+        # the source tree is git-stripped (`cleanCargoSource` plus the
+        # flake-level git filter), so its BRANCH / SHORT_COMMIT /
+        # COMMIT_HASH probes come up empty. `crates/cli/build.rs` checks
+        # for the `AZVPN_BUILD_INFO_*` overrides below and prefers them.
+        # Falls back to shadow-rs's auto-detect when unset (local
+        # `cargo build` from a real working tree).
         azvpn-windows-cross = craneLib.buildPackage (windowsCrossArgs // {
           cargoArtifacts = azvpn-windows-cross-deps;
+          AZVPN_BUILD_INFO_COMMIT_HASH = self.rev or self.dirtyRev or "";
+          AZVPN_BUILD_INFO_SHORT_COMMIT = self.shortRev or self.dirtyShortRev or "";
+          AZVPN_BUILD_INFO_BRANCH = "main";
+          # `self.lastModified` is epoch seconds from the flake's git
+          # clock — `build_time` honors `SOURCE_DATE_EPOCH`, so this also
+          # makes that field meaningful instead of the nix-default DOS
+          # epoch (1980-01-01).
+          SOURCE_DATE_EPOCH = toString (self.lastModified or 315532800);
         });
 
         # No cross-darwin derivation in this flake. CI builds the
