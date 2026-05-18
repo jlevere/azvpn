@@ -1,22 +1,51 @@
 name: CI
 
+# One staged workflow covering quality gates + release artifacts.
+#
+# Stages:
+#   1. Quality gates — fmt, clippy (linux + windows), test
+#      (linux + windows), deny, machete. Always run; parallel.
+#   2. Build artifacts — Linux binary, macOS tarball, Windows MSI,
+#      patched static openvpn. Tag-push only; parallel; gated on
+#      stage 1.
+#   3. Package — .deb / .rpm. Tag-push only; needs build-openvpn.
+#   4. Release — GitHub Release with all artifacts. Tag-push only;
+#      needs all of stage 2 + 3.
+#   5. Publish formula — push templated brew formula to the tap.
+#      Tag-push only; needs release.
+#
+# Why one workflow instead of two: a tag pushed to a commit whose
+# gates haven't been validated would otherwise ship broken
+# artifacts. `needs:` makes the staging explicit and a failure in
+# stage 1 short-circuits the whole release path.
+
 on:
   push:
     branches: [main]
+    tags: ["v*"]
   pull_request:
+  # Manual dispatch lets us produce artifacts without cutting a real
+  # tag — useful when iterating on the packaging pipeline. Builds
+  # still require gates to pass first.
+  workflow_dispatch:
 
-# Cancel earlier in-flight CI runs for the same ref when a new push or
-# PR update lands. Saves minutes on rapid-fire pushes; the latest
-# commit is the only one whose result matters.
+# Cancel earlier in-flight runs for the same ref. For a tag retag
+# (e.g. v0.1.0 → bug fix → v0.1.0 again) the prior run is replaced;
+# different tags are different refs and don't fight.
 concurrency:
-  group: ci-${{ github.workflow }}-${{ github.ref }}
+  group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
+
+permissions:
+  contents: write
 
 env:
   CARGO_TERM_COLOR: always
   RUSTFLAGS: -Dwarnings
 
 jobs:
+  # ─── Stage 1: quality gates (always run) ────────────────────────
+
   fmt:
     runs-on: ubuntu-latest
     steps:
@@ -31,12 +60,11 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # macos-latest is intentionally absent — it's 10× the per-minute
-        # rate, and the dev workflow already exercises macOS continuously.
-        # macOS clippy/test for release validation runs in `release.yml`'s
-        # build-macos job (cross-compiled on Linux via cargo-zigbuild) or
-        # on the maintainer's machine. PRs touching macOS-specific code
-        # paths get tagged `macos-check` to opt-in to a manual macOS run.
+        # macOS is intentionally absent from the gates matrix — the
+        # build-macos stage runs `cargo build --release` natively
+        # which exercises the same compile path. Adding a separate
+        # gates-only macOS clippy job would duplicate ~3 min of
+        # build work per push for no extra signal.
         os: [ubuntu-latest, windows-latest]
     steps:
       - uses: actions/checkout@v4
@@ -44,8 +72,9 @@ jobs:
         with:
           components: clippy
       - uses: Swatinem/rust-cache@v2
-      # libdbus-1-dev — keyring's sync-secret-service feature links to
-      # the system libdbus on Linux. macOS / Windows use native backends.
+      # libdbus-1-dev — keyring's sync-secret-service feature links
+      # to the system libdbus on Linux. macOS / Windows use native
+      # backends.
       - name: Install Linux system deps
         if: matrix.os == 'ubuntu-latest'
         run: sudo apt-get update && sudo apt-get install -y libdbus-1-dev pkg-config
@@ -56,12 +85,6 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # macos-latest is intentionally absent — it's 10× the per-minute
-        # rate, and the dev workflow already exercises macOS continuously.
-        # macOS clippy/test for release validation runs in `release.yml`'s
-        # build-macos job (cross-compiled on Linux via cargo-zigbuild) or
-        # on the maintainer's machine. PRs touching macOS-specific code
-        # paths get tagged `macos-check` to opt-in to a manual macOS run.
         os: [ubuntu-latest, windows-latest]
     steps:
       - uses: actions/checkout@v4
@@ -86,3 +109,302 @@ jobs:
         with:
           tool: cargo-machete
       - run: cargo machete
+
+  # ─── Stage 2: build artifacts (tag-push only) ───────────────────
+
+  # Bare Linux CLI binary — used directly by anyone who doesn't want
+  # the .deb / .rpm. macOS is `build-macos`, Windows is `build-msi`;
+  # both produce installer-style artifacts (tarball / MSI) instead of
+  # standalone binaries because that's what their package managers
+  # consume.
+  build-linux:
+    needs: [fmt, clippy, test, deny, machete]
+    if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-22.04
+    # ubuntu-22.04 (glibc 2.35) — not ubuntu-latest (24.04 / glibc
+    # 2.39). 22.04's glibc is old enough that the resulting binary
+    # runs on Debian 12 (2.36), Ubuntu 22.04+, RHEL 9 (2.34 — symbol
+    # versioning still works), Amazon Linux 2023, etc.
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-unknown-linux-gnu
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: build-linux-ubuntu-22.04
+      - name: Install Linux system deps
+        run: sudo apt-get update && sudo apt-get install -y libdbus-1-dev pkg-config
+      - run: cargo build --release --target x86_64-unknown-linux-gnu
+      - name: Rename binary
+        run: mv target/x86_64-unknown-linux-gnu/release/azvpn azvpn-linux-x86_64
+      - uses: actions/upload-artifact@v4
+        with:
+          name: azvpn-linux-x86_64
+          path: azvpn-linux-x86_64
+
+  # macOS release tarball — what `brew install jlevere/tap/azvpn`
+  # consumes. Native build on `macos-latest` (free for public repos
+  # under standard-runner billing). All build orchestration —
+  # openvpn source fetch + patch + configure + make + Rust build +
+  # tarball assembly — lives in `cargo xtask release-macos`. Local
+  # `cargo xtask release-macos` produces the same artifact.
+  build-macos:
+    needs: [fmt, clippy, test, deny, machete]
+    if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
+    runs-on: macos-latest
+    outputs:
+      version: ${{ steps.tarball.outputs.version }}
+      sha256: ${{ steps.tarball.outputs.sha256 }}
+      tarball_name: ${{ steps.tarball.outputs.tarball_name }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: build-macos-aarch64
+      - name: Install openvpn build deps
+        run: brew install mbedtls@3 lzo pkg-config
+      - name: Build release tarball
+        id: tarball
+        run: cargo xtask release-macos --emit-ci-outputs
+      - uses: actions/upload-artifact@v4
+        with:
+          name: azvpn-macos-aarch64
+          path: dist/azvpn-*-aarch64-apple-darwin.tar.gz
+
+  # Windows MSI installer. The build orchestration — mingw
+  # cross-compile via nix → wixl-built MSI → Authenticode signing
+  # via osslsigncode — lives in `cargo xtask release-windows`.
+  # Runs on ubuntu-latest because nix's `pkgsCross.mingwW64` does
+  # the cross-build; no actual Windows runner needed.
+  #
+  # Authenticode signing is conditional on `WINDOWS_SIGNING_CERT_B64`
+  # being set as a repo secret. When neither secret is set the job
+  # still runs and uploads an unsigned MSI — useful for dispatch-run
+  # smoke tests before code-signing is set up.
+  build-msi:
+    needs: [fmt, clippy, test, deny, machete]
+    if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    # GHA disallows `secrets.*` references inside step-level `if:` —
+    # they're only allowed in `env:`, `with:`, and run-script
+    # bodies. Materialize "have signing material?" into a job-env
+    # string and gate steps on `env.*`.
+    env:
+      HAS_SIGNING: ${{ secrets.WINDOWS_SIGNING_CERT_B64 != '' }}
+    outputs:
+      version: ${{ steps.msi.outputs.version }}
+      sha256: ${{ steps.msi.outputs.sha256 }}
+      msi_name: ${{ steps.msi.outputs.msi_name }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: build-msi-ubuntu-latest
+      # xtask transitively depends on `azvpn-core` → `azvpn-auth` →
+      # `keyring`'s sync-secret-service feature → `libdbus-sys`,
+      # which needs `libdbus-1-dev` + pkg-config to link on Linux.
+      - name: Install Linux system deps
+        run: sudo apt-get update && sudo apt-get install -y libdbus-1-dev pkg-config
+      - uses: DeterminateSystems/nix-installer-action@main
+      - uses: DeterminateSystems/magic-nix-cache-action@main
+      - name: Install osslsigncode
+        if: env.HAS_SIGNING == 'true'
+        run: sudo apt-get update && sudo apt-get install -y osslsigncode
+      - name: Stage signing material
+        if: env.HAS_SIGNING == 'true'
+        env:
+          CERT_B64: ${{ secrets.WINDOWS_SIGNING_CERT_B64 }}
+          KEY_B64: ${{ secrets.WINDOWS_SIGNING_KEY_B64 }}
+        run: |
+          umask 077
+          mkdir -p /tmp/sign
+          echo "$CERT_B64" | base64 -d > /tmp/sign/cert.pem
+          echo "$KEY_B64"  | base64 -d > /tmp/sign/key.pem
+          echo "AZVPN_SIGNING_CERT=/tmp/sign/cert.pem" >> "$GITHUB_ENV"
+          echo "AZVPN_SIGNING_KEY=/tmp/sign/key.pem"   >> "$GITHUB_ENV"
+      - name: Build MSI
+        id: msi
+        env:
+          SIGN_FLAG: ${{ env.HAS_SIGNING == 'true' && '--sign' || '' }}
+        run: cargo xtask release-windows $SIGN_FLAG --emit-ci-outputs
+      - uses: actions/upload-artifact@v4
+        with:
+          name: azvpn-msi-x86_64
+          path: dist/azvpn-*-x86_64-windows.msi
+
+  # Patched static openvpn binary for the .deb / .rpm packagers.
+  # We bundle a private openvpn at /usr/libexec/azvpn/openvpn rather
+  # than depending on the distro's package because Azure P2S gateways
+  # require USER_PASS_LEN to fit AAD bearer tokens — stock openvpn
+  # 2.6 truncates them and the TLS handshake fails.
+  build-openvpn:
+    needs: [fmt, clippy, test, deny, machete]
+    if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: DeterminateSystems/nix-installer-action@main
+      - uses: DeterminateSystems/magic-nix-cache-action@main
+      - name: Build static openvpn
+        run: nix build .#openvpn-azvpn-static --print-build-logs
+      - name: Stage binary
+        run: |
+          mkdir -p out
+          cp result/sbin/openvpn out/openvpn-azvpn-linux-x86_64 \
+            || cp result/bin/openvpn out/openvpn-azvpn-linux-x86_64
+          chmod +x out/openvpn-azvpn-linux-x86_64
+          file out/openvpn-azvpn-linux-x86_64
+          ./out/openvpn-azvpn-linux-x86_64 --version || true
+      - uses: actions/upload-artifact@v4
+        with:
+          name: openvpn-azvpn-linux-x86_64
+          path: out/openvpn-azvpn-linux-x86_64
+
+  # ─── Stage 3: package (tag-push only, needs build-openvpn) ──────
+
+  # Debian package — bundles azvpn + azvpnd + the patched static
+  # openvpn + a systemd unit + maintainer scripts. The actual
+  # cargo-deb metadata lives in crates/cli/Cargo.toml.
+  build-deb:
+    needs: build-openvpn
+    if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: build-deb-ubuntu-22.04
+      - name: Install Linux system deps
+        run: sudo apt-get update && sudo apt-get install -y libdbus-1-dev pkg-config
+      - name: Install cargo-deb
+        run: cargo install cargo-deb --locked
+      - name: Build release binaries (host triple)
+        run: cargo build --release -p azvpn -p azvpn-daemon
+      - name: Stage bundled openvpn
+        uses: actions/download-artifact@v4
+        with:
+          name: openvpn-azvpn-linux-x86_64
+          path: target/openvpn-azvpn-staged
+      - name: Move openvpn into the path cargo-deb expects
+        run: |
+          mkdir -p target/openvpn-azvpn
+          mv target/openvpn-azvpn-staged/openvpn-azvpn-linux-x86_64 target/openvpn-azvpn/openvpn
+          chmod +x target/openvpn-azvpn/openvpn
+      - name: Build .deb
+        run: cargo deb -p azvpn --no-build --output target/debian/
+      - name: List produced .deb
+        run: ls -la target/debian/
+      - uses: actions/upload-artifact@v4
+        with:
+          name: azvpn-deb-linux-x86_64
+          path: target/debian/*.deb
+
+  # RPM-family package — same shape as build-deb but produces a
+  # .rpm via cargo-generate-rpm. Targets Fedora 39+, RHEL 9,
+  # Amazon Linux 2023.
+  build-rpm:
+    needs: build-openvpn
+    if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: build-rpm-ubuntu-22.04
+      - name: Install Linux system deps
+        run: sudo apt-get update && sudo apt-get install -y libdbus-1-dev pkg-config
+      - name: Install cargo-generate-rpm
+        run: cargo install cargo-generate-rpm --locked
+      - name: Build release binaries (host triple)
+        run: cargo build --release -p azvpn -p azvpn-daemon
+      - name: Stage bundled openvpn
+        uses: actions/download-artifact@v4
+        with:
+          name: openvpn-azvpn-linux-x86_64
+          path: target/openvpn-azvpn-staged
+      - name: Move openvpn into the path the manifest expects
+        run: |
+          mkdir -p target/openvpn-azvpn
+          mv target/openvpn-azvpn-staged/openvpn-azvpn-linux-x86_64 target/openvpn-azvpn/openvpn
+          chmod +x target/openvpn-azvpn/openvpn
+      - name: Build .rpm
+        run: |
+          mkdir -p target/generate-rpm
+          cargo generate-rpm -p crates/cli --output target/generate-rpm/
+      - name: List produced .rpm
+        run: ls -la target/generate-rpm/
+      - uses: actions/upload-artifact@v4
+        with:
+          name: azvpn-rpm-linux-x86_64
+          path: target/generate-rpm/*.rpm
+
+  # ─── Stage 4: GitHub Release (tag-push only) ────────────────────
+
+  release:
+    needs: [build-linux, build-macos, build-msi, build-openvpn, build-deb, build-rpm]
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+      # Drop the intermediate static openvpn — it's used internally
+      # by build-deb / build-rpm (which already bundle a copy at
+      # `/usr/libexec/azvpn/openvpn`), not a user-facing artifact.
+      - name: Strip intermediate build artifacts from release set
+        run: rm -f artifacts/openvpn-azvpn-linux-x86_64
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: artifacts/*
+          generate_release_notes: true
+
+  # ─── Stage 5: publish formula (tag-push only) ───────────────────
+
+  # Template the Homebrew formula with this release's version +
+  # sha256 and PUT it into jlevere/homebrew-tap so
+  # `brew install jlevere/tap/azvpn` resolves the new tarball.
+  #
+  # Auth: short-lived GitHub App installation token (no PAT
+  # rotation pain). Setup:
+  #   1. GitHub App with `Contents: read & write` permission.
+  #   2. Install it on both `jlevere/azvpn` (mints tokens) and
+  #      `jlevere/homebrew-tap` (push target).
+  #   3. Add two repo secrets at .../settings/secrets/actions:
+  #        - HOMEBREW_TAP_APP_ID  = App's numeric ID
+  #        - HOMEBREW_TAP_APP_KEY = App's private key (.pem)
+  publish-formula:
+    # `release` for ordering (we don't push the formula until the
+    # tarball is actually downloadable); `build-macos` to read the
+    # version + sha256 outputs.
+    needs: [release, build-macos]
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: publish-formula-ubuntu
+      - name: Install Linux system deps
+        run: sudo apt-get update && sudo apt-get install -y libdbus-1-dev pkg-config
+      - uses: actions/create-github-app-token@v1
+        id: app-token
+        with:
+          app-id: ${{ secrets.HOMEBREW_TAP_APP_ID }}
+          private-key: ${{ secrets.HOMEBREW_TAP_APP_KEY }}
+          owner: jlevere
+          repositories: homebrew-tap
+      - name: Push templated formula to tap
+        env:
+          HOMEBREW_TAP_TOKEN: ${{ steps.app-token.outputs.token }}
+        run: |
+          cargo xtask publish-formula \
+            --version "${{ needs.build-macos.outputs.version }}" \
+            --sha256 "${{ needs.build-macos.outputs.sha256 }}" \
+            --push
