@@ -26,7 +26,7 @@ use azvpn_openvpn::{
 use azvpn_profile::VpnProfile;
 use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
-use tracing::{info, instrument};
+use tracing::{debug, info, instrument};
 
 use crate::dns;
 use crate::metrics::{ByteSample, ConnectionMetrics, throughput_between};
@@ -366,10 +366,25 @@ async fn attempt(
                             }
                         });
                         if changed {
-                            if let Some(ip) = local_ip {
-                                info!(?state, %ip, "vpn state");
+                            // Operationally significant transitions
+                            // (Connecting / Auth / Connected /
+                            // Reconnecting / Exiting / Unknown) at
+                            // info; the intermediate ones (Resolve,
+                            // TcpConnect, Wait, GetConfig, AssignIp,
+                            // AddRoutes) at debug — every healthy
+                            // connect cycles through all of them and
+                            // they're noise unless the operator is
+                            // already digging in with RUST_LOG=debug.
+                            if state.is_operationally_significant() {
+                                if let Some(ip) = local_ip {
+                                    info!(?state, %ip, "vpn state");
+                                } else {
+                                    info!(?state, "vpn state");
+                                }
+                            } else if let Some(ip) = local_ip {
+                                debug!(?state, %ip, "vpn state");
                             } else {
-                                info!(?state, "vpn state");
+                                debug!(?state, "vpn state");
                             }
                         }
                         if *state == VpnState::Reconnecting {

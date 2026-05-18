@@ -36,4 +36,25 @@ impl VpnState {
             other => Self::Unknown(other.to_owned()),
         }
     }
+
+    /// Whether an operator skimming `azvpnd`'s log would want to see
+    /// this state transition by default. Stops the noisy intermediate
+    /// states that openvpn fires through on every connect/reneg
+    /// (Resolve, TcpConnect, Wait, GetConfig, AssignIp, AddRoutes)
+    /// from dominating an `info`-level log, while keeping the
+    /// operationally meaningful transitions visible:
+    /// Connecting / Auth / Connected / Reconnecting / Exiting and any
+    /// Unknown openvpn doesn't have a typed variant for.
+    #[must_use]
+    pub fn is_operationally_significant(&self) -> bool {
+        matches!(
+            self,
+            Self::Connecting
+                | Self::Auth
+                | Self::Connected
+                | Self::Reconnecting
+                | Self::Exiting
+                | Self::Unknown(_)
+        )
+    }
 }
