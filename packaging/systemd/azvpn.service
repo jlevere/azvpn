@@ -62,7 +62,11 @@ Environment=AZVPND_OPENVPN=/usr/libexec/azvpn/openvpn
 # system logs and similar; matches "sudoers-ish on a desktop install"
 # without requiring a dedicated azvpn group. Override per-distro.
 Environment=AZVPND_GROUP=adm
-Environment=RUST_LOG=info
+# Intentionally no RUST_LOG override: a hardcoded `RUST_LOG=info` is a
+# global level that overrides the daemon's compiled-in per-crate
+# directives (which deliberately demote `tarpc` etc. to `warn`).
+# Operators set RUST_LOG via `systemctl edit azvpn` when actually
+# debugging.
 
 # Hardening — the openvpn child needs CAP_NET_ADMIN (manage the tun
 # device, set MTU, bring it up) and we need it for the netlink route

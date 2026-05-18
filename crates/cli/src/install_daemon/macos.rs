@@ -154,12 +154,16 @@ fn render_plist(daemon: &Path, openvpn: &Path) -> String {
     <key>StandardErrorPath</key>
     <string>/dev/null</string>
 
+    <!-- Intentionally NOT setting RUST_LOG: a hardcoded `RUST_LOG=info`
+         here is a *global* level that overrides the daemon's compiled-in
+         per-crate directives, which deliberately demote tarpc and other
+         dependency crates to `warn`. Operators can still override at
+         the launchctl level (`launchctl setenv RUST_LOG ...`) before
+         bootstrap when actually debugging. -->
     <key>EnvironmentVariables</key>
     <dict>
         <key>AZVPND_OPENVPN</key>
         <string>{openvpn}</string>
-        <key>RUST_LOG</key>
-        <string>info</string>
     </dict>
 
     <key>SoftResourceLimits</key>

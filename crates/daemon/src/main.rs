@@ -31,7 +31,7 @@ use tarpc::tokio_util::codec::length_delimited::LengthDelimitedCodec;
 #[cfg(unix)]
 use tokio::signal::unix::{SignalKind, signal};
 use tokio_util::sync::CancellationToken;
-use tracing::{error, info, warn};
+use tracing::{debug, error, info, warn};
 use tracing_subscriber::EnvFilter;
 
 use crate::server::AzvpndServer;
@@ -214,7 +214,7 @@ async fn accept_loop_windows(
                     }
                 };
                 let client_identity = azvpn_ipc::ClientIdentity::Windows(identity);
-                info!(client = %client_identity.display(), "client accepted on named pipe");
+                debug!(client = %client_identity.display(), "client accepted on named pipe");
                 let server_for_conn = server.with_identity(client_identity);
 
                 let framed = codec_builder.new_framed(connected);
@@ -332,7 +332,12 @@ async fn accept_loop(
                         }
                     };
                 let client_identity = azvpn_ipc::ClientIdentity::Unix(identity);
-                info!(client = %client_identity.display(), "client accepted on unix socket");
+                // Per-connection accept — debug, not info. A user polling
+                // `azvpn status` once a minute would otherwise produce
+                // ~1440 of these per day in the operator-visible log.
+                // The audit-relevant events (which RPC they ran, whether
+                // it failed) are logged separately by the handlers.
+                debug!(client = %client_identity.display(), "client accepted on unix socket");
                 let server_for_conn = server.with_identity(client_identity);
 
                 let framed = codec_builder.new_framed(conn);
@@ -380,8 +385,17 @@ fn spawn_signal_listener(shutdown: CancellationToken) {
 /// Default tracing directives — used both as `EnvFilter` fallback and
 /// as the source the journald path re-parses (`EnvFilter` isn't Clone,
 /// so passing the source string is cheaper than juggling two copies).
+// Per-crate `info` for our own crates and a catch-all `warn` for
+// everything else. `tarpc=warn` is named explicitly because tarpc emits
+// 5+ info-level traces per RPC (`ReceiveRequest`, `BeginRequest`,
+// `SendResponse`, `BufferResponse`, `CompleteRequest`) — at one CLI
+// call/minute that's ~14k lines/day of pure library plumbing in a log
+// the user is meant to skim. Same intent as the bare-`warn` fallback
+// at the end, but explicit so a future operator setting
+// `RUST_LOG=info` (the obvious thing to try) doesn't silently
+// re-enable tarpc's chatter.
 const DEFAULT_DIRECTIVES: &str = "azvpnd=info,azvpn_daemon=info,azvpn_core=info,azvpn_openvpn=info,\
-     azvpn_ipc=info,warn";
+     azvpn_ipc=info,tarpc=warn,warn";
 
 fn current_directives() -> String {
     std::env::var("RUST_LOG").unwrap_or_else(|_| DEFAULT_DIRECTIVES.to_string())

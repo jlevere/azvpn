@@ -30,7 +30,11 @@ TimeoutStopSec=10s
 # resolves /usr/libexec/azvpn/openvpn (the patched binary the .deb
 # ships) automatically.
 Environment=AZVPND_GROUP=azvpn
-Environment=RUST_LOG=info
+# Intentionally no RUST_LOG override: a hardcoded `RUST_LOG=info` is a
+# global level that overrides the daemon's compiled-in per-crate
+# directives (which deliberately demote `tarpc` etc. to `warn`).
+# Operators set RUST_LOG via `systemctl edit azvpn` when actually
+# debugging.
 
 # Hardening — see packaging/systemd/azvpn.service for the rationale on
 # each setting. CAP_NET_ADMIN for tun + netlink routes; CAP_NET_RAW
