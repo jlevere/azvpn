@@ -344,21 +344,20 @@ async fn attempt(
                 };
                 match event {
                     Event::State { ref state, local_ip } => {
-                        if let Some(ip) = local_ip {
-                            info!(?state, %ip, "vpn state");
-                        } else {
-                            info!(?state, "vpn state");
-                        }
                         // openvpn re-emits the same state several times
                         // during establishment (CONNECTING fires ~5×
-                        // before AUTH); send_if_modified compares
-                        // PartialEq and skips the notify when nothing
-                        // changed so watchers don't wake on duplicates.
+                        // before AUTH) and tight-loops through
+                        // TcpConnect/Wait/Resolve/Reconnecting when a
+                        // tunnel is thrashing — tens of thousands of
+                        // dupes per day. Gate the log on actual change
+                        // via send_if_modified so the daemon log stays
+                        // proportional to real state churn instead of
+                        // openvpn's re-emit cadence.
                         let new_status = ConnectionStatus::OpenVpn {
                             state: state.clone(),
                             local_ip,
                         };
-                        status_tx.send_if_modified(|cur| {
+                        let changed = status_tx.send_if_modified(|cur| {
                             if *cur == new_status {
                                 false
                             } else {
@@ -366,6 +365,13 @@ async fn attempt(
                                 true
                             }
                         });
+                        if changed {
+                            if let Some(ip) = local_ip {
+                                info!(?state, %ip, "vpn state");
+                            } else {
+                                info!(?state, "vpn state");
+                            }
+                        }
                         if *state == VpnState::Reconnecting {
                             // Track every openvpn-driven reconnect for
                             // the status RPC. Surfaces flaky sessions
