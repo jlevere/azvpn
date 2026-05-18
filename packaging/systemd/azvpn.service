@@ -1,7 +1,7 @@
 # systemd unit for the `azvpnd` system daemon.
 #
 # Install:
-#   sudo install -m 0755 target/release/azvpnd /usr/lib/azvpn/azvpnd
+#   sudo install -m 0755 target/release/azvpnd /usr/sbin/azvpnd
 #   sudo install -m 0644 packaging/systemd/azvpn.service \
 #       /etc/systemd/system/azvpn.service
 #   sudo systemctl daemon-reload
@@ -17,7 +17,7 @@
 #
 # Remove:
 #   sudo systemctl disable --now azvpn.service
-#   sudo rm /etc/systemd/system/azvpn.service /usr/lib/azvpn/azvpnd
+#   sudo rm /etc/systemd/system/azvpn.service /usr/sbin/azvpnd
 #
 # The daemon runs as root — it owns the openvpn child, DNS settings via
 # systemd-resolved D-Bus, and route table edits. The CLI (`azvpn`)
@@ -38,7 +38,7 @@ Wants=network-online.target
 # moment fork returns, racing CLI connect attempts against socket
 # bind. The daemon code path that emits READY is no-op outside Linux.
 Type=notify
-ExecStart=/usr/lib/azvpn/azvpnd
+ExecStart=/usr/sbin/azvpnd
 Restart=on-failure
 RestartSec=5
 # Give the daemon a window to tear down openvpn + remove routes / DNS

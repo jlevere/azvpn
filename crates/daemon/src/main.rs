@@ -529,5 +529,9 @@ fn notify_ready() {
     }
 }
 
-#[cfg(not(target_os = "linux"))]
+// Non-Linux Unix stub — macOS launchd doesn't use sd_notify. Windows
+// has its own SCM ready signal via `windows::service_main`, so we
+// don't define `notify_ready` there at all (the caller is gated to
+// `unix_main`).
+#[cfg(all(unix, not(target_os = "linux")))]
 fn notify_ready() {}

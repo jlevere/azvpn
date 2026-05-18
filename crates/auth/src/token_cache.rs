@@ -316,8 +316,11 @@ impl TokenCache {
 
     /// File-backed cache at an explicit path. Test-only — exposing the
     /// file shape on the public API would let callers bypass the
-    /// keyring on real systems.
-    #[cfg(test)]
+    /// keyring on real systems. Gated to `all(test, unix)` to match
+    /// the `mod tests` gate; on Windows the keyring path is exercised
+    /// only via the platform-native backend and we have no
+    /// file-cache tests.
+    #[cfg(all(test, unix))]
     pub(crate) fn with_file_at(dir: &std::path::Path, key: CacheKey) -> Self {
         let backend: Box<dyn KeyStoreBackend> = Box::new(FileBackend {
             dir: dir.to_owned(),

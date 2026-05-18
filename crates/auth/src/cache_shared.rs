@@ -8,6 +8,7 @@
 //! pure mechanics.
 
 use std::fs;
+#[cfg(unix)]
 use std::io::Write as _;
 use std::path::Path;
 use std::time::{Duration, UNIX_EPOCH};

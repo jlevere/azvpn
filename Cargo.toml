@@ -170,18 +170,54 @@ azvpn-tunnel-windows = { path = "crates/tunnel-windows" }
 
 [workspace.lints.rust]
 unsafe_code = "warn"
-unused_qualifications = "warn"
+# Pure style — `std::mem::size_of` vs prelude `size_of` is a
+# stylistic preference, fires on Win32 FFI sites where the qualified
+# form mirrors the C API it wraps.
+unused_qualifications = "allow"
 
+# We follow `clippy::pedantic` at warn level but with a curated allow
+# list. The allows are stylistic lints that don't catch correctness
+# issues; reasons inline below. The `pedantic` lints we *don't* allow
+# (the majority of the group) still apply.
 [workspace.lints.clippy]
 all = { level = "warn", priority = -1 }
 pedantic = { level = "warn", priority = -1 }
+
+# Truncation casts (`as u32` from `usize`, etc.) at Win32 / FFI
+# boundaries — the API contract bounds the value below u32::MAX.
 cast_possible_truncation = "allow"
-module_name_repetitions = "allow"
-missing_errors_doc = "allow"
-must_use_candidate = "allow"
+# Sign casts (`as i32` from `u32`) on values clippy can't statically
+# prove are below i32::MAX. Fires on `if_nametoindex` results and the
+# like; the kernel never allocates ifindex values above 2^31.
+cast_possible_wrap = "allow"
+# Pointer alignment lint fires on `*const u8 → *const TOKEN_USER`
+# casts from `Vec<u8>::as_ptr()`. libc `malloc` returns max-aligned
+# pointers (16 on Win64, > TOKEN_USER's 8-byte requirement); the
+# casts are sound and SAFETY-commented.
+cast_ptr_alignment = "allow"
+# Collapsible if/let chains — both nested and flat forms read
+# fine. Mostly fires on registry-write idioms where the inner block
+# benefits from its own warn! call.
+collapsible_if = "allow"
 # clippy 1.83+ flags numbered/bulleted list continuation lines that
 # don't satisfy its Markdown indentation expectations. We don't ship
 # rendered docs; the lint produces noisy false positives on aligned
 # lists.
 doc_lazy_continuation = "allow"
+# Missing backticks around prose tokens like `NetworkManager`,
+# `REG_MULTI_SZ`. Cosmetic for rendered docs; we don't render.
+doc_markdown = "allow"
+# `push_str(&format!(...))` vs `write!(...)`. The push_str form
+# reads more linearly; the perf delta is irrelevant for our log /
+# config writers.
+format_push_string = "allow"
+# Helper structs / enums defined mid-function as scoped lifetime
+# guards. Idiomatic for RAII-style Win32 handle wrappers.
+items_after_statements = "allow"
+missing_errors_doc = "allow"
+module_name_repetitions = "allow"
+must_use_candidate = "allow"
+# Function-line-count is arbitrary; Win32 token handling fns are
+# linear and unrolling them harms readability.
+too_many_lines = "allow"
 

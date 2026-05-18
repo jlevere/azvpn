@@ -240,8 +240,7 @@ fn looks_headless() -> bool {
     }
     #[cfg(target_os = "linux")]
     {
-        return std::env::var_os("DISPLAY").is_none()
-            && std::env::var_os("WAYLAND_DISPLAY").is_none();
+        std::env::var_os("DISPLAY").is_none() && std::env::var_os("WAYLAND_DISPLAY").is_none()
     }
     #[cfg(not(target_os = "linux"))]
     false

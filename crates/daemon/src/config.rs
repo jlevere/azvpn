@@ -6,7 +6,13 @@
 use std::path::{Path, PathBuf};
 
 pub struct Config {
+    // Unix-only: the daemon's IPC is a UNIX socket whose ACL is set
+    // by `socket::bind`. On Windows we use a named pipe with an SDDL
+    // and these fields are inert — gate them so the compiler doesn't
+    // complain about dead fields in the Windows build.
+    #[cfg(unix)]
     pub socket_path: PathBuf,
+    #[cfg(unix)]
     pub socket_group: String,
     pub openvpn_binary: PathBuf,
 }
@@ -31,15 +37,19 @@ impl Config {
     ///   leading to opaque gateway-side TLS-handshake failures hours
     ///   into debugging. Refuse to start without an explicit path.
     pub fn from_env() -> Result<Self, String> {
+        #[cfg(unix)]
         let socket_path = std::env::var_os("AZVPND_SOCKET").map_or_else(
             || PathBuf::from("/var/run/azvpn/azvpnd.sock"),
             PathBuf::from,
         );
+        #[cfg(unix)]
         let socket_group =
             std::env::var("AZVPND_GROUP").unwrap_or_else(|_| default_socket_group().into());
         let openvpn_binary = resolve_openvpn_binary()?;
         Ok(Self {
+            #[cfg(unix)]
             socket_path,
+            #[cfg(unix)]
             socket_group,
             openvpn_binary,
         })
@@ -122,7 +132,11 @@ const fn default_socket_group() -> &'static str {
     "sudo"
 }
 
-#[cfg(not(any(target_os = "macos", target_os = "linux")))]
+// Other Unixes (none we currently ship to, but the cfg-gate keeps the
+// build clean if someone tries). Windows doesn't reach here because
+// `default_socket_group` itself is only called from the Unix branch
+// of `Config::from_env`.
+#[cfg(all(unix, not(any(target_os = "macos", target_os = "linux"))))]
 const fn default_socket_group() -> &'static str {
     "root"
 }

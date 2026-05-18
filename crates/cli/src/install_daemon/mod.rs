@@ -7,7 +7,11 @@
 //! `/bin/launchctl`; Linux targets systemd via the `org.freedesktop
 //! .systemd1` D-Bus manager (no shelling out to `systemctl`).
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
+// `Path` is only used by `check_executable` (Unix-only). Gate the
+// import so the Windows build doesn't see an unused-import warning.
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+use std::path::Path;
 
 use azvpn_core::Error as CoreError;
 

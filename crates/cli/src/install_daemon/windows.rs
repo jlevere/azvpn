@@ -36,12 +36,9 @@ pub const SERVICE_NAME: &str = "azvpnd";
 /// `daemon::windows::SERVICE_DISPLAY_NAME`.
 pub const SERVICE_DISPLAY_NAME: &str = "azvpn — Azure VPN daemon";
 
-/// Default install prefix — same string the MSI's wixl invocation
-/// substitutes for `[INSTALLDIR]`. Source of truth in
-/// [`azvpn_core::layout`].
-pub const DEFAULT_INSTALL_DIR: &str = azvpn_core::layout::WIN_INSTALL_DIR_ABS;
-
-/// Default daemon binary path under [`DEFAULT_INSTALL_DIR`].
+/// Default daemon binary path under the install prefix
+/// (`azvpn_core::layout::WIN_INSTALL_DIR_ABS` — same string the MSI's
+/// wixl invocation substitutes for `[INSTALLDIR]`).
 pub const DEFAULT_DAEMON_BIN: &str = azvpn_core::layout::WIN_DAEMON_ABS;
 
 /// Default bundled openvpn binary path. Pinned upstream binary
@@ -73,6 +70,11 @@ const SERVICE_ACCESS: ServiceAccess = ServiceAccess::QUERY_CONFIG
 /// openvpn resolution finds the sibling `openvpn\` dir at
 /// runtime) → connect SCM → create-or-update service → recovery
 /// actions → start.
+///
+/// `async` purely for signature symmetry with the macOS / Linux
+/// install paths (which talk to launchd / systemd asynchronously).
+/// The Windows SCM API is synchronous; the body never awaits.
+#[allow(clippy::unused_async)]
 pub async fn install(daemon: Option<PathBuf>, openvpn: Option<PathBuf>) -> Result<()> {
     let source_daemon = daemon.unwrap_or_else(|| PathBuf::from(DEFAULT_DAEMON_BIN));
     let openvpn = openvpn.unwrap_or_else(|| PathBuf::from(DEFAULT_OPENVPN_BIN));
@@ -137,6 +139,9 @@ pub async fn install(daemon: Option<PathBuf>, openvpn: Option<PathBuf>) -> Resul
 /// Top-level uninstall. Connect SCM → open service → stop (if
 /// running, with a bounded wait for `Stopped`) → delete. Idempotent
 /// — a missing service is a no-op.
+///
+/// `async` for signature symmetry — see [`install`].
+#[allow(clippy::unused_async)]
 pub async fn uninstall() -> Result<()> {
     let manager = ServiceManager::local_computer(None::<&str>, ServiceManagerAccess::CONNECT)
         .map_err(|e| other(format!("connect to SCM (need admin): {e}")))?;
@@ -239,7 +244,10 @@ fn apply_recovery_actions(service: &Service) -> Result<()> {
     ];
 
     let failure_actions = ServiceFailureActions {
-        reset_period: ServiceFailureResetPeriod::After(Duration::from_secs(60)),
+        // SCM's reset window — after this much "no crash", the
+        // failure count resets. One minute matches Tailscale's
+        // `cmd/tailscaled/service_windows.go`.
+        reset_period: ServiceFailureResetPeriod::After(Duration::from_mins(1)),
         reboot_msg: None,
         command: None,
         actions: Some(recovery),

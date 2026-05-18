@@ -73,6 +73,11 @@ impl DnsManager {
     /// impl in `azvpn-core::dns` can call `self.install(...)` without
     /// the inherent-vs-trait-method ambiguity Rust resolves silently
     /// in one direction (and surprises future readers in the other).
+    ///
+    /// # Panics
+    /// `self.backend` is guaranteed `Some(_)` after the
+    /// `is_none()` check + assignment above; the subsequent
+    /// `.expect()` is therefore structurally unreachable.
     pub async fn install(
         &mut self,
         suffixes: &[&str],

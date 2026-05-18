@@ -11,11 +11,6 @@ use std::net::IpAddr;
 
 use tracing::warn;
 
-pub use nrpt::{
-    AZVPN_REGKEY, MAX_DOMAINS_PER_RULE, NRPT_BASE_GP, NRPT_BASE_LOCAL, NRPT_OVERRIDE_DNS,
-    NRPT_RULE_IDS_VALUE, NrptRule,
-};
-
 /// Owner of the live NRPT rules. Mirrors the macOS `DnsGuard` /
 /// Linux `DnsManager` shape so `azvpn-core::dns::new_manager` can
 /// box-and-go. Source of truth for which rules we own lives in the

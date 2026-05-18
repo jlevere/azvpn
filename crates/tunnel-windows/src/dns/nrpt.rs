@@ -105,6 +105,7 @@ pub(crate) fn new_guid_string() -> String {
 /// [`NRPT_BASE_GP`] take effect immediately. No-op for local-only
 /// writes (`NRPT_BASE_LOCAL` is read by the resolver directly without
 /// a GP cycle). Called by `apply` only when `write_as_gp` is true.
+#[allow(unsafe_code)]
 pub(crate) fn refresh_machine_policy() -> io::Result<()> {
     use windows_sys::Win32::System::GroupPolicy::RefreshPolicyEx;
     // `RP_FORCE` (0x1) reapplies all settings even if the GPO version

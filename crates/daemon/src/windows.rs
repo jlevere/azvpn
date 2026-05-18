@@ -52,10 +52,12 @@ use windows_service::{define_windows_service, service_dispatcher};
 /// Service name registered with the SCM. Mirrors what
 /// `cli::install_daemon::windows` passes to
 /// `ServiceManager::create_service`. Bumped only on a hard rename.
+///
+/// Display-name version lives in `cli::install_daemon::windows` —
+/// the daemon side only needs the registration key (`SERVICE_NAME`)
+/// to talk to SCM via `service_dispatcher::start` and
+/// `service_control_handler::register`.
 pub const SERVICE_NAME: &str = "azvpnd";
-
-/// Display name shown in `services.msc` and `Get-Service`.
-pub const SERVICE_DISPLAY_NAME: &str = "azvpn — Azure VPN daemon";
 
 /// All SCM-owned daemons we register use `OWN_PROCESS` (one
 /// service per process — no shared svchost). Pulled out as a
@@ -232,6 +234,11 @@ fn service_main(_args: Vec<OsString>) {
 /// for long pending-start sequences are deferred — our startup is
 /// fast enough that SCM won't time us out at the default 30s
 /// threshold even without checkpoint bumps.
+// `ServiceStatusHandle` isn't `Copy` despite being an 8-byte wrapper
+// around a raw handle, so we keep the reference form. Clippy's
+// `trivially_copy_pass_by_ref` heuristic fires on the size alone
+// without checking `Copy`-ness; allow it locally.
+#[allow(clippy::trivially_copy_pass_by_ref)]
 fn report_status(
     handle: &ServiceStatusHandle,
     state: ServiceState,

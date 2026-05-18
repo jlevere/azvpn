@@ -134,5 +134,5 @@ fn interface_name(index: u32) -> Option<String> {
     }
     U16CStr::from_slice_truncate(&buf)
         .ok()
-        .map(|s| s.to_string_lossy())
+        .map(U16CStr::to_string_lossy)
 }
