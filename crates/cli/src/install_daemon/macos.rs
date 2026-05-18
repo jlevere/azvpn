@@ -93,12 +93,18 @@ fn resolve_paths(daemon: Option<PathBuf>, openvpn: Option<PathBuf>) -> Result<(P
     Ok((daemon_path, openvpn_path))
 }
 
-/// Two directories up from the CLI binary — `…/bin/azvpn` → `…/`.
-/// `current_exe` resolves symlinks on macOS so a brew-installed CLI's
-/// realpath is `<cellar>/<ver>/bin/azvpn` and the prefix lookup
-/// returns the cellar version dir, which is correct.
+/// Two directories up from the CLI binary's realpath — `…/bin/azvpn`
+/// → `…/`. `std::env::current_exe()` on macOS returns the invocation
+/// path, NOT the symlink-resolved one (it wraps `_NSGetExecutablePath`,
+/// which Apple's docs explicitly call out as not following symlinks).
+/// `fs::canonicalize` walks the link chain — without it, a
+/// brew-installed CLI invoked through `/opt/homebrew/bin/azvpn` would
+/// derive prefix=`/opt/homebrew` instead of the cellar version dir,
+/// and the daemon-binary lookup misses
+/// `/opt/homebrew/Cellar/azvpn/<v>/libexec/azvpnd`.
 fn default_prefix() -> Result<PathBuf> {
     let exe = std::env::current_exe()?;
+    let exe = std::fs::canonicalize(&exe).unwrap_or(exe);
     let prefix = exe
         .parent()
         .and_then(Path::parent)
