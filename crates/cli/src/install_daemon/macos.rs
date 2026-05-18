@@ -10,7 +10,10 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use super::{NEXT_STEPS_BANNER, check_executable, other, require_root, resolve_binary, wait_for_daemon_socket};
+use super::{
+    NEXT_STEPS_BANNER, check_executable, other, require_root, resolve_binary,
+    wait_for_daemon_socket,
+};
 use crate::Result;
 
 const LAUNCHD_LABEL: &str = "com.jlevere.azvpn.daemon";

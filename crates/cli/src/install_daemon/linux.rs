@@ -13,7 +13,9 @@ use std::path::{Path, PathBuf};
 use tracing::debug;
 use zbus::zvariant::OwnedObjectPath;
 
-use super::{NEXT_STEPS_BANNER, check_executable, require_root, resolve_binary, wait_for_daemon_socket};
+use super::{
+    NEXT_STEPS_BANNER, check_executable, require_root, resolve_binary, wait_for_daemon_socket,
+};
 use crate::Result;
 
 const UNIT_NAME: &str = "azvpn.service";
