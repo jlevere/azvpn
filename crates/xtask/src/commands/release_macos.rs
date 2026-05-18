@@ -42,8 +42,7 @@ pub const TARGET_TRIPLE: &str = "aarch64-apple-darwin";
 /// so all three platforms ship wire-compatible openvpn binaries.
 const OPENVPN_VERSION: &str = "2.6.19";
 const OPENVPN_SHA256: &str = "13702526f687c18b2540c1a3f2e189187baaa65211edcf7ff6772fa69f0536cf";
-const OPENVPN_URL: &str =
-    "https://swupdate.openvpn.net/community/releases/openvpn-2.6.19.tar.gz";
+const OPENVPN_URL: &str = "https://swupdate.openvpn.net/community/releases/openvpn-2.6.19.tar.gz";
 
 // `clap::Args` derives a struct from CLI flag definitions; each
 // `--flag` becomes a `bool` field. Four such flags here is fine —
@@ -281,8 +280,12 @@ fn build_patched_openvpn(root: &Path, dist: &Path) -> Result<PathBuf> {
     let srcdir = workdir.join(format!("openvpn-{OPENVPN_VERSION}"));
 
     let patch = root.join(azvpn_core::layout::OPENVPN_PATCH_REL);
-    run_at("patch", &["-p1", "-i", &patch.display().to_string()], &srcdir)
-        .context("apply USER_PASS_LEN patch")?;
+    run_at(
+        "patch",
+        &["-p1", "-i", &patch.display().to_string()],
+        &srcdir,
+    )
+    .context("apply USER_PASS_LEN patch")?;
 
     let mbedtls_prefix = brew_prefix("mbedtls@3")?;
     let lzo_prefix = brew_prefix("lzo")?;
@@ -439,7 +442,9 @@ mod tests {
         tarball_layout(
             Path::new("/ws"),
             Path::new("/ws/dist/azvpn-0.0.0-aarch64-apple-darwin"),
-            Some(Path::new("/ws/dist/openvpn-build/openvpn-2.6.19/src/openvpn/openvpn")),
+            Some(Path::new(
+                "/ws/dist/openvpn-build/openvpn-2.6.19/src/openvpn/openvpn",
+            )),
         )
     }
 
