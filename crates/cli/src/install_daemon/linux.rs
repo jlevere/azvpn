@@ -177,10 +177,15 @@ mod tests {
             Path::new("/opt/azvpn/azvpnd"),
             Path::new("/opt/azvpn/openvpn"),
         );
+        // The two substituted directives. The template's prose
+        // (Install/Inspect/Remove comments) intentionally references
+        // canonical packaging paths and isn't subject to the
+        // `replace()` substitution — a substring-anywhere negative
+        // check would false-positive on those comments.
         assert!(out.contains("ExecStart=/opt/azvpn/azvpnd"));
         assert!(out.contains("AZVPND_OPENVPN=/opt/azvpn/openvpn"));
-        assert!(!out.contains("/usr/lib/azvpn/azvpnd"));
-        assert!(!out.contains("/usr/sbin/openvpn"));
+        assert!(!out.contains(&format!("ExecStart={DEFAULT_DAEMON}")));
+        assert!(!out.contains(&format!("AZVPND_OPENVPN={DEFAULT_OPENVPN}")));
     }
 
     #[test]
