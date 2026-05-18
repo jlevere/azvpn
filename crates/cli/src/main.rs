@@ -5,6 +5,24 @@ use clap_verbosity_flag::{Verbosity, WarnLevel};
 
 shadow_rs::shadow!(build);
 
+/// shadow-rs's `CLAP_LONG_VERSION` template trails with `RUST_CHANNEL`,
+/// which only gets populated when `rustup` is present at build time —
+/// empty for `brew install rust`, the nix sandbox, and the Windows CI
+/// runner. Swap in `BUILD_TARGET` (always populated by shadow-rs from
+/// the cargo target triple) so the `build_env:` line stays meaningful,
+/// joined with " on " so the rustc + triple aren't a comma-separated
+/// pair that reads ambiguously.
+const LONG_VERSION: &str = shadow_rs::formatcp!(
+    "{}\ntag:{}\nbranch:{}\ncommit_hash:{}\nbuild_time:{}\nbuild_env:{} on {}",
+    build::PKG_VERSION,
+    build::TAG,
+    build::BRANCH,
+    build::SHORT_COMMIT,
+    build::BUILD_TIME,
+    build::RUST_VERSION,
+    build::BUILD_TARGET,
+);
+
 mod auth_flow;
 mod captive;
 mod daemon_client;
@@ -33,7 +51,7 @@ pub use error::{Error, Result};
 #[command(
     name = "azvpn",
     version = build::PKG_VERSION,
-    long_version = build::CLAP_LONG_VERSION,
+    long_version = LONG_VERSION,
     about = "Cross-platform Azure VPN client",
     long_about = "\
 Cross-platform Azure VPN client.

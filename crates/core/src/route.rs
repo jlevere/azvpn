@@ -145,6 +145,29 @@ async fn warn_on_lan_overlap(handle: &Handle, desired: &[IpNet], our_gateway: Ip
     }
 }
 
+/// Pick the gateway to use when *deleting* a route from the live set.
+///
+/// Has to be the gateway the route was added with, not the gateway from
+/// the latest `PUSH_REPLY`. Windows's `DeleteIpForwardEntry2` matches
+/// on `(DestinationPrefix, NextHop, InterfaceLuid)` — wrong `NextHop`
+/// → ERROR_NOT_FOUND → swallowed → the stale entry stays in the
+/// kernel and the subsequent add appends a second one. Azure flips
+/// `route-gateway` between reconnects on its /25 P2S subnets
+/// (10.0.249.1 ↔ 10.0.249.129), so this path is hot, not a corner.
+///
+/// `fallback_gateway` is what the caller falls back to if the lookup
+/// somehow misses (shouldn't happen — every entry in `to_remove`
+/// originated in `installed`); preserving callsite ergonomics over a
+/// `Result` for what is effectively an invariant.
+#[must_use]
+fn installed_gateway_for_delete(
+    installed: &HashMap<IpNet, IpAddr>,
+    net: &IpNet,
+    fallback_gateway: IpAddr,
+) -> IpAddr {
+    installed.get(net).copied().unwrap_or(fallback_gateway)
+}
+
 /// Compute the (`to_add`, `to_remove`) split between `current` and `desired`
 /// route sets, where each route is keyed by destination CIDR and carries
 /// its gateway. A CIDR present in both with a different gateway counts
@@ -306,13 +329,10 @@ impl RouteManager {
             desired.iter().map(|net| (*net, gateway)).collect();
         let (to_add, to_remove) = diff(&self.installed, &desired_map);
 
-        // Use the ifindex previously stored for routes already in the
-        // installed set (which is what they were added with) — across
-        // a reconnect the new tunnel may bind to a different iface,
-        // and Windows's delete matches on `InterfaceIndex`.
         let delete_ifindex = self.installed_ifindex;
         for net in &to_remove {
-            let route = build_route(net, gateway, delete_ifindex);
+            let installed_gateway = installed_gateway_for_delete(&self.installed, net, gateway);
+            let route = build_route(net, installed_gateway, delete_ifindex);
             match self.handle.delete(&route).await {
                 Ok(()) => {
                     debug!(dest = %net, "route removed");
@@ -620,5 +640,34 @@ mod tests {
         let r = build_route(&net("10.0.0.0/24"), gw("10.0.8.1"), Some(7));
         assert_eq!(r.gateway, Some(gw("10.0.8.1")));
         assert_eq!(r.ifindex, Some(7));
+    }
+
+    /// Regression: `apply` must delete each `to_remove` route with the
+    /// gateway it was installed with, not the new gateway from the
+    /// current `PUSH_REPLY`. Pins the production helper directly so
+    /// inlining or rewriting the call in `apply()` to use the new
+    /// `gateway` argument fails this test.
+    #[test]
+    fn installed_gateway_for_delete_prefers_installed_over_new() {
+        let mut installed: HashMap<IpNet, IpAddr> = HashMap::new();
+        installed.insert(net("10.0.0.0/24"), gw("10.0.249.1"));
+        let new_gateway = gw("10.0.249.129");
+
+        assert_eq!(
+            installed_gateway_for_delete(&installed, &net("10.0.0.0/24"), new_gateway),
+            gw("10.0.249.1"),
+            "must return the installed gateway, not the new one"
+        );
+    }
+
+    #[test]
+    fn installed_gateway_for_delete_falls_back_when_missing() {
+        let installed: HashMap<IpNet, IpAddr> = HashMap::new();
+        let new_gateway = gw("10.0.249.129");
+        assert_eq!(
+            installed_gateway_for_delete(&installed, &net("10.0.0.0/24"), new_gateway),
+            new_gateway,
+            "missing entry falls back to the caller-supplied gateway"
+        );
     }
 }

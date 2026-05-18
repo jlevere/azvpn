@@ -10,7 +10,7 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use super::{NEXT_STEPS_BANNER, check_executable, other, require_root, resolve_binary};
+use super::{NEXT_STEPS_BANNER, check_executable, other, require_root, resolve_binary, wait_for_daemon_socket};
 use crate::Result;
 
 const LAUNCHD_LABEL: &str = "com.jlevere.azvpn.daemon";
@@ -46,6 +46,7 @@ pub async fn install(daemon: Option<PathBuf>, openvpn: Option<PathBuf>) -> Resul
     eprintln!("wrote {LAUNCHD_PLIST}");
 
     launchctl(&["bootstrap", "system", LAUNCHD_PLIST], Quiet::No)?;
+    wait_for_daemon_socket().await;
     eprintln!();
     eprint!("{NEXT_STEPS_BANNER}");
     Ok(())

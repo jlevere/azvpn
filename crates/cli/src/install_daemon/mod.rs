@@ -170,6 +170,40 @@ pub(super) fn other(msg: impl Into<String>) -> Error {
     Error::Core(CoreError::Other(msg.into()))
 }
 
+/// After `install-daemon` returns, the init system has accepted the
+/// unit but the daemon process may not have opened its socket yet. The
+/// natural next command (`azvpn up`, `azvpn status`) tries to connect
+/// immediately and gets "isn't accepting connections" → user runs it
+/// again and it works. Poll the socket with real `connect(2)` calls
+/// (not a path-existence check — a stale socket file from a previous
+/// daemon would `Path::exists()` instantly while the new daemon is
+/// still booting and not yet `listen`ing) with a short deadline before
+/// reporting success. Best-effort — if the daemon never comes up we
+/// let the user's next CLI call surface a real error.
+#[cfg(unix)]
+pub(super) async fn wait_for_daemon_socket() {
+    const POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(100);
+    const TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+    let socket = Path::new(DAEMON_SOCKET_PATH);
+    let deadline = std::time::Instant::now() + TIMEOUT;
+    while std::time::Instant::now() < deadline {
+        if tokio::net::UnixStream::connect(socket).await.is_ok() {
+            return;
+        }
+        tokio::time::sleep(POLL_INTERVAL).await;
+    }
+    tracing::debug!(
+        socket = %socket.display(),
+        "daemon socket did not accept a connection within 5s — falling through; the next CLI call will surface the real error"
+    );
+}
+
+/// Canonical daemon socket on Unix. Mirrors `daemon_client::DEFAULT_SOCKET`
+/// and the daemon's bind path; kept here too so the install-side wait
+/// doesn't have to pull in the daemon-client module.
+#[cfg(unix)]
+pub(super) const DAEMON_SOCKET_PATH: &str = "/var/run/azvpn/azvpnd.sock";
+
 /// Canonical "you just installed the daemon, here's what to do next"
 /// block. Shared by the macOS launchd path, the Linux systemd path,
 /// the Homebrew formula's `caveats`, and the MSI finish screen. One

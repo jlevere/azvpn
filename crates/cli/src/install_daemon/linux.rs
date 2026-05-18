@@ -13,7 +13,7 @@ use std::path::{Path, PathBuf};
 use tracing::debug;
 use zbus::zvariant::OwnedObjectPath;
 
-use super::{NEXT_STEPS_BANNER, check_executable, require_root, resolve_binary};
+use super::{NEXT_STEPS_BANNER, check_executable, require_root, resolve_binary, wait_for_daemon_socket};
 use crate::Result;
 
 const UNIT_NAME: &str = "azvpn.service";
@@ -83,6 +83,7 @@ pub async fn install(daemon: Option<PathBuf>, openvpn: Option<PathBuf>) -> Resul
         .start_unit(UNIT_NAME.to_string(), "replace".to_string())
         .await?;
     debug!(?job, "systemd accepted StartUnit");
+    wait_for_daemon_socket().await;
 
     eprintln!();
     eprint!("{NEXT_STEPS_BANNER}");
