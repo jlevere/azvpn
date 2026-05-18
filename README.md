@@ -49,9 +49,9 @@ nix build                      # ./result/bin/{azvpn,azvpnd}
                                # plus ./result/libexec/azvpn-openvpn
 
 # Distribution artifacts (also produced by CI on every tag push):
-nix build .#azvpn-darwin-tarball  # → result/azvpn-<v>-aarch64-apple-darwin.tar.gz
-                                  #   (cross-built from Linux; CI's mac path)
-cargo xtask release-macos         # same tarball, native macOS build path
+cargo xtask release-macos         # → dist/azvpn-<v>-aarch64-apple-darwin.tar.gz
+                                  #   (macOS host only; CI builds the
+                                  #   same artifact natively on macos-latest)
 cargo xtask release-windows       # → dist/azvpn-<v>-x86_64-windows.msi
 nix build .#openvpn-azvpn-static  # static (musl) openvpn for the .deb/.rpm
 cargo deb -p azvpn                # → target/debian/*.deb

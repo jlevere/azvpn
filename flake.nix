@@ -312,115 +312,23 @@
           cargoArtifacts = azvpn-windows-cross-deps;
         });
 
-        # Cross-compile the workspace for aarch64-apple-darwin from a
-        # Linux host via cargo-zigbuild. zig ships SDK shims (libSystem
-        # tbd files + headers) so we don't need Apple's redistribution-
-        # restricted SDK in the nix store. Works because our macOS
-        # tunnel crate is pure Rust filesystem I/O — no
-        # `system-configuration`, no `core-foundation`, no framework
-        # links. The keyring backend is file-only on macOS this
-        # session, so no `Security.framework` either.
-        #
-        # Motivation: macos-latest runners bill 10× ubuntu rate. The
-        # whole point of brew/.deb/.msi delivery is end users never
-        # build, so CI just has to produce the artifacts — no need to
-        # run them. The dev machine catches macOS-specific runtime
-        # regressions.
-        darwinCrossArgs = commonArgs // {
-          # zig provides the darwin shim; we don't need nixpkgs's
-          # darwin SDK in the picture. `libclang` is needed by
-          # `net-route`'s build.rs (it runs `bindgen` against macOS
-          # PF_ROUTE headers when `CARGO_CFG_TARGET_OS == macos`,
-          # which holds even when cross-compiling). The
-          # `LIBCLANG_PATH` env var below points `bindgen` at the
-          # right `libclang.so` — without it, the build panics with
-          # "Unable to find libclang".
-          nativeBuildInputs = [
-            pkgs.zig
-            pkgs.cargo-zigbuild
-            pkgs.libclang.lib
-          ];
-          buildInputs = [ ];
-
-          CARGO_BUILD_TARGET = "aarch64-apple-darwin";
-          LIBCLANG_PATH = "${pkgs.libclang.lib}/lib";
-          # crane wraps `cargo build`; replace the command so deps
-          # also use zigbuild's linker. The `HOME` redirect is
-          # because `cargo-zigbuild` writes a symlink-shim cache to
-          # `dirs::cache_dir()` (`~/Library/Caches/` on darwin,
-          # `~/.cache/` on linux) on first invocation — nix's sandbox
-          # has `$HOME=/homeless-shelter` read-only, so we point it at
-          # the build's own writable workdir.
-          preBuild = ''
-            export HOME=$TMPDIR
-            export ZIG_GLOBAL_CACHE_DIR=$TMPDIR/zig-cache
-          '';
-          cargoBuildCommand =
-            "cargo zigbuild --release --target aarch64-apple-darwin";
-          cargoCheckCommand =
-            "cargo zigbuild --release --target aarch64-apple-darwin --tests";
-
-          # Can't execute aarch64-apple-darwin Mach-O on a Linux host
-          # without rosetta/wine equivalents (there are none worth
-          # using). Maintainer's dev mac runs the test suite.
-          doCheck = false;
-
-          # No explicit `CC_*` / `CXX_*` overrides — `cargo-zigbuild`
-          # installs PATH shims (`cc`, `c++`, `ar`, `ranlib`) that
-          # re-exec into `zig cc --target=…`. Setting the env-var form
-          # would re-enter cargo-zigbuild's frontend and confuse cc-rs.
-          # Vendored-C deps (ring, libz-sys) pick up the shims via PATH.
-          pname = "azvpn-darwin-cross";
-        };
-
-        azvpn-darwin-cross-deps = craneLib.buildDepsOnly darwinCrossArgs;
-
-        azvpn-darwin-cross = craneLib.buildPackage (darwinCrossArgs // {
-          cargoArtifacts = azvpn-darwin-cross-deps;
-        });
-
-        # Final brew tarball — Rust binaries cross-built on Linux via
-        # cargo-zigbuild, plus the openvpn `USER_PASS_LEN` patch shipped
-        # in `patches/` for the formula to apply during its local
-        # openvpn build. Layout:
-        #
-        #   azvpn-<v>-aarch64-apple-darwin/
-        #     bin/azvpn
-        #     libexec/azvpnd
-        #     patches/openvpn-increase-user-pass-len.patch
-        #     LICENSE-MIT, LICENSE-APACHE, README.md
-        #
-        # Note `libexec/azvpn-openvpn` is intentionally absent — the
-        # brew formula's `def install` compiles openvpn 2.6.19 +
-        # patches/ on the user's mac (~30s on M1) and drops the binary
-        # there. Cross-compiling C from Linux to darwin is broken in
-        # nixpkgs (see `azvpn-darwin-cross` comment above for the
-        # macOS-runner cost rationale).
-        #
-        # Produces the .tar.gz directly so release.yml only has to
-        # upload it.
-        azvpn-darwin-tarball =
-          let
-            version = "0.1.0";
-            stageDir = "azvpn-${version}-aarch64-apple-darwin";
-          in
-          pkgs.runCommandLocal "${stageDir}.tar.gz" {
-            nativeBuildInputs = [ pkgs.gnutar pkgs.gzip pkgs.coreutils ];
-          } ''
-            mkdir -p ${stageDir}/bin ${stageDir}/libexec ${stageDir}/patches
-
-            install -m 0755 ${azvpn-darwin-cross}/bin/azvpn ${stageDir}/bin/azvpn
-            install -m 0755 ${azvpn-darwin-cross}/bin/azvpnd ${stageDir}/libexec/azvpnd
-
-            install -m 0644 ${./patches/openvpn-increase-user-pass-len.patch} \
-              ${stageDir}/patches/openvpn-increase-user-pass-len.patch
-
-            install -m 0644 ${./LICENSE-MIT} ${stageDir}/LICENSE-MIT
-            install -m 0644 ${./LICENSE-APACHE} ${stageDir}/LICENSE-APACHE
-            install -m 0644 ${./README.md} ${stageDir}/README.md
-
-            tar -czf $out --owner=0 --group=0 --mtime=@0 ${stageDir}
-          '';
+        # No cross-darwin derivation in this flake. CI builds the
+        # macOS tarball natively on `macos-latest` (free for public
+        # repos under GitHub's standard-runner billing), which
+        # sidesteps the long tail of zig-shim + Apple-framework
+        # issues we hit trying to cross from Linux:
+        #   - `if-watch` links `SystemConfiguration` / `CoreFoundation`
+        #     for reachability events; zig's darwin shim ships only
+        #     `libSystem`, not the full framework set.
+        #   - `net-route` runs `bindgen` against `PF_ROUTE` headers
+        #     under `cargo:rustc-cfg=darwin`, which needs `libclang`
+        #     in the sandbox.
+        #   - `nixpkgs`-side cross-darwin is structurally broken
+        #     (apple-sdk propagate-inputs infinite recursion,
+        #     https://github.com/NixOS/nixpkgs/issues/273442).
+        # Local-dev mac builds happen via `cargo build --release`;
+        # CI orchestration lives in `.github/workflows/release.yml`'s
+        # `build-macos` job.
 
         # Linux-native MSI build driven by `wixl` from `msitools`.
         # No Wine, no .NET, no Windows host — `wixl` is a pure C
@@ -485,9 +393,7 @@
         packages = {
           default = azvpn;
           inherit azvpn openvpn-azvpn openvpn-azvpn-win64 openvpn-azvpn-win64-bundle
-                  azvpn-windows-cross azvpn-windows-msi
-                  azvpn-darwin-cross
-                  azvpn-darwin-tarball;
+                  azvpn-windows-cross azvpn-windows-msi;
         } // pkgs.lib.optionalAttrs pkgs.stdenv.isLinux {
           inherit openvpn-azvpn-static;
         };

@@ -53,40 +53,34 @@ jobs:
           path: azvpn-linux-x86_64
 
   # macOS release tarball — what `brew install jlevere/tap/azvpn`
-  # consumes. Cross-built on ubuntu-latest (10× cheaper than
-  # macos-latest) via the flake's `azvpn-darwin-tarball` derivation:
-  #   - Rust binaries cross via crane + cargo-zigbuild
-  #   - patched openvpn cross via nixpkgs-stable.pkgsCross.aarch64-darwin
-  #   - staged into `bin/` + `libexec/` per the brew formula's
-  #     `def install` block
-  # No macOS runner; magic-nix-cache populates the store from
-  # cache.nixos.org so the cross-stdenv doesn't rebuild every time.
+  # consumes. Native build on `macos-latest` (currently macOS 15
+  # arm64), free for public repos under standard-runner billing.
+  # The tarball is complete on its own — patched openvpn included —
+  # so the brew formula collapses to a download-and-extract:
+  # ~2s `brew install` vs ~30s of local compilation.
+  #
+  # All of the build orchestration — openvpn source fetch + patch +
+  # configure + make + Rust build + tarball assembly — lives in
+  # `cargo xtask release-macos`. The same command runs on a
+  # maintainer's local mac so a tarball produced locally matches
+  # what CI ships (modulo timestamps).
   build-macos:
-    runs-on: ubuntu-latest
+    runs-on: macos-latest
     outputs:
       version: ${{ steps.tarball.outputs.version }}
       sha256: ${{ steps.tarball.outputs.sha256 }}
       tarball_name: ${{ steps.tarball.outputs.tarball_name }}
     steps:
       - uses: actions/checkout@v4
-      - uses: DeterminateSystems/nix-installer-action@main
-      - uses: DeterminateSystems/magic-nix-cache-action@main
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: build-macos-aarch64
+      - name: Install openvpn build deps
+        run: brew install mbedtls@3 lzo pkg-config
       - name: Build release tarball
         id: tarball
-        run: |
-          nix build .#azvpn-darwin-tarball
-          # `.#azvpn-darwin-tarball` is already a .tar.gz; just symlink
-          # it into dist/ with the canonical name.
-          mkdir -p dist
-          version=$(grep '^version' crates/cli/Cargo.toml | head -1 | sed 's/.*"\(.*\)".*/\1/')
-          name="azvpn-${version}-aarch64-apple-darwin.tar.gz"
-          cp -L result "dist/${name}"
-          sha=$(sha256sum "dist/${name}" | awk '{print $1}')
-          {
-            echo "version=${version}"
-            echo "sha256=${sha}"
-            echo "tarball_name=${name}"
-          } >> "$GITHUB_OUTPUT"
+        run: cargo xtask release-macos --emit-ci-outputs
       - uses: actions/upload-artifact@v4
         with:
           name: azvpn-macos-aarch64

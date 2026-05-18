@@ -1,20 +1,26 @@
 //! `cargo xtask release-macos` — build the macOS release tarball.
 //!
-//! Replaces `scripts/release-macos.sh`. Shape: `cargo build` for the
-//! two Rust binaries (host-native on a maintainer's mac; CI uses the
-//! flake's `azvpn-darwin-tarball` cross-build instead), stage under
-//! `bin/` + `libexec/` matching what the Homebrew formula's `install`
-//! block expects, tar + gzip, print the sha256 ready for
-//! `publish-formula`. The patched openvpn is built locally by the
-//! brew formula's `def install` on the user's mac — we just ship the
-//! patch file in `patches/` so the formula can apply it.
+//! Native macOS build, runs identically on a maintainer's mac and on
+//! the `build-macos` CI job (`macos-latest`, free for public repos).
+//! Produces a self-contained tarball:
+//!
+//!   bin/azvpn                                        (Rust)
+//!   libexec/azvpnd                                   (Rust)
+//!   libexec/azvpn-openvpn                            (patched openvpn 2.6.x)
+//!   patches/openvpn-increase-user-pass-len.patch     (reference copy)
+//!   LICENSE-MIT, LICENSE-APACHE, README.md
+//!
+//! The Homebrew formula's `def install` is now just file placement —
+//! no resource downloads, no local compilation, no patches applied
+//! at install time. ~2s `brew install` instead of ~30s.
 //!
 //! Why Rust over shell: the layout constants live in
 //! [`crate::workspace`] and the formula's expected paths in
 //! [`azvpn_core::layout`] — keeping them as `PathBuf`s lets clippy
-//! catch typos and lets `verify_tarball_layout` (a unit test below)
-//! prove the produced tarball matches what `brew install` will look
-//! for. The shell script had no equivalent.
+//! catch typos and lets `layout_matches_formula_install_block` (a
+//! unit test below) prove the produced tarball matches what
+//! `brew install` will look for. The shell version had no
+//! equivalent.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -31,6 +37,19 @@ use crate::workspace;
 /// redeclaring the triple.
 pub const TARGET_TRIPLE: &str = "aarch64-apple-darwin";
 
+/// Upstream openvpn release we patch + ship. Same source the .deb /
+/// .rpm pipelines build against (via `nix build .#openvpn-azvpn-static`),
+/// so all three platforms ship wire-compatible openvpn binaries.
+const OPENVPN_VERSION: &str = "2.6.19";
+const OPENVPN_SHA256: &str = "13702526f687c18b2540c1a3f2e189187baaa65211edcf7ff6772fa69f0536cf";
+const OPENVPN_URL: &str =
+    "https://swupdate.openvpn.net/community/releases/openvpn-2.6.19.tar.gz";
+
+// `clap::Args` derives a struct from CLI flag definitions; each
+// `--flag` becomes a `bool` field. Four such flags here is fine —
+// `clippy::struct_excessive_bools` fires on any struct with >3
+// bools without recognizing this idiom.
+#[allow(clippy::struct_excessive_bools)]
 #[derive(clap::Args, Debug)]
 pub struct Args {
     /// Output directory for the staged tarball. Created if missing.
@@ -47,6 +66,13 @@ pub struct Args {
     /// can still be exercised.
     #[arg(long)]
     pub skip_host_check: bool,
+
+    /// Skip the patched openvpn build. Faster turnaround when
+    /// iterating on the Rust side or the tarball layout; the
+    /// resulting tarball will have a missing `libexec/azvpn-openvpn`
+    /// and won't install via the Homebrew formula. Off by default.
+    #[arg(long)]
+    pub skip_openvpn: bool,
 
     /// Append `version=`, `sha256=`, `tarball_name=` lines to the
     /// `$GITHUB_OUTPUT` file so a downstream CI job can consume them
@@ -87,11 +113,16 @@ pub fn run(args: Args) -> Result<()> {
     println!("==> building azvpn + azvpnd (release)");
     cargo_build_release(&root)?;
 
-    // No openvpn build here — the brew formula's `def install`
-    // compiles patched openvpn locally on the user's mac. We ship
-    // the patch file in the tarball so the formula can apply it.
-    println!("==> staging binaries + patch");
-    let layout = tarball_layout(&root, &stage);
+    let openvpn_bin: Option<PathBuf> = if args.skip_openvpn {
+        println!("==> skipping openvpn build (--skip-openvpn)");
+        None
+    } else {
+        println!("==> building patched openvpn {OPENVPN_VERSION}");
+        Some(build_patched_openvpn(&root, &dist)?)
+    };
+
+    println!("==> staging tarball");
+    let layout = tarball_layout(&root, &stage, openvpn_bin.as_deref());
     for entry in &layout {
         install_file(&entry.src, &entry.dst, entry.mode).with_context(|| {
             format!("install {} → {}", entry.src.display(), entry.dst.display())
@@ -161,10 +192,15 @@ impl StagedFile {
 /// come from `azvpn_core::layout` — same constants the
 /// `install-daemon` CLI uses to discover the binaries at runtime,
 /// so a rename only needs to land in one place.
-fn tarball_layout(root: &Path, stage: &Path) -> Vec<StagedFile> {
-    use azvpn_core::layout::{BREW_DAEMON_REL, OPENVPN_PATCH_REL};
+///
+/// `openvpn_bin` is the path to the freshly-built patched openvpn
+/// binary. `None` when the caller passed `--skip-openvpn`; the
+/// openvpn entry is dropped from the layout entirely in that case
+/// (so we don't try to copy a nonexistent file).
+fn tarball_layout(root: &Path, stage: &Path, openvpn_bin: Option<&Path>) -> Vec<StagedFile> {
+    use azvpn_core::layout::{BREW_DAEMON_REL, BREW_OPENVPN_REL, OPENVPN_PATCH_REL};
 
-    vec![
+    let mut layout = vec![
         StagedFile {
             src: root.join("target/release/azvpn"),
             dst: stage.join("bin/azvpn"),
@@ -175,33 +211,149 @@ fn tarball_layout(root: &Path, stage: &Path) -> Vec<StagedFile> {
             dst: stage.join(BREW_DAEMON_REL),
             mode: 0o755,
         },
-        // openvpn is intentionally absent — the brew formula's `def
-        // install` compiles patched openvpn locally with mbedtls
-        // (~30s on M1). Cross-compiling C from Linux to darwin is
-        // structurally broken in nixpkgs; native macOS runners bill
-        // 10×. Ship the patch in the tarball so the formula can
-        // apply it.
-        StagedFile {
-            src: root.join(OPENVPN_PATCH_REL),
-            dst: stage.join(OPENVPN_PATCH_REL),
-            mode: 0o644,
-        },
-        StagedFile {
-            src: root.join("LICENSE-MIT"),
-            dst: stage.join("LICENSE-MIT"),
-            mode: 0o644,
-        },
-        StagedFile {
-            src: root.join("LICENSE-APACHE"),
-            dst: stage.join("LICENSE-APACHE"),
-            mode: 0o644,
-        },
-        StagedFile {
-            src: root.join("README.md"),
-            dst: stage.join("README.md"),
-            mode: 0o644,
-        },
-    ]
+    ];
+    if let Some(bin) = openvpn_bin {
+        layout.push(StagedFile {
+            src: bin.to_path_buf(),
+            dst: stage.join(BREW_OPENVPN_REL),
+            mode: 0o755,
+        });
+    }
+    // Patch ships in the tarball even though the formula no longer
+    // applies it at install time — it's the auditable record of
+    // what we patched against upstream, and downstream rebuilders
+    // (anyone reproducing the binary) need it.
+    layout.push(StagedFile {
+        src: root.join(OPENVPN_PATCH_REL),
+        dst: stage.join(OPENVPN_PATCH_REL),
+        mode: 0o644,
+    });
+    layout.push(StagedFile {
+        src: root.join("LICENSE-MIT"),
+        dst: stage.join("LICENSE-MIT"),
+        mode: 0o644,
+    });
+    layout.push(StagedFile {
+        src: root.join("LICENSE-APACHE"),
+        dst: stage.join("LICENSE-APACHE"),
+        mode: 0o644,
+    });
+    layout.push(StagedFile {
+        src: root.join("README.md"),
+        dst: stage.join("README.md"),
+        mode: 0o644,
+    });
+    layout
+}
+
+/// Download upstream openvpn, apply our `USER_PASS_LEN` patch,
+/// configure against the Homebrew-installed `mbedtls@3` + `lzo`,
+/// build, and return the path to the resulting binary.
+///
+/// Runs in `<dist>/openvpn-build/` so successive runs don't litter
+/// the workspace. `brew --prefix` discovery means CI + dev both pick
+/// up the same dep paths.
+fn build_patched_openvpn(root: &Path, dist: &Path) -> Result<PathBuf> {
+    let workdir = dist.join("openvpn-build");
+    if workdir.exists() {
+        fs::remove_dir_all(&workdir).with_context(|| format!("clean {}", workdir.display()))?;
+    }
+    fs::create_dir_all(&workdir)?;
+
+    let tarball = workdir.join(format!("openvpn-{OPENVPN_VERSION}.tar.gz"));
+    run_at(
+        "curl",
+        &["-fsSL", OPENVPN_URL, "-o", &tarball.display().to_string()],
+        &workdir,
+    )
+    .context("download openvpn source")?;
+
+    let got = sha256_hex(&tarball)?;
+    if got != OPENVPN_SHA256 {
+        bail!(
+            "openvpn source checksum mismatch — expected {OPENVPN_SHA256}, got {got}. \
+             Either the upstream tarball was re-uploaded (verify, then bump the constant) \
+             or the download was corrupted (rerun).",
+        );
+    }
+
+    run_at("tar", &["xzf", &tarball.display().to_string()], &workdir).context("extract openvpn")?;
+    let srcdir = workdir.join(format!("openvpn-{OPENVPN_VERSION}"));
+
+    let patch = root.join(azvpn_core::layout::OPENVPN_PATCH_REL);
+    run_at("patch", &["-p1", "-i", &patch.display().to_string()], &srcdir)
+        .context("apply USER_PASS_LEN patch")?;
+
+    let mbedtls_prefix = brew_prefix("mbedtls@3")?;
+    let lzo_prefix = brew_prefix("lzo")?;
+    let pkg_config_path = format!("{mbedtls_prefix}/lib/pkgconfig:{lzo_prefix}/lib/pkgconfig");
+
+    let configure_status = Command::new("./configure")
+        .current_dir(&srcdir)
+        .env("PKG_CONFIG_PATH", &pkg_config_path)
+        .args([
+            "--with-crypto-library=mbedtls",
+            "--disable-lz4",
+            "--disable-plugins",
+            "--disable-dependency-tracking",
+            "--disable-silent-rules",
+        ])
+        .status()
+        .context("spawn ./configure")?;
+    if !configure_status.success() {
+        bail!("openvpn ./configure exited with {configure_status}");
+    }
+
+    let make_status = Command::new("make")
+        .current_dir(&srcdir)
+        .args(["-j", &num_cpus_string()])
+        .env("PKG_CONFIG_PATH", &pkg_config_path)
+        .status()
+        .context("spawn make")?;
+    if !make_status.success() {
+        bail!("openvpn make exited with {make_status}");
+    }
+
+    Ok(srcdir.join("src/openvpn/openvpn"))
+}
+
+/// Resolve a Homebrew formula prefix (`/opt/homebrew/opt/<name>` on
+/// arm64). Cheap shell-out — the alternative is parsing the
+/// JSON-formatted output of `brew info --json`, which is slower and
+/// more brittle than the explicit `--prefix` query.
+fn brew_prefix(formula: &str) -> Result<String> {
+    let out = Command::new("brew")
+        .args(["--prefix", formula])
+        .output()
+        .with_context(|| format!("spawn brew --prefix {formula}"))?;
+    if !out.status.success() {
+        bail!(
+            "brew --prefix {formula} failed: {}",
+            String::from_utf8_lossy(&out.stderr).trim(),
+        );
+    }
+    Ok(String::from_utf8(out.stdout)?.trim().to_string())
+}
+
+fn num_cpus_string() -> String {
+    Command::new("sysctl")
+        .args(["-n", "hw.ncpu"])
+        .output()
+        .ok()
+        .and_then(|o| String::from_utf8(o.stdout).ok())
+        .map_or_else(|| "4".to_string(), |s| s.trim().to_string())
+}
+
+fn run_at(cmd: &str, args: &[&str], cwd: &Path) -> Result<()> {
+    let status = Command::new(cmd)
+        .current_dir(cwd)
+        .args(args)
+        .status()
+        .with_context(|| format!("spawn {cmd}"))?;
+    if !status.success() {
+        bail!("{cmd} {args:?} exited with {status}");
+    }
+    Ok(())
 }
 
 fn require_host_arm64_macos() -> Result<()> {
@@ -283,28 +435,35 @@ fn create_tarball(stage: &Path, tarball: &Path) -> Result<()> {
 mod tests {
     use super::*;
 
-    fn fake_layout() -> Vec<StagedFile> {
+    fn fake_layout_with_openvpn() -> Vec<StagedFile> {
         tarball_layout(
             Path::new("/ws"),
             Path::new("/ws/dist/azvpn-0.0.0-aarch64-apple-darwin"),
+            Some(Path::new("/ws/dist/openvpn-build/openvpn-2.6.19/src/openvpn/openvpn")),
+        )
+    }
+
+    fn fake_layout_without_openvpn() -> Vec<StagedFile> {
+        tarball_layout(
+            Path::new("/ws"),
+            Path::new("/ws/dist/azvpn-0.0.0-aarch64-apple-darwin"),
+            None,
         )
     }
 
     /// The formula installs:
     ///   bin.install     "bin/azvpn"
     ///   libexec.install "libexec/azvpnd"
+    ///   libexec.install "libexec/azvpn-openvpn"
     ///   pkgshare.install "LICENSE-MIT", "LICENSE-APACHE"
     ///   doc.install      "README.md"
     ///
-    /// The formula compiles openvpn itself in `def install` (no
-    /// `libexec/azvpn-openvpn` from the tarball), but it reads our
-    /// `patches/openvpn-increase-user-pass-len.patch` to apply
-    /// USER_PASS_LEN bump — so that path is also pinned here.
+    /// We also ship the patch file as a reference / audit artifact.
     /// Any drift between this list and the formula means `brew
     /// install` blows up.
     #[test]
     fn layout_matches_formula_install_block() {
-        let layout = fake_layout();
+        let layout = fake_layout_with_openvpn();
         let names: Vec<String> = layout
             .iter()
             .map(|e| {
@@ -318,6 +477,7 @@ mod tests {
         for required in [
             "bin/azvpn",
             azvpn_core::layout::BREW_DAEMON_REL,
+            azvpn_core::layout::BREW_OPENVPN_REL,
             azvpn_core::layout::OPENVPN_PATCH_REL,
             "LICENSE-MIT",
             "LICENSE-APACHE",
@@ -330,16 +490,32 @@ mod tests {
         }
     }
 
+    /// `--skip-openvpn` produces a layout *missing* the openvpn
+    /// binary entry. Used for fast iteration on the Rust side; the
+    /// resulting tarball won't satisfy the brew formula, which is
+    /// fine for layout testing.
+    #[test]
+    fn skip_openvpn_drops_the_openvpn_entry() {
+        let layout = fake_layout_without_openvpn();
+        let has_openvpn = layout
+            .iter()
+            .any(|e| e.dst.ends_with(azvpn_core::layout::BREW_OPENVPN_REL));
+        assert!(
+            !has_openvpn,
+            "openvpn entry should be absent when caller passes None",
+        );
+    }
+
     #[test]
     fn only_executables_are_marked_binary() {
-        let layout = fake_layout();
+        let layout = fake_layout_with_openvpn();
         let binaries: Vec<_> = layout
             .iter()
             .filter(|e| e.is_binary())
             .map(|e| e.dst.file_name().unwrap().to_string_lossy().into_owned())
             .collect();
-        // The strip loop must hit exactly these two; running `strip`
+        // The strip loop must hit exactly these three; running `strip`
         // on a text file is a hard error on some BSD strips.
-        assert_eq!(binaries, vec!["azvpn", "azvpnd"]);
+        assert_eq!(binaries, vec!["azvpn", "azvpnd", "azvpn-openvpn"]);
     }
 }
