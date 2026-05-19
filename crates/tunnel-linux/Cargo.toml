@@ -1,6 +1,6 @@
 [package]
 name = "azvpn-tunnel-linux"
-version = "0.2.0"
+version = "0.2.1"
 description = "Linux TUN tunnel and systemd-resolved DNS management"
 edition.workspace = true
 rust-version.workspace = true

@@ -204,7 +204,7 @@
         commonArgs = {
           inherit src;
           pname = "azvpn";
-          version = "0.2.0";
+          version = "0.2.1";
           strictDeps = true;
 
           nativeBuildInputs = with pkgs; [
@@ -367,7 +367,7 @@
         # store. The unsigned MSI from this derivation is still
         # functional — Windows will just show "Unknown publisher"
         # in the UAC prompt.
-        azvpn-windows-msi = pkgs.runCommandLocal "azvpn-0.2.0-x64.msi" {
+        azvpn-windows-msi = pkgs.runCommandLocal "azvpn-0.2.1-x64.msi" {
           nativeBuildInputs = [ pkgs.msitools ];
         } ''
           mkdir -p staging/openvpn
@@ -383,7 +383,7 @@
           wixl \
             -v \
             -a x64 \
-            -D Version=0.2.0 \
+            -D Version=0.2.1 \
             -D AzvpnExe=$PWD/staging/azvpn.exe \
             -D AzvpndExe=$PWD/staging/azvpnd.exe \
             -D ReadmeFirstRun=$PWD/staging/README-FIRSTRUN.txt \
