@@ -50,6 +50,9 @@ fn print(r: &StatusReport) {
     println!("profile: {}", r.profile_label);
     println!("mgmt:    {}", r.mgmt_addr);
     println!("uptime:  {}", format_uptime(r.uptime_secs));
+    if let Some(state) = &r.state {
+        println!("state:   {state:?}");
+    }
     if let Some(ip) = r.local_ip {
         println!("ip:      {ip}");
     }
