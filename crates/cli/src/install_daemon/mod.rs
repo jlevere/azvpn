@@ -202,6 +202,15 @@ pub(super) async fn wait_for_daemon_socket() {
     );
 }
 
+/// Homebrew's per-arch `bin` dirs. Apple Silicon is the production
+/// target per [[project-macos-intel-out-of-scope]]; `/usr/local/bin`
+/// (Intel brew) is recognized defensively. One constant shared by
+/// the install-daemon plist derivation (`macos::brew_opt_prefix`) and
+/// the update-subcommand install detection (`update::detect_install`)
+/// so the two paths can't drift.
+#[cfg(target_os = "macos")]
+pub(crate) const BREW_BIN_DIRS: &[&str] = &["/opt/homebrew/bin", "/usr/local/bin"];
+
 /// Canonical "you just installed the daemon, here's what to do next"
 /// block. Shared by the macOS launchd path, the Linux systemd path,
 /// the Homebrew formula's `caveats`, and the MSI finish screen. One
