@@ -49,7 +49,7 @@ jobs:
   fmt:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt
@@ -67,7 +67,7 @@ jobs:
         # build work per push for no extra signal.
         os: [ubuntu-latest, windows-latest]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy
@@ -87,7 +87,7 @@ jobs:
       matrix:
         os: [ubuntu-latest, windows-latest]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - name: Install Linux system deps
@@ -98,13 +98,13 @@ jobs:
   deny:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: EmbarkStudios/cargo-deny-action@v2
 
   machete:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: taiki-e/install-action@v2
         with:
           tool: cargo-machete
@@ -126,7 +126,7 @@ jobs:
     # runs on Debian 12 (2.36), Ubuntu 22.04+, RHEL 9 (2.34 — symbol
     # versioning still works), Amazon Linux 2023, etc.
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: x86_64-unknown-linux-gnu
@@ -138,7 +138,7 @@ jobs:
       - run: cargo build --release --target x86_64-unknown-linux-gnu
       - name: Rename binary
         run: mv target/x86_64-unknown-linux-gnu/release/azvpn azvpn-linux-x86_64
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v5
         with:
           name: azvpn-linux-x86_64
           path: azvpn-linux-x86_64
@@ -158,17 +158,26 @@ jobs:
       sha256: ${{ steps.tarball.outputs.sha256 }}
       tarball_name: ${{ steps.tarball.outputs.tarball_name }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
         with:
           key: build-macos-aarch64
       - name: Install openvpn build deps
-        run: brew install mbedtls@3 lzo pkg-config
+        # `brew list ... || brew install ...` per formula keeps the
+        # step idempotent: on a runner image that already has the
+        # formula installed (often the case for pkgconf / lzo on
+        # macos-latest), `brew install` would print a noisy
+        # "already installed and up-to-date" notice. Skip the
+        # install for anything already present.
+        run: |
+          for f in mbedtls@3 lzo pkg-config; do
+            brew list --formula "$f" >/dev/null 2>&1 || brew install "$f"
+          done
       - name: Build release tarball
         id: tarball
         run: cargo xtask release-macos --emit-ci-outputs
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v5
         with:
           name: azvpn-macos-aarch64
           path: dist/azvpn-*-aarch64-apple-darwin.tar.gz
@@ -198,7 +207,7 @@ jobs:
       sha256: ${{ steps.msi.outputs.sha256 }}
       msi_name: ${{ steps.msi.outputs.msi_name }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
         with:
@@ -209,7 +218,22 @@ jobs:
       - name: Install Linux system deps
         run: sudo apt-get update && sudo apt-get install -y libdbus-1-dev pkg-config
       - uses: DeterminateSystems/nix-installer-action@main
-      - uses: DeterminateSystems/magic-nix-cache-action@main
+      # GHA-backed nix store cache (was magic-nix-cache-action, which
+      # now requires a FlakeHub.com account — paid for orgs). nix-
+      # community/cache-nix-action serializes /nix/store into the
+      # standard actions/cache backend, no third-party service. Keyed
+      # on flake.lock so a dependency bump invalidates; matched
+      # OS-prefix-first restore means a fresh PR still benefits from
+      # the most recent main-branch warm cache.
+      - uses: nix-community/cache-nix-action@v6
+        with:
+          primary-key: nix-${{ runner.os }}-${{ hashFiles('flake.lock') }}
+          restore-prefixes-first-match: nix-${{ runner.os }}-
+          gc-max-store-size-linux: 5G
+          purge: true
+          purge-prefixes: nix-${{ runner.os }}-
+          purge-created: 0
+          purge-primary-key: never
       - name: Install osslsigncode
         if: env.HAS_SIGNING == 'true'
         run: sudo apt-get update && sudo apt-get install -y osslsigncode
@@ -230,7 +254,7 @@ jobs:
         env:
           SIGN_FLAG: ${{ env.HAS_SIGNING == 'true' && '--sign' || '' }}
         run: cargo xtask release-windows $SIGN_FLAG --emit-ci-outputs
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v5
         with:
           name: azvpn-msi-x86_64
           path: dist/azvpn-*-x86_64-windows.msi
@@ -245,9 +269,24 @@ jobs:
     if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: DeterminateSystems/nix-installer-action@main
-      - uses: DeterminateSystems/magic-nix-cache-action@main
+      # GHA-backed nix store cache (was magic-nix-cache-action, which
+      # now requires a FlakeHub.com account — paid for orgs). nix-
+      # community/cache-nix-action serializes /nix/store into the
+      # standard actions/cache backend, no third-party service. Keyed
+      # on flake.lock so a dependency bump invalidates; matched
+      # OS-prefix-first restore means a fresh PR still benefits from
+      # the most recent main-branch warm cache.
+      - uses: nix-community/cache-nix-action@v6
+        with:
+          primary-key: nix-${{ runner.os }}-${{ hashFiles('flake.lock') }}
+          restore-prefixes-first-match: nix-${{ runner.os }}-
+          gc-max-store-size-linux: 5G
+          purge: true
+          purge-prefixes: nix-${{ runner.os }}-
+          purge-created: 0
+          purge-primary-key: never
       - name: Build static openvpn
         run: nix build .#openvpn-azvpn-static --print-build-logs
       - name: Stage binary
@@ -258,7 +297,7 @@ jobs:
           chmod +x out/openvpn-azvpn-linux-x86_64
           file out/openvpn-azvpn-linux-x86_64
           ./out/openvpn-azvpn-linux-x86_64 --version || true
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v5
         with:
           name: openvpn-azvpn-linux-x86_64
           path: out/openvpn-azvpn-linux-x86_64
@@ -273,7 +312,7 @@ jobs:
     if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-22.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
         with:
@@ -285,7 +324,7 @@ jobs:
       - name: Build release binaries (host triple)
         run: cargo build --release -p azvpn -p azvpn-daemon
       - name: Stage bundled openvpn
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v5
         with:
           name: openvpn-azvpn-linux-x86_64
           path: target/openvpn-azvpn-staged
@@ -298,7 +337,7 @@ jobs:
         run: cargo deb -p azvpn --no-build --output target/debian/
       - name: List produced .deb
         run: ls -la target/debian/
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v5
         with:
           name: azvpn-deb-linux-x86_64
           path: target/debian/*.deb
@@ -311,7 +350,7 @@ jobs:
     if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-22.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
         with:
@@ -323,7 +362,7 @@ jobs:
       - name: Build release binaries (host triple)
         run: cargo build --release -p azvpn -p azvpn-daemon
       - name: Stage bundled openvpn
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v5
         with:
           name: openvpn-azvpn-linux-x86_64
           path: target/openvpn-azvpn-staged
@@ -338,7 +377,7 @@ jobs:
           cargo generate-rpm -p crates/cli --output target/generate-rpm/
       - name: List produced .rpm
         run: ls -la target/generate-rpm/
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v5
         with:
           name: azvpn-rpm-linux-x86_64
           path: target/generate-rpm/*.rpm
@@ -350,7 +389,7 @@ jobs:
     if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v5
         with:
           path: artifacts
           merge-multiple: true
@@ -386,14 +425,14 @@ jobs:
     if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
         with:
           key: publish-formula-ubuntu
       - name: Install Linux system deps
         run: sudo apt-get update && sudo apt-get install -y libdbus-1-dev pkg-config
-      - uses: actions/create-github-app-token@v1
+      - uses: actions/create-github-app-token@v2
         id: app-token
         with:
           app-id: ${{ secrets.HOMEBREW_TAP_APP_ID }}
