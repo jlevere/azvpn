@@ -359,7 +359,7 @@ jobs:
       # `/usr/libexec/azvpn/openvpn`), not a user-facing artifact.
       - name: Strip intermediate build artifacts from release set
         run: rm -f artifacts/openvpn-azvpn-linux-x86_64
-      - uses: softprops/action-gh-release@v2
+      - uses: softprops/action-gh-release@v3
         with:
           files: artifacts/*
           generate_release_notes: true
