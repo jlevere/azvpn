@@ -41,6 +41,15 @@ libc = { workspace = true }
 tracing-journald = { workspace = true }
 sd-notify = { workspace = true }
 
+# macOS-only — filesystem watch on the daemon binary path so the
+# daemon detects `brew upgrade azvpn` and gracefully exits, letting
+# launchd's `KeepAlive=true` respawn against the new binary. Linux
+# and Windows package managers stop/start the service themselves
+# (cargo-deb postinst `try-restart`, WiX `ServiceControl`), so this
+# capability isn't needed there.
+[target.'cfg(target_os = "macos")'.dependencies]
+notify = { workspace = true }
+
 # Windows daemon: SCM service shell (windows-service),
 # hibernation detector + admin check + GP refresh (windows-sys),
 # named-pipe SDDL helpers (widestring).
