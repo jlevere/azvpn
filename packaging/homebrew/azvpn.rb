@@ -64,13 +64,47 @@ class Azvpn < Formula
     doc.install     "README.md"
   end
 
+  # Caveats are printed on EVERY `brew install` and `brew upgrade`.
+  # We want them shown the first time the user installs the formula
+  # AND the one-time time a v0.1.x user upgrades to v0.2.0+ (whose
+  # daemon predates the binary self-restart watcher and so can't
+  # auto-respawn against the new binary). From there on, every brew
+  # upgrade should be fully silent.
+  #
+  # Detection uses the launchd plist as ground truth:
+  #
+  # 1. **Plist absent**: no bootstrap has happened on this machine.
+  #    First-time install, or a previous `azvpn uninstall-daemon`.
+  #    Show caveats — the user must run `install-daemon`.
+  #
+  # 2. **Plist present but references a Cellar path**: this is a
+  #    pre-v0.2.0 install. The old daemon has no binary watcher, so
+  #    `brew upgrade` left it running the stale binary. Show caveats
+  #    once; the re-bootstrap rewrites the plist to point at the
+  #    opt-link and starts the v0.2.0 daemon, which has the watcher.
+  #
+  # 3. **Plist present and references the opt-link path**: modern
+  #    install. The daemon's watcher self-restarts on upgrade.
+  #    Silent.
+  LAUNCHD_PLIST = "/Library/LaunchDaemons/com.jlevere.azvpn.daemon.plist".freeze
+
   def caveats
+    if File.exist?(LAUNCHD_PLIST)
+      plist = File.read(LAUNCHD_PLIST) rescue ""
+      # `opt_libexec` resolves to `<brew-prefix>/opt/azvpn/libexec`,
+      # the path-stable opt-link that the v0.2.0+ install-daemon
+      # writes into the plist. A plist containing this string was
+      # produced by a modern install-daemon → silent.
+      return nil if plist.include?(opt_libexec.to_s)
+    end
     <<~EOS
-      Next:
+      First-time setup (or one-time re-bootstrap if upgrading
+      from a pre-v0.2.0 install — the daemon binary watcher
+      introduced in v0.2.0 handles all subsequent upgrades
+      automatically):
+
         1. sudo azvpn install-daemon
-           (one-time: writes the launchd plist and starts the daemon;
-            idempotent so re-run after every `brew upgrade azvpn` to
-            point the unit at the new binary)
+           (writes the launchd plist and starts the daemon)
         2. Download your Azure profile XML from the Azure portal
            (Virtual Network Gateway → Point-to-site → "Download VPN
             client"; unzip and grab AzureVpnProfile.xml)
