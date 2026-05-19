@@ -1,6 +1,6 @@
 [package]
 name = "azvpn-ipc"
-version = "0.2.0"
+version = "0.2.1"
 description = "Service trait + serializable wire types shared between azvpn (CLI) and azvpnd (daemon)"
 edition.workspace = true
 rust-version.workspace = true
