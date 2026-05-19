@@ -9,6 +9,7 @@
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::time::{Duration, Instant};
 
 use super::{
     NEXT_STEPS_BANNER, check_executable, other, require_root, resolve_binary,
@@ -20,14 +21,20 @@ const LAUNCHD_LABEL: &str = "com.jlevere.azvpn.daemon";
 const LAUNCHD_PLIST: &str = "/Library/LaunchDaemons/com.jlevere.azvpn.daemon.plist";
 const RUNTIME_DIR: &str = "/var/run/azvpn";
 
+/// Upper bound on how long we wait for `launchctl bootout` to actually
+/// unload the prior daemon. Empirically <500ms on a healthy system; a
+/// 5s ceiling tolerates a busy machine without making a wedged install
+/// hang the install-daemon command indefinitely.
+const BOOTOUT_WAIT: Duration = Duration::from_secs(5);
+
+/// Poll cadence while waiting for the label to disappear from launchd.
+/// `launchctl print` forks a process per probe, so we don't want to
+/// thrash; 100ms is well under the typical unload latency while still
+/// looking instant to a human.
+const BOOTOUT_POLL: Duration = Duration::from_millis(100);
+
 /// Install + bootstrap. Idempotent: a previously-bootstrapped daemon
 /// gets booted out first so the new plist takes effect.
-///
-/// `async` to share signature with the Linux variant; no awaits since
-/// launchctl is synchronous, but the dispatcher in [`super`] is async
-/// and treating both platforms uniformly there beats branching on
-/// `.await` vs not at every call site.
-#[allow(clippy::unused_async)]
 pub async fn install(daemon: Option<PathBuf>, openvpn: Option<PathBuf>) -> Result<()> {
     require_root("install-daemon")?;
 
@@ -38,11 +45,15 @@ pub async fn install(daemon: Option<PathBuf>, openvpn: Option<PathBuf>) -> Resul
     std::fs::create_dir_all(RUNTIME_DIR)?;
 
     // If a previous bootstrap is live, bootout first — launchctl rejects
-    // a fresh bootstrap when the label is already loaded. Suppress the
-    // "Boot-out failed: 3: No such process" stderr that launchctl prints
-    // when nothing was loaded; the real bootstrap below gets normal
-    // error handling.
+    // a fresh bootstrap when the label is already loaded. `bootout`
+    // returns as soon as launchd accepts the request; the actual unload
+    // is asynchronous, so an immediate `bootstrap` races against the
+    // still-loaded label and fails with `Bootstrap failed: 5: Input/
+    // output error`. Wait for the label to disappear before proceeding.
+    // Suppress the "Boot-out failed: 3: No such process" stderr — that
+    // just means nothing was loaded.
     let _ = launchctl(&["bootout", &format!("system/{LAUNCHD_LABEL}")], Quiet::Yes);
+    wait_for_bootout().await?;
 
     let plist = render_plist(&daemon_path, &openvpn_path);
     std::fs::write(LAUNCHD_PLIST, &plist)?;
@@ -97,17 +108,28 @@ fn resolve_paths(daemon: Option<PathBuf>, openvpn: Option<PathBuf>) -> Result<(P
     Ok((daemon_path, openvpn_path))
 }
 
-/// Two directories up from the CLI binary's realpath — `…/bin/azvpn`
-/// → `…/`. `std::env::current_exe()` on macOS returns the invocation
-/// path, NOT the symlink-resolved one (it wraps `_NSGetExecutablePath`,
-/// which Apple's docs explicitly call out as not following symlinks).
-/// `fs::canonicalize` walks the link chain — without it, a
-/// brew-installed CLI invoked through `/opt/homebrew/bin/azvpn` would
-/// derive prefix=`/opt/homebrew` instead of the cellar version dir,
-/// and the daemon-binary lookup misses
-/// `/opt/homebrew/Cellar/azvpn/<v>/libexec/azvpnd`.
+/// Resolve the install prefix the plist should reference. Two cases:
+///
+/// 1. **Brew install.** `current_exe()` is `<brew>/bin/azvpn` (a
+///    symlink into the cellar). Return `<brew>/opt/azvpn`, which is
+///    the keg-only "opt link" brew swings to the new cellar version
+///    on every `brew upgrade`. Baking the symlink path into the plist
+///    means `brew upgrade azvpn` is enough for launchd to spawn the
+///    new binary on next restart — the alternative (canonicalized
+///    cellar path) becomes stale the moment brew cleans up the old
+///    cellar dir, leaving the plist pointing at a deleted file.
+///
+/// 2. **Anything else** (dev `target/release`, `cargo install`,
+///    out-of-tree manual install). Fall back to the realpath-based
+///    derivation: canonicalize `current_exe()` and walk up two dirs
+///    (`…/bin/azvpn` → `…/`). `_NSGetExecutablePath` doesn't follow
+///    symlinks, so without `canonicalize` a CLI invoked through any
+///    symlink chain would derive the wrong prefix.
 fn default_prefix() -> Result<PathBuf> {
     let exe = std::env::current_exe()?;
+    if let Some(prefix) = brew_opt_prefix(&exe) {
+        return Ok(prefix);
+    }
     let exe = std::fs::canonicalize(&exe).unwrap_or(exe);
     let prefix = exe
         .parent()
@@ -115,6 +137,26 @@ fn default_prefix() -> Result<PathBuf> {
         .ok_or_else(|| other("can't derive install prefix from current_exe"))?
         .to_path_buf();
     Ok(prefix)
+}
+
+/// `<brew>/opt/azvpn` when `exe` is a brew-installed CLI, `None`
+/// otherwise. Recognized brew bin dirs are `/opt/homebrew/bin`
+/// (Apple Silicon — the only macOS target we ship, see
+/// [[project-macos-intel-out-of-scope]]) and `/usr/local/bin` (Intel
+/// brew — supported here defensively since costing nothing).
+///
+/// The formula name is derived from the binary's file name rather
+/// than hardcoded, so a future rename only needs to keep the CLI
+/// binary and formula in sync (which they have to be anyway).
+fn brew_opt_prefix(exe: &Path) -> Option<PathBuf> {
+    let parent = exe.parent()?;
+    let parent_str = parent.to_str()?;
+    if !super::BREW_BIN_DIRS.contains(&parent_str) {
+        return None;
+    }
+    let formula = exe.file_name()?.to_str()?;
+    let brew_root = parent.parent()?;
+    Some(brew_root.join("opt").join(formula))
 }
 
 /// Format the launchd plist with absolute binary paths substituted in.
@@ -203,5 +245,83 @@ fn launchctl(args: &[&str], quiet: Quiet) -> Result<()> {
             "launchctl {} exited with {status}",
             args.join(" "),
         )))
+    }
+}
+
+/// Poll until `launchctl print system/<label>` reports the label is
+/// no longer loaded. Required because `launchctl bootout` returns the
+/// moment launchd accepts the unload request, but the actual teardown
+/// of the prior daemon (signal openvpn child, free utun, drop the
+/// label) happens asynchronously. A `bootstrap` issued in that window
+/// fails with `Bootstrap failed: 5: Input/output error`.
+///
+/// `launchctl print` exits 0 with details when the label is loaded,
+/// and non-zero with `Could not find service "<label>" in domain ...`
+/// when it isn't. We use the exit code, not stderr parsing — Apple
+/// rewords those messages between OS versions.
+async fn wait_for_bootout() -> Result<()> {
+    let target = format!("system/{LAUNCHD_LABEL}");
+    let deadline = Instant::now() + BOOTOUT_WAIT;
+    loop {
+        if !label_is_loaded(&target) {
+            return Ok(());
+        }
+        if Instant::now() >= deadline {
+            return Err(other(format!(
+                "{LAUNCHD_LABEL} is still loaded {BOOTOUT_WAIT:?} after bootout — \
+                 the prior daemon may be wedged; try `sudo launchctl bootout system/{LAUNCHD_LABEL}` \
+                 and retry",
+            )));
+        }
+        tokio::time::sleep(BOOTOUT_POLL).await;
+    }
+}
+
+/// `launchctl print <target>` → exit 0 iff the label is currently
+/// loaded in the named domain. Output is silenced because the loaded
+/// case dumps a multi-KB block we don't read and the unloaded case
+/// prints "Could not find service" to stderr which is not an error
+/// from our perspective.
+fn label_is_loaded(target: &str) -> bool {
+    Command::new("/bin/launchctl")
+        .args(["print", target])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .is_ok_and(|s| s.success())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn brew_opt_prefix_recognizes_apple_silicon() {
+        let exe = Path::new("/opt/homebrew/bin/azvpn");
+        let prefix = brew_opt_prefix(exe).expect("brew install should be recognized");
+        assert_eq!(prefix, PathBuf::from("/opt/homebrew/opt/azvpn"));
+    }
+
+    #[test]
+    fn brew_opt_prefix_recognizes_intel() {
+        let exe = Path::new("/usr/local/bin/azvpn");
+        let prefix = brew_opt_prefix(exe).expect("intel brew should be recognized");
+        assert_eq!(prefix, PathBuf::from("/usr/local/opt/azvpn"));
+    }
+
+    #[test]
+    fn brew_opt_prefix_rejects_dev_paths() {
+        assert!(brew_opt_prefix(Path::new("/Users/me/repo/target/release/azvpn")).is_none());
+        assert!(brew_opt_prefix(Path::new("/usr/bin/azvpn")).is_none());
+        assert!(brew_opt_prefix(Path::new("/opt/homebrew/sbin/azvpn")).is_none());
+    }
+
+    #[test]
+    fn brew_opt_prefix_uses_binary_name_as_formula() {
+        // A future rename of the CLI binary should auto-derive the
+        // matching formula slug without needing to update this code.
+        let exe = Path::new("/opt/homebrew/bin/azvpn-next");
+        let prefix = brew_opt_prefix(exe).unwrap();
+        assert_eq!(prefix, PathBuf::from("/opt/homebrew/opt/azvpn-next"));
     }
 }
