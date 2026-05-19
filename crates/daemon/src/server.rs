@@ -109,7 +109,35 @@ impl AzvpndServer {
         verbose: bool,
     ) -> Result<(), IpcError> {
         let mut active = self.state.active.lock().await;
-        if active.is_some() {
+        if let Some(existing) = active.as_ref() {
+            // Same profile already in the active slot — make `azvpn up`
+            // idempotent. Subscribe to the running connection's status
+            // channel and wait for it to reach a terminal state, then
+            // return the same Result the original `start_connection`
+            // would have returned. `wait_for` resolves immediately when
+            // the current value already satisfies `is_terminal`, so the
+            // already-Connected case is a no-op return.
+            //
+            // Without this, `azvpn up` against a live tunnel errors with
+            // `AlreadyConnected`, which is misleading: the user asked
+            // "are we up on this profile?" and the answer is yes.
+            if existing.profile_label == profile_label {
+                let mut wait_rx = existing.status_rx.clone();
+                drop(active);
+                let terminal = wait_rx
+                    .wait_for(is_terminal)
+                    .await
+                    .map_err(|_| {
+                        IpcError::Other("status channel closed before terminal state".into())
+                    })?
+                    .clone();
+                return finalize_terminal(terminal);
+            }
+            // Different profile is up. The user must `azvpn down` first
+            // (or pick the active profile) — we don't auto-swap because
+            // a route/DNS reconfiguration mid-flight has surprising
+            // failure modes. Keep the existing error; a richer message
+            // naming the live profile would need a wire-version bump.
             return Err(IpcError::AlreadyConnected);
         }
 
@@ -189,20 +217,7 @@ impl AzvpndServer {
             .await
             .map_err(|_| IpcError::Other("status channel closed before terminal state".into()))?
             .clone();
-
-        match terminal {
-            ConnectionStatus::OpenVpn {
-                state: VpnState::Connected,
-                ..
-            } => Ok(()),
-            ConnectionStatus::Failed(reason) => Err(IpcError::OpenVpn(reason)),
-            ConnectionStatus::Exited { code } => Err(IpcError::OpenVpn(format!(
-                "openvpn exited before reaching Connected (code {code:?})"
-            ))),
-            other => Err(IpcError::Other(format!(
-                "unexpected terminal status: {other:?}"
-            ))),
-        }
+        finalize_terminal(terminal)
     }
 
     /// Tear down the active connection (if any) and wait for the
@@ -342,6 +357,27 @@ fn is_terminal(s: &ConnectionStatus) -> bool {
         } | ConnectionStatus::Exited { .. }
             | ConnectionStatus::Failed(_)
     )
+}
+
+/// Map a terminal `ConnectionStatus` to the corresponding RPC result.
+/// Shared between the fresh-spawn path (the connect task we just
+/// launched) and the idempotent same-profile path (an in-flight
+/// converge or already-connected tunnel) so both report the same
+/// outcome to the caller.
+fn finalize_terminal(terminal: ConnectionStatus) -> Result<(), IpcError> {
+    match terminal {
+        ConnectionStatus::OpenVpn {
+            state: VpnState::Connected,
+            ..
+        } => Ok(()),
+        ConnectionStatus::Failed(reason) => Err(IpcError::OpenVpn(reason)),
+        ConnectionStatus::Exited { code } => Err(IpcError::OpenVpn(format!(
+            "openvpn exited before reaching Connected (code {code:?})"
+        ))),
+        other => Err(IpcError::Other(format!(
+            "unexpected terminal status: {other:?}"
+        ))),
+    }
 }
 
 fn build_status(conn: &ActiveConnection) -> StatusReport {
