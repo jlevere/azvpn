@@ -10,6 +10,8 @@
 //!   - cancels any in-progress connection via its child token, so
 //!     openvpn / DNS / routes tear down before we exit.
 
+#[cfg(target_os = "macos")]
+mod binary_watcher;
 mod config;
 mod converge;
 mod routes;
@@ -281,6 +283,11 @@ async fn unix_main() -> ExitCode {
     // cleanly if converge is already in flight.
     tokio::spawn(converge::try_converge(server.clone()));
     tokio::spawn(rt_refresh::run(shutdown.clone()));
+    // macOS only — Linux .deb postinst restarts the unit, Windows MSI
+    // stops/starts via ServiceControl. brew has no equivalent hook,
+    // so the daemon detects its own binary swap and self-exits.
+    #[cfg(target_os = "macos")]
+    binary_watcher::spawn(server.clone(), shutdown.clone());
 
     accept_loop(listener, server.clone(), socket_group_gid, &shutdown).await;
 

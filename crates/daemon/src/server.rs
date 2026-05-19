@@ -206,6 +206,22 @@ impl AzvpndServer {
     }
 
     /// Tear down the active connection (if any) and wait for the
+    /// Whether a connection is currently up or being established. Used
+    /// by the macOS self-restart watcher to defer a binary-swap restart
+    /// until the user's tunnel is down — restarting under an active
+    /// tunnel drops the user's traffic for the ~3s it takes to respawn
+    /// and re-handshake. The [[project-just-works-bar]] line says don't
+    /// drop traffic for housekeeping the user didn't ask for.
+    ///
+    /// Gated to macOS because that's the only caller today — Linux and
+    /// Windows orchestrate restart from outside the daemon (apt postinst
+    /// `try-restart`; WiX `ServiceControl` inside the MSI transaction).
+    /// Building it on every platform would surface as a dead-code warning.
+    #[cfg(target_os = "macos")]
+    pub async fn has_active_connection(&self) -> bool {
+        self.state.active.lock().await.is_some()
+    }
+
     /// connect task to finish. Called from the daemon's signal-driven
     /// shutdown path so SIGTERM produces a clean teardown — routes,
     /// DNS key, openvpn child — instead of leaving kernel state for

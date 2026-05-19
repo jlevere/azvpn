@@ -42,6 +42,11 @@ allow = [
     # equivalent in effect to MIT/ISC — attribution-only with a
     # "don't claim you wrote it" rider.
     "Zlib",
+    # CC0-1.0: `notify` (cross-platform fs watcher, macOS-only dep of
+    # azvpn-daemon for the brew-upgrade self-restart watcher). FSF
+    # Free/Libre, public-domain-equivalent — caller takes the work
+    # with no obligations.
+    "CC0-1.0",
 ]
 confidence-threshold = 0.93
 

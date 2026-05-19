@@ -117,6 +117,18 @@ zbus = { version = "5", default-features = false, features = ["tokio"] }
 # cross-platform so it also works for any future macOS/Windows code
 # that needs the same.
 if-addrs = "0.13"
+# Cross-platform filesystem watcher (FSEvents / inotify /
+# ReadDirectoryChangesW behind one API). Only consumed by the daemon's
+# macOS self-restart watcher today — `brew upgrade` doesn't get a
+# post_install hook that can stop/start the launchd service, so we
+# detect the binary swap from inside the daemon and trigger graceful
+# shutdown. `default-features = false` + the explicit `macos_fsevent`
+# feature opts in to just the FSEvents backend on macOS without the
+# kqueue fallback and serde-event support we don't use. Linux /
+# Windows packagers handle restart in the install transaction so this
+# isn't needed there — the dep is target-gated to macOS in
+# `crates/daemon/Cargo.toml`.
+notify = { version = "8", default-features = false, features = ["macos_fsevent"] }
 
 # ─── Windows-only deps (workspace pins; consumed via per-crate
 # `[target.'cfg(target_os = "windows")']` blocks) ────────────────
