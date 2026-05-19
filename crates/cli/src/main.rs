@@ -43,6 +43,7 @@ mod profile_store;
 mod pushed;
 mod status;
 mod up;
+mod update;
 mod whoami;
 
 pub use error::{Error, Result};
@@ -173,6 +174,16 @@ enum Command {
         #[arg(long)]
         purge: bool,
     },
+    /// Drive the native package manager to upgrade azvpn, then wait
+    /// for the new daemon to come back up. Refuses by default when a
+    /// tunnel is active — `--force` overrides. Brew on macOS, apt on
+    /// Debian; other platforms print the manual command.
+    Update {
+        /// Run the upgrade even if a tunnel is currently up. The
+        /// connection will drop while the daemon restarts.
+        #[arg(long)]
+        force: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -263,6 +274,7 @@ async fn dispatch(command: Command, openvpn_verbose: bool) -> anyhow::Result<()>
         }
         #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
         Command::UninstallDaemon { purge } => install_daemon::uninstall(purge).await?,
+        Command::Update { force } => update::run(force).await?,
     }
     Ok(())
 }
