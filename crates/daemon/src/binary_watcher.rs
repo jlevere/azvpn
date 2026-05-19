@@ -6,14 +6,15 @@
 //! ## Why this exists
 //!
 //! Homebrew does not expose a `post_install` hook that can `sudo
-//! launchctl bootout/bootstrap`, and the formula's `caveats` tell the
-//! user to re-run `sudo azvpn install-daemon` after every upgrade.
-//! That works but it's a foot-gun: the user runs `brew upgrade`, and
-//! until they remember the second step we have a new CLI on PATH
-//! talking to an old daemon in memory. The wire-version handshake
-//! catches *one* class of that (mismatched RPC shapes), but a
-//! same-wire release with a behavior change is silent. Self-restart
-//! closes the gap.
+//! launchctl bootout/bootstrap`, so without this watcher the formula
+//! would have to tell the user to re-run `sudo azvpn install-daemon`
+//! after every upgrade. That's a foot-gun: until they remember the
+//! second step, a new CLI on PATH would be talking to an old daemon
+//! in memory. The wire-version handshake catches *one* class of that
+//! (mismatched RPC shapes), but a same-wire release with a behavior
+//! change is silent. Self-restart closes the gap, so the formula's
+//! caveats tell first-time users to run `install-daemon` once and
+//! mark `brew upgrade` as fully automatic from then on.
 //!
 //! Linux and Windows don't need this — `apt`'s postinst runs
 //! `systemctl try-restart` and WiX's `<ServiceControl>` stops/starts
