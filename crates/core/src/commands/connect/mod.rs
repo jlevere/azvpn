@@ -16,9 +16,12 @@
 //! This `mod.rs` keeps just the public types and the event-loop
 //! orchestration that ties them together.
 
+use std::future::Future;
 use std::io::Write as _;
 use std::net::SocketAddr;
 use std::path::PathBuf;
+use std::pin::Pin;
+use std::sync::Arc;
 
 use azvpn_openvpn::{
     ConfigBuilder, Event, LogLevel, OpenVpnConfig, OpenVpnProcess, PushOptions, Realm, VpnState,
@@ -39,9 +42,11 @@ mod apply;
 mod auth;
 mod retry;
 mod validation;
+mod watchdog;
 
 use auth::{RenegCreds, build_auth_file};
 use retry::AttemptOutcome;
+use watchdog::Watchdog;
 
 /// Inputs the CLI / daemon / GUI marshals into a single bag. Stable across
 /// the orchestration call so callers can compose options without juggling
@@ -60,6 +65,21 @@ pub struct ConnectOptions {
     pub mgmt_addr: SocketAddr,
     pub verbose: bool,
 }
+
+/// Refresh hook for the AAD bearer between retry attempts. The daemon
+/// supplies one that silent-refreshes against its
+/// [`azvpn_auth::daemon_cache::DaemonTokenCache`]; non-AAD profiles
+/// pass `None` for the whole hook. `Ok(None)` from the closure means
+/// "skip the refresh, keep the previous token" (e.g. cache file
+/// transiently missing) — separates that from a hard `Err`.
+///
+/// `Pin<Box<dyn Future>>` rather than async-fn-in-trait because
+/// async-fn-in-trait doesn't `dyn` cleanly on stable Rust today.
+pub type BearerRefresh = Arc<
+    dyn Fn() -> Pin<Box<dyn Future<Output = std::result::Result<Option<String>, String>> + Send>>
+        + Send
+        + Sync,
+>;
 
 /// Latest connection state. Driven by openvpn's mgmt-state events plus
 /// the synthetic ones the connect loop emits before / after openvpn
@@ -87,7 +107,8 @@ pub enum ConnectionStatus {
 #[instrument(skip_all, name = "connect", fields(profile = %opts.profile_label))]
 pub async fn run(
     opts: ConnectOptions,
-    access_token: Option<String>,
+    initial_token: Option<String>,
+    refresh: Option<BearerRefresh>,
     status_tx: watch::Sender<ConnectionStatus>,
     pushed_tx: watch::Sender<Option<PushOptions>>,
     metrics_tx: watch::Sender<ConnectionMetrics>,
@@ -99,6 +120,7 @@ pub async fn run(
 
     let mut backoff = retry::default_backoff();
     let mut attempt_no: u32 = 0;
+    let mut access_token = initial_token;
     loop {
         attempt_no += 1;
         info!(attempt = attempt_no, "connect attempt");
@@ -149,6 +171,30 @@ pub async fn run(
                     () = cancel.cancelled() => {
                         tracing::info!("retry cancelled during backoff");
                         return Err(e);
+                    }
+                }
+                // Refresh the bearer before the next attempt — retrying
+                // with the AT that just got RST'd post-TLS would just
+                // burn the budget. Best-effort: refresh failures fall
+                // through to a retry with the prior token.
+                if let Some(refresh) = refresh.as_ref() {
+                    match refresh().await {
+                        Ok(Some(t)) => {
+                            info!(
+                                attempt = attempt_no + 1,
+                                "refreshed AAD bearer for next attempt"
+                            );
+                            access_token = Some(t);
+                        }
+                        Ok(None) => {
+                            debug!("bearer refresh returned no token; keeping previous");
+                        }
+                        Err(e) => {
+                            tracing::warn!(
+                                error = %e,
+                                "bearer refresh failed; retrying with previous token"
+                            );
+                        }
                     }
                 }
             }
@@ -300,6 +346,14 @@ async fn attempt(
             None
         }
     };
+    // Liveness watchdog — see [`watchdog`] module docs. `interval_at`
+    // delays the first tick by one period so the verdict isn't always
+    // `Ok` on a zero-elapsed clock; `Skip` so a slow DNS/route apply
+    // on CONNECTED doesn't queue up a burst of catch-up ticks.
+    let mut watchdog = Watchdog::new(tokio::time::Instant::now());
+    let mut watchdog_tick =
+        tokio::time::interval_at(tokio::time::Instant::now() + watchdog::TICK, watchdog::TICK);
+    watchdog_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
     loop {
         tokio::select! {
@@ -326,6 +380,21 @@ async fn attempt(
                 info!("network reachability changed; soft-restarting tunnel");
                 if let Err(e) = mgmt.send("signal SIGUSR1").await {
                     tracing::warn!(error = %e, "failed to soft-restart openvpn");
+                }
+            }
+
+            _ = watchdog_tick.tick() => {
+                let verdict = watchdog.on_tick(tokio::time::Instant::now());
+                if verdict.is_stuck() {
+                    let msg = verdict.describe();
+                    tracing::warn!("{msg}");
+                    record_error(&msg);
+                    // SIGTERM lets openvpn exit cleanly so the post-loop
+                    // `wait()` doesn't time out; the process wrapper
+                    // escalates on drop if it's ignored.
+                    let _ = mgmt.send("signal SIGTERM").await;
+                    outcome = Some(AttemptOutcome::Transient(Error::Other(msg)));
+                    break;
                 }
             }
 
@@ -379,21 +448,21 @@ async fn attempt(
                                 (false, Some(ip)) => debug!(?state, %ip, "vpn state"),
                                 (false, None) => debug!(?state, "vpn state"),
                             }
-                        }
-                        if *state == VpnState::Reconnecting {
-                            // Track every openvpn-driven reconnect for
-                            // the status RPC. Surfaces flaky sessions
-                            // ("uptime 4h, but 30 reconnects" reads
-                            // very differently from "uptime 4h, 0
-                            // reconnects").
-                            let now = std::time::SystemTime::now()
-                                .duration_since(std::time::UNIX_EPOCH)
-                                .map_or(0, |d| d.as_secs());
-                            metrics_tx.send_if_modified(|m| {
-                                m.reconnects = m.reconnects.saturating_add(1);
-                                m.last_reconnect_at = Some(now);
-                                true
-                            });
+                            watchdog.on_state_change(state, tokio::time::Instant::now());
+                            // Counter gates on `changed` too — openvpn re-emits
+                            // RECONNECTING multiple times per second when wedged,
+                            // and counting every emit inflates the metric to
+                            // thousands per minute.
+                            if *state == VpnState::Reconnecting {
+                                let now = std::time::SystemTime::now()
+                                    .duration_since(std::time::UNIX_EPOCH)
+                                    .map_or(0, |d| d.as_secs());
+                                metrics_tx.send_if_modified(|m| {
+                                    m.reconnects = m.reconnects.saturating_add(1);
+                                    m.last_reconnect_at = Some(now);
+                                    true
+                                });
+                            }
                         }
                         if *state == VpnState::Connected {
                             if !have_connected {

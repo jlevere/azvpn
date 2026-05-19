@@ -25,7 +25,7 @@
 
 use std::net::{IpAddr, SocketAddr};
 
-pub use azvpn_openvpn::{AddrFamily, Ifconfig, PushOptions, PushedRoute};
+pub use azvpn_openvpn::{AddrFamily, Ifconfig, PushOptions, PushedRoute, VpnState};
 pub use azvpn_profile::VpnProfile;
 use serde::{Deserialize, Serialize};
 
@@ -59,7 +59,10 @@ pub use identity::ClientIdentity;
 ///   auto-converge
 /// - 4: added `IpcError::PermissionDenied` variant for G.1 per-RPC
 ///   admin check on Windows
-pub const WIRE_VERSION: u32 = 4;
+/// - 5: added `StatusReport.state` so callers can distinguish a
+///   healthy tunnel from a wedged reneg loop (counter ticking but
+///   stuck in `Reconnecting`)
+pub const WIRE_VERSION: u32 = 5;
 
 #[tarpc::service]
 pub trait AzvpnApi {
@@ -157,6 +160,13 @@ pub struct StatusReport {
     pub uptime_secs: u64,
     /// Tunnel-local IP (`ifconfig` from the push reply), once Connected.
     pub local_ip: Option<IpAddr>,
+    /// Current openvpn state (`Connected`, `Reconnecting`, `Auth`, …).
+    /// `None` only during the brief window between `start_connection`
+    /// filling the `active` slot and openvpn emitting its first
+    /// `>STATE:` event. The presence of `local_ip` is *not* a reliable
+    /// "tunnel is up" indicator — a wedged reneg loop holds the
+    /// pre-existing IP but isn't carrying traffic.
+    pub state: Option<VpnState>,
     pub dns_suffixes: Vec<String>,
     pub dns_servers: Vec<IpAddr>,
     /// Cumulative bytes through the tunnel since openvpn's

@@ -9,7 +9,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use azvpn_auth::{
     ExposeSecret, SecretString, Token, aad_cache_key, daemon_cache::DaemonTokenCache,
 };
-use azvpn_core::commands::connect::{self, ConnectOptions, ConnectionStatus};
+use azvpn_core::commands::connect::{self, BearerRefresh, ConnectOptions, ConnectionStatus};
 use azvpn_core::metrics::ConnectionMetrics;
 use azvpn_core::target::{self, State as TargetState, TargetState as Target};
 use azvpn_ipc::{
@@ -17,6 +17,7 @@ use azvpn_ipc::{
     StatusReport, UpRequest, VpnProfile,
 };
 use azvpn_openvpn::VpnState;
+use azvpn_profile::AuthType;
 use tarpc::context::Context;
 use tokio::sync::{Mutex, watch};
 use tokio_util::sync::CancellationToken;
@@ -120,6 +121,13 @@ impl AzvpndServer {
             .fqdn
             .clone();
 
+        // Refresh hook: built before moving `profile` into `opts` so
+        // the closure can capture the bits it needs (cache key + a
+        // profile clone for `silent_refresh`'s aad-config lookup).
+        // `None` for cert / username-pass profiles — those don't have
+        // bearers to refresh.
+        let refresh = build_bearer_refresh(&profile);
+
         // Static mgmt port — the daemon owns the only openvpn child.
         let mgmt_addr = SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 7505));
         let opts = ConnectOptions {
@@ -161,6 +169,7 @@ impl AzvpndServer {
             let result = connect::run(
                 opts,
                 access_token_plain,
+                refresh,
                 status_tx,
                 pushed_tx,
                 metrics_tx,
@@ -286,12 +295,12 @@ impl AzvpnApi for AzvpndServer {
     async fn info(self, _: Context) -> Result<InfoReport, IpcError> {
         let active = self.state.active.lock().await;
         let status = active.as_ref().map(build_status);
-        let local_ip = active.as_ref().and_then(current_local_ip);
         // Drop the lock before the async routes call so a concurrent
         // status/pushed RPC isn't blocked while we read the kernel
         // table.
         drop(active);
 
+        let local_ip = status.as_ref().and_then(|s| s.local_ip);
         let view = routes::collect(local_ip)
             .await
             .map_err(|e| IpcError::Other(format!("routes: {e}")))?;
@@ -324,7 +333,7 @@ fn build_status(conn: &ActiveConnection) -> StatusReport {
         .duration_since(UNIX_EPOCH)
         .map_or(conn.started_at, |d| d.as_secs());
     let uptime_secs = now.saturating_sub(conn.started_at);
-    let local_ip = current_local_ip(conn);
+    let (state, local_ip) = current_state_and_ip(conn);
     let metrics = conn.metrics_rx.borrow().clone();
     StatusReport {
         server_fqdn: conn.server_fqdn.clone(),
@@ -333,6 +342,7 @@ fn build_status(conn: &ActiveConnection) -> StatusReport {
         started_at: conn.started_at,
         uptime_secs,
         local_ip,
+        state,
         dns_suffixes: metrics.dns_suffixes,
         dns_servers: metrics.dns_servers,
         bytes: metrics.bytes,
@@ -343,11 +353,39 @@ fn build_status(conn: &ActiveConnection) -> StatusReport {
     }
 }
 
-fn current_local_ip(conn: &ActiveConnection) -> Option<IpAddr> {
+/// Read both the current openvpn state and the tunnel-local IP in one
+/// `status_rx.borrow()` — same lock, consistent snapshot.
+fn current_state_and_ip(conn: &ActiveConnection) -> (Option<VpnState>, Option<IpAddr>) {
     match &*conn.status_rx.borrow() {
-        ConnectionStatus::OpenVpn { local_ip, .. } => *local_ip,
-        _ => None,
+        ConnectionStatus::OpenVpn { state, local_ip } => (Some(state.clone()), *local_ip),
+        _ => (None, None),
     }
+}
+
+/// Build the per-retry bearer-refresh hook for [`connect::run`]. For
+/// AAD profiles, each retry-loop iteration calls this to silent-refresh
+/// against the daemon-scope RT cache, so a fresh AT lands in the next
+/// openvpn child's `auth-user-pass` file. Cert / username-pass profiles
+/// (and AAD profiles missing an `<aad>` block) return `None`.
+fn build_bearer_refresh(profile: &VpnProfile) -> Option<BearerRefresh> {
+    if !matches!(profile.clientauth.auth_type, AuthType::Aad) {
+        return None;
+    }
+    // Arc the captures so each invocation bumps a refcount instead of
+    // deep-cloning a parsed-XML profile + cache-key strings.
+    let key = Arc::new(aad_cache_key(profile)?);
+    let profile = Arc::new(profile.clone());
+    Some(Arc::new(move || {
+        let key = Arc::clone(&key);
+        let profile = Arc::clone(&profile);
+        Box::pin(async move {
+            DaemonTokenCache::for_profile(&key)
+                .silent_refresh(&profile)
+                .await
+                .map(|t| Some(t.access_token.expose_secret().to_owned()))
+                .map_err(|e| e.to_string())
+        })
+    }))
 }
 
 /// Persist the AAD refresh token into the daemon-scope cache so a
