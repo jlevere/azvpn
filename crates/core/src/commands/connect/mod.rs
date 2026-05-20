@@ -440,6 +440,24 @@ async fn attempt(
                     continue;
                 }
                 info!(?reason, "network change detected; soft-restarting tunnel");
+                // Refresh the AAD bearer in the auth-user-pass file
+                // before SIGUSR1. macOS DarkWake / long sleep freezes
+                // `tokio::time::Instant`, so the periodic refresh task
+                // can't tick while the laptop is asleep. On wake the
+                // periodic schedule lags behind wall-clock by hours;
+                // openvpn's reneg-after-SIGUSR1 would re-send the now-
+                // stale cached bearer and the gateway would RST-loop
+                // (the same failure shape the periodic refresh is
+                // supposed to prevent). Pre-empting it here closes
+                // that gap with one extra AAD silent-refresh per
+                // netmon-driven restart -- cheap and only on the
+                // recovery path (the healthy-gate has already cleared
+                // us as "link is broken, must restart").
+                if let (Some(r), Some(af)) = (refresh, auth_file.as_ref())
+                    && matches!(profile.clientauth.auth_type, azvpn_profile::AuthType::Aad)
+                {
+                    refresh_bearer_into_file(af.path(), r, "ahead of soft-restart").await;
+                }
                 if let Err(e) = mgmt.send("signal SIGUSR1").await {
                     tracing::warn!(error = %e, "failed to soft-restart openvpn");
                 }
@@ -864,29 +882,43 @@ async fn periodic_bearer_refresh(
                 return;
             }
         }
-        match refresh().await {
-            Ok(Some(new_token)) => {
-                match rewrite_auth_file(&auth_file_path, AAD_AUTH_USERNAME, &new_token) {
-                    Ok(()) => {
-                        info!("refreshed auth-user-pass file ahead of next openvpn renegotiation");
-                    }
-                    Err(e) => tracing::warn!(
-                        error = %e,
-                        path = %auth_file_path.display(),
-                        "auth-user-pass refresh write failed; reneg may RST-loop",
-                    ),
-                }
-            }
-            Ok(None) => {
-                debug!("preemptive AAD refresh returned no new token; reneg uses prior bearer");
-            }
-            Err(e) => {
-                tracing::warn!(
+        refresh_bearer_into_file(
+            &auth_file_path,
+            &refresh,
+            "ahead of next openvpn renegotiation",
+        )
+        .await;
+    }
+}
+
+/// Silent-refresh the AAD bearer and atomically rewrite the
+/// auth-user-pass file with the result. `context` is a short
+/// descriptor (e.g. `"ahead of soft-restart"`) interpolated into the
+/// success/failure logs so the operator can tell from the journal
+/// which trigger drove this refresh.
+///
+/// Best-effort: any failure is logged and swallowed. A persistent
+/// auth-token problem surfaces through the existing watchdog →
+/// transient-retry → bearer-refresh-between-attempts path.
+async fn refresh_bearer_into_file(
+    auth_file_path: &std::path::Path,
+    refresh: &BearerRefresh,
+    context: &'static str,
+) {
+    match refresh().await {
+        Ok(Some(new_token)) => {
+            match rewrite_auth_file(auth_file_path, AAD_AUTH_USERNAME, &new_token) {
+                Ok(()) => info!(context, "refreshed auth-user-pass file"),
+                Err(e) => tracing::warn!(
                     error = %e,
-                    "preemptive AAD refresh failed; reneg may RST-loop",
-                );
+                    path = %auth_file_path.display(),
+                    context,
+                    "auth-user-pass refresh write failed",
+                ),
             }
         }
+        Ok(None) => debug!(context, "AAD refresh returned no new token"),
+        Err(e) => tracing::warn!(error = %e, context, "AAD refresh failed"),
     }
 }
 
