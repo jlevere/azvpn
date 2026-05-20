@@ -254,7 +254,7 @@ async fn attempt(
     let _refresh_guard = refresh_cancel.clone().drop_guard();
     if let (Some(af), Some(r)) = (auth_file.as_ref(), refresh) {
         if matches!(profile.clientauth.auth_type, azvpn_profile::AuthType::Aad) {
-            let path = af.path().to_path_buf();
+            let path = af.to_path_buf();
             let refresh = r.clone();
             let task_cancel = refresh_cancel.clone();
             tokio::spawn(async move {
@@ -265,7 +265,7 @@ async fn attempt(
 
     let mut builder = ConfigBuilder::new(profile, opts.mgmt_addr);
     if let Some(ref af) = auth_file {
-        builder = builder.auth_user_pass_file(af.path());
+        builder = builder.auth_user_pass_file(af);
     }
     if opts.verbose {
         builder = builder.verb(5);
@@ -456,7 +456,7 @@ async fn attempt(
                 if let (Some(r), Some(af)) = (refresh, auth_file.as_ref())
                     && matches!(profile.clientauth.auth_type, azvpn_profile::AuthType::Aad)
                 {
-                    refresh_bearer_into_file(af.path(), r, "ahead of soft-restart").await;
+                    refresh_bearer_into_file(af, r, "ahead of soft-restart").await;
                 }
                 if let Err(e) = mgmt.send("signal SIGUSR1").await {
                     tracing::warn!(error = %e, "failed to soft-restart openvpn");

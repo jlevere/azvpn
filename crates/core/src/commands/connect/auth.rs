@@ -83,12 +83,17 @@ impl RenegCreds {
 
 /// Build the openvpn `auth-user-pass` file from a caller-supplied AAD
 /// access token. AAD profiles require `Some(token)`; certificate
-/// profiles pass `None`. Returns the tempfile (deleted on drop).
+/// profiles pass `None`. Returns a [`tempfile::TempPath`] (deleted on
+/// drop) rather than a `NamedTempFile` because the periodic refresh
+/// task atomically rewrites the file via tempfile-rename-over, and
+/// Windows rejects renames over a path that has an open file handle.
+/// `TempPath` keeps the path + delete-on-drop semantics while closing
+/// the underlying file descriptor.
 #[instrument(skip_all, name = "auth")]
 pub(super) fn build_auth_file(
     profile: &VpnProfile,
     access_token: Option<&str>,
-) -> Result<Option<tempfile::NamedTempFile>> {
+) -> Result<Option<tempfile::TempPath>> {
     match (&profile.clientauth.auth_type, access_token) {
         (AuthType::Aad, Some(token)) => {
             let f = write_creds_file(AAD_AUTH_USERNAME, token)?;
@@ -143,12 +148,16 @@ pub(super) fn build_auth_file(
 }
 
 /// `username\npassword\n` in an auto-deleted tempfile — the format
-/// openvpn's `--auth-user-pass <file>` expects.
-fn write_creds_file(username: &str, password: &str) -> Result<tempfile::NamedTempFile> {
+/// openvpn's `--auth-user-pass <file>` expects. Returns a `TempPath`
+/// so the FD is closed before the caller hands the path off to
+/// openvpn, leaving the path renameable on Windows (where the open
+/// handle would otherwise block atomic rewrites).
+fn write_creds_file(username: &str, password: &str) -> Result<tempfile::TempPath> {
     let mut f = tempfile::Builder::new().prefix("azvpn-auth-").tempfile()?;
     writeln!(f, "{username}")?;
     writeln!(f, "{password}")?;
-    Ok(f)
+    f.as_file().sync_all()?;
+    Ok(f.into_temp_path())
 }
 
 /// Atomically rewrite the auth-user-pass file with a fresh credential
@@ -218,7 +227,7 @@ mod tests {
         let f = build_auth_file(&profile, Some("ey.jwt.token"))
             .unwrap()
             .unwrap();
-        let body = std::fs::read_to_string(f.path()).unwrap();
+        let body = std::fs::read_to_string(&f).unwrap();
         assert_eq!(body, "AzureAD\ney.jwt.token\n");
     }
 
@@ -251,7 +260,7 @@ mod tests {
             </AzVpnProfile>",
         );
         let f = build_auth_file(&profile, None).unwrap().unwrap();
-        let body = std::fs::read_to_string(f.path()).unwrap();
+        let body = std::fs::read_to_string(&f).unwrap();
         assert_eq!(body, "alice\ns3cret\n");
     }
 
@@ -335,7 +344,7 @@ mod tests {
     #[test]
     fn rewrite_auth_file_replaces_contents_and_preserves_mode() {
         let f = write_creds_file("AzureAD", "old-token").unwrap();
-        let path = f.path().to_path_buf();
+        let path = f.to_path_buf();
         // Sanity check initial perms on Unix; rewrite must leave them
         // identical (mode 0600).
         #[cfg(unix)]
