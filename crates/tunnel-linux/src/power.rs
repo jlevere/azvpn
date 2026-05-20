@@ -54,16 +54,16 @@ pub async fn watch() -> Result<mpsc::UnboundedReceiver<()>, Error> {
         while let Some(msg) = signal.next().await {
             match msg.args() {
                 Ok(args) => {
-                    // `start == true` is the pre-suspend half. We only
-                    // care about the resume edge, which lands the
-                    // network in a state needing a tunnel re-handshake.
-                    if !args.start {
+                    // `start == true` is the pre-suspend half; ignore.
+                    // `start == false` is the resume edge — the network
+                    // is about to need a tunnel re-handshake.
+                    if args.start {
+                        debug!("logind PrepareForSleep(true) — pre-suspend, ignoring");
+                    } else {
                         debug!("logind PrepareForSleep(false) — resume");
                         if tx.send(()).is_err() {
                             break;
                         }
-                    } else {
-                        debug!("logind PrepareForSleep(true) — pre-suspend, ignoring");
                     }
                 }
                 Err(e) => {
