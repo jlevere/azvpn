@@ -6,3 +6,25 @@
 [alias]
 xtask = "run --quiet --release --package xtask --"
 xtaskc = "check --package xtask --all-targets"
+
+# Pre-push cross-target clippy. Catches `cfg(target_os = …)`-gated
+# lints that a macOS-host local clippy never compiles — the source
+# of the 2026-05-20 CI cascade where each push fixed a Windows-only
+# or Linux-only pedantic clippy warning. CI runs clippy on Ubuntu +
+# Windows only (macOS is intentionally absent from the matrix); we
+# reproduce that locally with these.
+#
+# Prereqs:
+#   rustup target add x86_64-pc-windows-gnu x86_64-unknown-linux-musl
+#   brew install mingw-w64        # x86_64-w64-mingw32-gcc for cc-rs
+#
+# Windows side runs the whole workspace once mingw-w64 is installed.
+# Linux side is per-crate because the workspace transitively pulls
+# libdbus-sys (via keyring's `sync-secret-service` feature) and we
+# don't ship a cross libdbus on macOS. The platform-tunnel crate is
+# where the Linux-cfg code actually lives, so per-crate clippy is
+# sufficient to catch the pattern.
+# No `--workspace` — match CI's `cargo clippy --all-targets`, which
+# uses workspace default-members (excludes `xtask`).
+clippy-windows = "clippy --all-targets --target x86_64-pc-windows-gnu"
+clippy-linux = "clippy -p azvpn-tunnel-linux --all-targets --target x86_64-unknown-linux-musl"
