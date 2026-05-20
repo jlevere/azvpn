@@ -3,6 +3,7 @@
 //! touches the kernel — it's all in-memory state + small file I/O.
 
 use std::io::Write as _;
+use std::path::Path;
 
 use azvpn_openvpn::PushOptions;
 use azvpn_profile::{AuthType, VpnProfile};
@@ -150,6 +151,43 @@ fn write_creds_file(username: &str, password: &str) -> Result<tempfile::NamedTem
     Ok(f)
 }
 
+/// Atomically rewrite the auth-user-pass file with a fresh credential
+/// pair. openvpn 2.6 with `auth-nocache` re-reads this file on every
+/// TLS renegotiation (`src/openvpn/misc.c:get_user_pass_cr` opens it
+/// each time `purge_user_pass` has cleared the in-memory copy at the
+/// previous handshake). That makes the file the natural place to roll
+/// over a short-lived AAD bearer ahead of the next reneg without
+/// restarting openvpn or routing through the management interface.
+///
+/// Atomicity matters: a renegotiation racing the write must see either
+/// the old contents or the new, never a half-written buffer. We write
+/// to a sibling tempfile and `rename` it over the target — POSIX
+/// guarantees rename atomicity within a single filesystem, and we
+/// place the tempfile in the target's parent directory so they always
+/// share one. Mode 0600 is re-applied because `persist` doesn't
+/// promise to preserve permissions across all tempfile crate versions.
+pub(super) fn rewrite_auth_file(path: &Path, username: &str, password: &str) -> Result<()> {
+    let parent = path.parent().ok_or_else(|| {
+        Error::Other(format!(
+            "auth-user-pass path has no parent: {}",
+            path.display()
+        ))
+    })?;
+    let mut tmp = tempfile::Builder::new()
+        .prefix("azvpn-auth-refresh-")
+        .tempfile_in(parent)?;
+    writeln!(tmp, "{username}")?;
+    writeln!(tmp, "{password}")?;
+    tmp.as_file().sync_all()?;
+    tmp.persist(path).map_err(|e| Error::Io(e.error))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -292,6 +330,34 @@ mod tests {
         creds.set_token("new".into());
         let (_, password) = creds.response().unwrap();
         assert_eq!(password, "new");
+    }
+
+    #[test]
+    fn rewrite_auth_file_replaces_contents_and_preserves_mode() {
+        let f = write_creds_file("AzureAD", "old-token").unwrap();
+        let path = f.path().to_path_buf();
+        // Sanity check initial perms on Unix; rewrite must leave them
+        // identical (mode 0600).
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            let mode = std::fs::metadata(&path).unwrap().permissions().mode();
+            assert_eq!(mode & 0o777, 0o600, "tempfile baseline must be 0600");
+        }
+        rewrite_auth_file(&path, "AzureAD", "new-token").unwrap();
+        let body = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(body, "AzureAD\nnew-token\n");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            let mode = std::fs::metadata(&path).unwrap().permissions().mode();
+            assert_eq!(mode & 0o777, 0o600, "rewrite must preserve 0600");
+        }
+        // `NamedTempFile`'s drop path tries to delete the original
+        // inode — after `persist`, the inode at `path` is a new one
+        // the wrapper no longer owns, so cleanup is harmless either
+        // way. Explicit drop here for clarity.
+        drop(f);
     }
 
     #[test]

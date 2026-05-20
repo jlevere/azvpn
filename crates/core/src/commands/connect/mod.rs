@@ -44,7 +44,7 @@ mod retry;
 mod validation;
 mod watchdog;
 
-use auth::{RenegCreds, build_auth_file};
+use auth::{AAD_AUTH_USERNAME, RenegCreds, build_auth_file, rewrite_auth_file};
 use retry::AttemptOutcome;
 use watchdog::Watchdog;
 
@@ -127,6 +127,7 @@ pub async fn run(
         let outcome = attempt(
             &opts,
             access_token.as_deref(),
+            refresh.as_ref(),
             &status_tx,
             &pushed_tx,
             &metrics_tx,
@@ -211,6 +212,7 @@ pub async fn run(
 async fn attempt(
     opts: &ConnectOptions,
     access_token: Option<&str>,
+    refresh: Option<&BearerRefresh>,
     status_tx: &watch::Sender<ConnectionStatus>,
     pushed_tx: &watch::Sender<Option<PushOptions>>,
     metrics_tx: &watch::Sender<ConnectionMetrics>,
@@ -227,6 +229,39 @@ async fn attempt(
         Ok(f) => f,
         Err(e) => return AttemptOutcome::Fatal(e),
     };
+
+    // Pre-emptive AAD bearer refresh: openvpn's default `reneg-sec` is
+    // 3600s and Azure VPN Gateway doesn't push an `auth-token` (every
+    // PUSH_REPLY we've observed has `has_auth_token=false`). So
+    // openvpn would re-send the *cached* AAD bearer at the 1h reneg
+    // mark, but AAD access tokens have a 1h default lifetime — the
+    // bearer is expired the moment reneg fires. The gateway TCP-RSTs
+    // post-TLS, openvpn classifies as `connection-reset`, and we hit
+    // a ~60s RST loop until the watchdog kicks in.
+    //
+    // Fix: rewrite the auth-user-pass file with a freshly-refreshed
+    // bearer ~5 min before each expected reneg. With `auth-nocache`
+    // (already in our openvpn config), openvpn re-reads the file at
+    // every TLS handshake (see `src/openvpn/ssl.c::key_method_2_write`
+    // + `purge_user_pass`), so the next reneg picks up the fresh
+    // bearer without restart or management roundtrip. Atomicity is
+    // guaranteed by `rewrite_auth_file`'s tempfile+rename dance.
+    //
+    // The guard cancels the child token on scope exit so the task
+    // dies whether attempt() returns early (transient error, fatal
+    // error, watchdog) or normally (Completed).
+    let refresh_cancel = cancel.child_token();
+    let _refresh_guard = refresh_cancel.clone().drop_guard();
+    if let (Some(af), Some(r)) = (auth_file.as_ref(), refresh) {
+        if matches!(profile.clientauth.auth_type, azvpn_profile::AuthType::Aad) {
+            let path = af.path().to_path_buf();
+            let refresh = r.clone();
+            let task_cancel = refresh_cancel.clone();
+            tokio::spawn(async move {
+                periodic_bearer_refresh(path, refresh, task_cancel).await;
+            });
+        }
+    }
 
     let mut builder = ConfigBuilder::new(profile, opts.mgmt_addr);
     if let Some(ref af) = auth_file {
@@ -786,6 +821,55 @@ async fn attempt(
 /// All three must be true; any unknown defaults to "not healthy" so
 /// the safe behavior on a confused-state daemon is "do soft-restart"
 /// (matches pre-gate behavior).
+/// Refresh interval for the AAD bearer in the auth-user-pass file.
+/// Microsoft AAD access tokens default to a 1-hour lifetime and
+/// openvpn's default `reneg-sec` is 3600s; we refresh at 55 min to
+/// land a fresh token in the file with ~5 min of headroom before
+/// reneg fires. Profiles with custom tenant token-lifetime policies
+/// could theoretically need a shorter interval, but in practice every
+/// Azure tenant we've seen uses the default.
+const BEARER_REFRESH_INTERVAL: std::time::Duration = std::time::Duration::from_mins(55);
+
+/// Loop: sleep, refresh, rewrite, repeat — until the cancel token
+/// fires. Errors are logged and the loop continues; the next reneg
+/// would surface any persistent failure via the existing
+/// watchdog/RST-loop recovery path.
+async fn periodic_bearer_refresh(
+    auth_file_path: std::path::PathBuf,
+    refresh: BearerRefresh,
+    cancel: CancellationToken,
+) {
+    loop {
+        tokio::select! {
+            () = tokio::time::sleep(BEARER_REFRESH_INTERVAL) => {}
+            () = cancel.cancelled() => return,
+        }
+        match refresh().await {
+            Ok(Some(new_token)) => {
+                match rewrite_auth_file(&auth_file_path, AAD_AUTH_USERNAME, &new_token) {
+                    Ok(()) => {
+                        info!("refreshed auth-user-pass file ahead of next openvpn renegotiation");
+                    }
+                    Err(e) => tracing::warn!(
+                        error = %e,
+                        path = %auth_file_path.display(),
+                        "auth-user-pass refresh write failed; reneg may RST-loop",
+                    ),
+                }
+            }
+            Ok(None) => {
+                debug!("preemptive AAD refresh returned no new token; reneg uses prior bearer");
+            }
+            Err(e) => {
+                tracing::warn!(
+                    error = %e,
+                    "preemptive AAD refresh failed; reneg may RST-loop",
+                );
+            }
+        }
+    }
+}
+
 fn link_appears_healthy(
     status: &ConnectionStatus,
     prev_byte_sample: Option<&ByteSample>,
