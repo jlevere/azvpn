@@ -9,9 +9,15 @@ repository.workspace = true
 publish.workspace = true
 
 [dependencies]
+# StreamExt::next() for consuming the zbus `PrepareForSleep` signal
+# stream in `power.rs`.
+futures = { workspace = true }
 if-addrs = { workspace = true }
 libc = { workspace = true }
 thiserror = { workspace = true }
+# mpsc::UnboundedSender for the logind signal task to feed wake events
+# back to the netmon composer.
+tokio = { workspace = true }
 tracing = { workspace = true }
 zbus = { workspace = true }
 

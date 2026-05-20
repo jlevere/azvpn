@@ -19,7 +19,7 @@ pub mod commands;
 pub mod dns;
 pub mod layout;
 pub mod metrics;
-pub mod reachability;
+pub mod netmon;
 pub mod route;
 pub mod session;
 pub mod target;

@@ -12,5 +12,6 @@
 #![cfg(target_os = "windows")]
 
 mod dns;
+pub mod power;
 
 pub use dns::DnsManager;

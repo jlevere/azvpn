@@ -15,5 +15,6 @@
 #![cfg(target_os = "linux")]
 
 mod dns;
+pub mod power;
 
 pub use dns::{DnsManager, Error};

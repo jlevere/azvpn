@@ -10,6 +10,12 @@ publish.workspace = true
 
 [dependencies]
 thiserror = { workspace = true }
+# `tokio::sync::mpsc::UnboundedReceiver` shape returned by `power::watch`
+# so the netmon composer can treat all three platforms uniformly. No
+# tokio runtime work happens in this crate; the receiver is inert
+# (never produces) because Windows uses wall-clock-jump in the netmon
+# composer as its primary sleep/wake signal.
+tokio = { workspace = true }
 tracing = { workspace = true }
 
 # All payload deps are Windows-only. The crate as a whole is

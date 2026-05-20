@@ -395,9 +395,12 @@ dependencies = [
 name = "azvpn-tunnel-darwin"
 version = "0.2.1"
 dependencies = [
+ "core-foundation 0.10.1",
  "hickory-proto",
+ "libc",
  "tempfile",
  "thiserror 2.0.18",
+ "tokio",
  "tracing",
 ]
 
@@ -405,10 +408,12 @@ dependencies = [
 name = "azvpn-tunnel-linux"
 version = "0.2.1"
 dependencies = [
+ "futures",
  "if-addrs 0.13.4",
  "libc",
  "tempfile",
  "thiserror 2.0.18",
+ "tokio",
  "tracing",
  "zbus 5.15.0",
 ]
@@ -418,6 +423,7 @@ name = "azvpn-tunnel-windows"
 version = "0.2.1"
 dependencies = [
  "thiserror 2.0.18",
+ "tokio",
  "tracing",
  "uuid",
  "windows-service",

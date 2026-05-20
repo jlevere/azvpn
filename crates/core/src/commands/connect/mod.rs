@@ -33,7 +33,7 @@ use tracing::{debug, info, instrument};
 
 use crate::dns;
 use crate::metrics::{ByteSample, ConnectionMetrics, throughput_between};
-use crate::reachability::ReachabilityWatcher;
+use crate::netmon::NetMon;
 use crate::route::RouteManager;
 use crate::session::RunningSession;
 use crate::{Error, Result};
@@ -335,17 +335,22 @@ async fn attempt(
     // instead of waiting 60+s for keepalive to time out. Failure to
     // open the watcher (sandboxing, capability missing) is non-fatal
     // — we just lose the snappy-reconnect property.
-    let mut reachability = match ReachabilityWatcher::new() {
+    let mut netmon = match NetMon::new().await {
         Ok(w) => Some(w),
         Err(e) => {
             tracing::warn!(
                 error = %e,
-                "reachability watcher unavailable; tunnel will rely on \
+                "netmon unavailable; tunnel will rely on \
                  openvpn keepalive for network-change recovery"
             );
             None
         }
     };
+    // Timestamp of the most recent BYTECOUNT sample whose `rx` strictly
+    // exceeded the previous sample. Paired with `prev_byte_sample` to
+    // gate netmon-driven SIGUSR1s: if data is flowing, a spurious
+    // wake/wifi-flap signal shouldn't tear down a working tunnel.
+    let mut last_rx_advance: Option<std::time::Instant> = None;
     // Liveness watchdog — see [`watchdog`] module docs. `interval_at`
     // delays the first tick by one period so the verdict isn't always
     // `Ok` on a zero-elapsed clock; `Skip` so a slow DNS/route apply
@@ -366,18 +371,40 @@ async fn attempt(
                 break;
             }
 
-            // Network reachability — wifi → ethernet hand-off, sleep/wake.
+            // Netmon signal — wifi → ethernet hand-off, sleep/wake.
             // SIGUSR1 is openvpn's soft-restart signal: keeps the tunnel
             // session state, just re-runs TLS over the now-current path.
             // Only fires after we've connected — pre-CONNECTED, openvpn
             // is still establishing and a soft restart would race.
-            () = async {
-                match reachability.as_mut() {
+            reason = async {
+                match netmon.as_mut() {
                     Some(w) => w.next_change().await,
+                    // No watcher → park forever; the outer select keeps
+                    // running the other arms.
                     None => std::future::pending().await,
                 }
             }, if have_connected => {
-                info!("network reachability changed; soft-restarting tunnel");
+                // Healthy-link gate: a spurious netmon signal (e.g. an
+                // unrelated interface flapping while our tunnel is
+                // happily passing traffic) shouldn't reassign the
+                // tunnel IP and break every long-lived TCP session.
+                // If the link looks alive, log and skip.
+                let healthy = {
+                    let status = status_tx.borrow();
+                    link_appears_healthy(
+                        &status,
+                        prev_byte_sample.as_ref(),
+                        last_rx_advance,
+                    )
+                };
+                if healthy {
+                    info!(
+                        ?reason,
+                        "netmon signal but link is healthy; skipping soft-restart"
+                    );
+                    continue;
+                }
+                info!(?reason, "network change detected; soft-restarting tunnel");
                 if let Err(e) = mgmt.send("signal SIGUSR1").await {
                     tracing::warn!(error = %e, "failed to soft-restart openvpn");
                 }
@@ -489,7 +516,7 @@ async fn attempt(
                             // CONNECTED because the assigned IP can move
                             // across soft restarts.
                             if let (Some(w), Some(ip)) =
-                                (reachability.as_mut(), local_ip)
+                                (netmon.as_mut(), local_ip)
                             {
                                 w.set_self_ips([ip]);
                             }
@@ -664,6 +691,16 @@ async fn attempt(
                         };
                         let new_throughput = prev_byte_sample
                             .and_then(|prev| throughput_between(prev, now_sample));
+                        // Healthy-link gate consults this — only an
+                        // actual rx delta proves the kernel is still
+                        // ferrying bytes through the tun. An idle
+                        // tunnel reports the same totals every 5 s and
+                        // would falsely look "alive" without this guard.
+                        if let Some(prev) = prev_byte_sample
+                            && rx > prev.rx
+                        {
+                            last_rx_advance = Some(now_sample.at);
+                        }
                         prev_byte_sample = Some(now_sample);
                         let next_bytes = azvpn_ipc::ByteCount {
                             rx_bytes: rx,
@@ -726,4 +763,156 @@ async fn attempt(
             AttemptOutcome::Transient(Error::Other(format!("openvpn exited with code {code:?}")))
         }
     })
+}
+
+/// A netmon signal arrived; should we soft-restart, or is the link
+/// already passing traffic? We restart only when there's evidence the
+/// network actually moved out from under us:
+///
+/// - **state == Connected**: pre-Connected, openvpn is still
+///   handshaking; SIGUSR1 there races the auth phase and only ever
+///   makes things worse. Defer to the existing keepalive/reconnect
+///   logic.
+/// - **fresh BYTECOUNT**: openvpn emits bytecount every 5 s. If the
+///   last one is older than 10 s, the management socket itself may be
+///   stuck — let the watchdog handle it.
+/// - **recent rx advance**: the rx counter strictly grew within the
+///   last 60 s. An idle tunnel reports the same totals every emit, so
+///   "rx advanced" is the proof of life that distinguishes "user just
+///   isn't using the tunnel" from "tunnel is wedged but still
+///   producing bytecount events." 60 s comfortably exceeds typical
+///   interactive idle gaps without papering over a real outage.
+///
+/// All three must be true; any unknown defaults to "not healthy" so
+/// the safe behavior on a confused-state daemon is "do soft-restart"
+/// (matches pre-gate behavior).
+fn link_appears_healthy(
+    status: &ConnectionStatus,
+    prev_byte_sample: Option<&ByteSample>,
+    last_rx_advance: Option<std::time::Instant>,
+) -> bool {
+    let connected = matches!(
+        status,
+        ConnectionStatus::OpenVpn {
+            state: VpnState::Connected,
+            ..
+        }
+    );
+    let bytecount_fresh =
+        prev_byte_sample.is_some_and(|s| s.at.elapsed() < std::time::Duration::from_secs(10));
+    let rx_progressing =
+        last_rx_advance.is_some_and(|t| t.elapsed() < std::time::Duration::from_mins(1));
+    connected && bytecount_fresh && rx_progressing
+}
+
+#[cfg(test)]
+mod tests {
+    use std::net::IpAddr;
+    use std::time::{Duration, Instant};
+
+    use super::{ByteSample, ConnectionStatus, link_appears_healthy};
+    use azvpn_openvpn::VpnState;
+
+    fn open_vpn_status(state: VpnState) -> ConnectionStatus {
+        ConnectionStatus::OpenVpn {
+            state,
+            local_ip: Some("10.0.0.1".parse::<IpAddr>().unwrap()),
+        }
+    }
+
+    #[test]
+    fn healthy_when_connected_with_fresh_bytecount_and_recent_rx_advance() {
+        let now = Instant::now();
+        let sample = ByteSample {
+            rx: 100,
+            tx: 50,
+            at: now,
+        };
+        assert!(link_appears_healthy(
+            &open_vpn_status(VpnState::Connected),
+            Some(&sample),
+            Some(now),
+        ));
+    }
+
+    #[test]
+    fn not_healthy_when_state_is_reconnecting() {
+        // Mid-soft-restart: definitely should NOT skip another signal,
+        // because the existing reconnect hasn't established a working
+        // path yet.
+        let now = Instant::now();
+        let sample = ByteSample {
+            rx: 100,
+            tx: 50,
+            at: now,
+        };
+        assert!(!link_appears_healthy(
+            &open_vpn_status(VpnState::Reconnecting),
+            Some(&sample),
+            Some(now),
+        ));
+    }
+
+    #[test]
+    fn not_healthy_when_bytecount_is_stale() {
+        // Management socket hasn't emitted bytecount in >10s — could be
+        // the socket itself wedged, or the data plane stopped. Defer
+        // to the watchdog/restart path rather than silently masking.
+        let now = Instant::now();
+        let stale = ByteSample {
+            rx: 100,
+            tx: 50,
+            at: now.checked_sub(Duration::from_secs(11)).unwrap(),
+        };
+        assert!(!link_appears_healthy(
+            &open_vpn_status(VpnState::Connected),
+            Some(&stale),
+            Some(now),
+        ));
+    }
+
+    #[test]
+    fn not_healthy_when_rx_has_not_advanced_recently() {
+        // Bytecount keeps emitting at idle but rx counter is flat for
+        // >60s. We can't tell "user idle on a working tunnel" from
+        // "tunnel silently lost the data plane"; conservative answer
+        // is to restart and let the next sample prove it works.
+        let now = Instant::now();
+        let sample = ByteSample {
+            rx: 100,
+            tx: 50,
+            at: now,
+        };
+        assert!(!link_appears_healthy(
+            &open_vpn_status(VpnState::Connected),
+            Some(&sample),
+            Some(now.checked_sub(Duration::from_secs(61)).unwrap()),
+        ));
+    }
+
+    #[test]
+    fn not_healthy_with_no_samples_yet() {
+        // Brand-new attempt: no bytecount has arrived. Always treat
+        // as "needs restart" — there's nothing to protect.
+        assert!(!link_appears_healthy(
+            &open_vpn_status(VpnState::Connected),
+            None,
+            None,
+        ));
+    }
+
+    #[test]
+    fn not_healthy_when_idle_state() {
+        let now = Instant::now();
+        let sample = ByteSample {
+            rx: 100,
+            tx: 50,
+            at: now,
+        };
+        assert!(!link_appears_healthy(
+            &ConnectionStatus::Idle,
+            Some(&sample),
+            Some(now)
+        ));
+    }
 }

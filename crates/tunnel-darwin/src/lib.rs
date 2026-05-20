@@ -14,5 +14,6 @@
 #![cfg(target_os = "macos")]
 
 mod dns;
+pub mod power;
 
 pub use dns::{DnsGuard, Error, cleanup_orphan_dns};

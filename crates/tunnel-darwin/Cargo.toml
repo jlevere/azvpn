@@ -9,7 +9,17 @@ repository.workspace = true
 publish.workspace = true
 
 [dependencies]
+# Tokio mpsc for the IOKit power-event background thread to hand wake
+# events back into the daemon's async loop. `sync` is the only feature
+# we need; the dedicated thread doesn't use the runtime.
+tokio = { workspace = true }
+# Safe `CFRunLoop` / `CFRunLoopSource` wrappers for the dedicated power-
+# event thread. The IOKit power-management surface itself isn't bound by
+# any maintained crate, so the `extern "C"` declarations for
+# `IORegisterForSystemPower` & friends live in this crate's `power.rs`.
+core-foundation = "0.10"
 hickory-proto = { workspace = true }
+libc = { workspace = true }
 tempfile = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
