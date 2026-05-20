@@ -171,7 +171,16 @@ impl NetMon {
     /// (initial address enumeration, openvpn handshake-induced flaps,
     /// the tun bringup itself) and ignored.
     pub fn set_self_ips(&mut self, ips: impl IntoIterator<Item = IpAddr>) {
-        self.self_ips = ips.into_iter().collect();
+        let new_ips: Vec<IpAddr> = ips.into_iter().collect();
+        // The connect loop calls this from both PushReply (early, to
+        // close the IfEvent-on-own-tun race) and CONNECTED (fallback
+        // for gateways that omit ifconfig from PushReply). On the
+        // healthy path both fire with the same IP — the second is a
+        // pure no-op once we short-circuit here.
+        if new_ips == self.self_ips && self.armed_at.is_some() {
+            return;
+        }
+        self.self_ips = new_ips;
         if self.armed_at.is_none() {
             debug!(self_ips = ?self.self_ips, settle_ms = SETTLE.as_millis(), "netmon armed");
             self.armed_at = Some(Instant::now());

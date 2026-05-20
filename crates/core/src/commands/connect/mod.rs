@@ -674,6 +674,16 @@ async fn attempt(
                         }
                         reneg_creds.absorb_push(&opts);
                         push_opts = opts.clone();
+                        // Register the tun-local IP with netmon now so
+                        // the imminent IfEvent::Up for our own tun is
+                        // filtered. PushReply fires before kernel
+                        // AssignIp; without this we'd SIGUSR1 the
+                        // still-establishing tunnel. The CONNECTED-side
+                        // call stays as a fallback for gateways that
+                        // omit ifconfig from PushReply.
+                        if let (Some(w), Some(ifc)) = (netmon.as_mut(), opts.ifconfig.as_ref()) {
+                            w.set_self_ips([ifc.local]);
+                        }
                         session.record_pushed(opts.clone());
                         let _ = pushed_tx.send(Some(opts));
                         if have_connected {
@@ -839,10 +849,20 @@ async fn periodic_bearer_refresh(
     refresh: BearerRefresh,
     cancel: CancellationToken,
 ) {
+    info!(
+        interval_secs = BEARER_REFRESH_INTERVAL.as_secs(),
+        path = %auth_file_path.display(),
+        "periodic AAD bearer-refresh task started",
+    );
     loop {
         tokio::select! {
-            () = tokio::time::sleep(BEARER_REFRESH_INTERVAL) => {}
-            () = cancel.cancelled() => return,
+            () = tokio::time::sleep(BEARER_REFRESH_INTERVAL) => {
+                info!("periodic AAD bearer-refresh tick fired");
+            }
+            () = cancel.cancelled() => {
+                info!("periodic AAD bearer-refresh task cancelled");
+                return;
+            }
         }
         match refresh().await {
             Ok(Some(new_token)) => {
