@@ -502,6 +502,23 @@ async fn attempt(
                         // `state.clone()` (cheap for typed variants,
                         // but `Unknown(String)` heap-allocs) on the
                         // common dedup-hit path.
+                        //
+                        // Snapshot whether we were Connected *before*
+                        // applying this transition. Used below to
+                        // gate the reconnect counter: one bump per
+                        // Connected→Reconnecting edge, not per
+                        // back-edge from the Auth/Resolve/Wait churn
+                        // that fires hundreds of times per second when
+                        // the network underneath disappears. Borrow
+                        // released before `send_if_modified` to avoid
+                        // re-entering the watch-channel mutex.
+                        let was_connected_before = matches!(
+                            *status_tx.borrow(),
+                            ConnectionStatus::OpenVpn {
+                                state: VpnState::Connected,
+                                ..
+                            }
+                        );
                         let changed = status_tx.send_if_modified(|cur| {
                             if let ConnectionStatus::OpenVpn { state: s, local_ip: lip } = cur
                                 && s == state
@@ -529,11 +546,22 @@ async fn attempt(
                                 (false, None) => debug!(?state, "vpn state"),
                             }
                             watchdog.on_state_change(state, tokio::time::Instant::now());
-                            // Counter gates on `changed` too — openvpn re-emits
-                            // RECONNECTING multiple times per second when wedged,
-                            // and counting every emit inflates the metric to
-                            // thousands per minute.
-                            if *state == VpnState::Reconnecting {
+                            // Bump once per Connected→Reconnecting
+                            // edge. Previous "gate on `changed`" alone
+                            // still inflated on Auth↔Reconnecting
+                            // oscillation: when the network underneath
+                            // is gone, openvpn cycles
+                            // Reconnecting→Resolve→TcpConnect→fail→
+                            // Reconnecting at ~100 Hz, and each
+                            // back-edge into Reconnecting is a genuine
+                            // state transition that satisfied
+                            // `changed`. Counter hit 50k in 8 min in
+                            // one wedged-network session. Operators
+                            // want "times the tunnel needed to come
+                            // back" — i.e. how many user-visible
+                            // outages — not openvpn's state-machine
+                            // churn rate.
+                            if is_real_reconnect_edge(was_connected_before, state) {
                                 let now = std::time::SystemTime::now()
                                     .duration_since(std::time::UNIX_EPOCH)
                                     .map_or(0, |d| d.as_secs());
@@ -922,6 +950,18 @@ async fn refresh_bearer_into_file(
     }
 }
 
+/// Is the `prev_state → new_state` transition the kind of edge that
+/// represents a real reconnect (vs openvpn-state-machine churn)?
+///
+/// Bump once per established-tunnel → recovery-needed transition.
+/// Concretely: `Connected → Reconnecting`. Once we've left Connected,
+/// further `Auth → Reconnecting`, `Resolve → Reconnecting`, etc. are
+/// the natural state-machine churn of a single recovery attempt and
+/// don't count.
+fn is_real_reconnect_edge(was_connected_before: bool, new_state: &VpnState) -> bool {
+    was_connected_before && matches!(new_state, VpnState::Reconnecting)
+}
+
 fn link_appears_healthy(
     status: &ConnectionStatus,
     prev_byte_sample: Option<&ByteSample>,
@@ -946,8 +986,66 @@ mod tests {
     use std::net::IpAddr;
     use std::time::{Duration, Instant};
 
-    use super::{ByteSample, ConnectionStatus, link_appears_healthy};
+    use super::{ByteSample, ConnectionStatus, is_real_reconnect_edge, link_appears_healthy};
     use azvpn_openvpn::VpnState;
+
+    #[test]
+    fn reconnect_counts_only_the_connected_to_reconnecting_edge() {
+        // The one real signal: we had a working tunnel and just lost it.
+        assert!(is_real_reconnect_edge(true, &VpnState::Reconnecting));
+    }
+
+    #[test]
+    fn reconnect_does_not_count_initial_failure_before_any_connected() {
+        // Pre-Connected attempts that go Auth → Reconnecting (or
+        // similar) aren't a "tunnel needed to come back" event —
+        // they're "tunnel never came up." Counter stays at 0.
+        for state in [
+            VpnState::Reconnecting,
+            VpnState::Auth,
+            VpnState::Connecting,
+            VpnState::Wait,
+            VpnState::Resolve,
+            VpnState::TcpConnect,
+            VpnState::Exiting,
+        ] {
+            assert!(
+                !is_real_reconnect_edge(false, &state),
+                "pre-Connected state {state:?} should not count as reconnect",
+            );
+        }
+    }
+
+    #[test]
+    fn reconnect_does_not_count_recovery_state_churn() {
+        // The 50k-bumps-in-8min bug. Once we've left Connected, the
+        // recovery sequence cycles Reconnecting → Resolve → TcpConnect
+        // → Auth → fail → Reconnecting at high frequency when the
+        // network underneath is gone. Every back-edge into
+        // Reconnecting is a real openvpn state transition but NOT a
+        // user-visible reconnect. `was_connected_before` is false for
+        // all of these because we never returned to Connected.
+        for state in [
+            VpnState::Reconnecting,
+            VpnState::Auth,
+            VpnState::Resolve,
+            VpnState::TcpConnect,
+            VpnState::Wait,
+        ] {
+            assert!(
+                !is_real_reconnect_edge(false, &state),
+                "in-recovery churn state {state:?} should not count",
+            );
+        }
+    }
+
+    #[test]
+    fn reconnect_does_not_count_clean_shutdown() {
+        // Connected → Exiting is the clean-disconnect path (user did
+        // `azvpn down`, openvpn got SIGTERM). The tunnel is going
+        // away, not coming back.
+        assert!(!is_real_reconnect_edge(true, &VpnState::Exiting));
+    }
 
     fn open_vpn_status(state: VpnState) -> ConnectionStatus {
         ConnectionStatus::OpenVpn {
