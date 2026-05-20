@@ -70,7 +70,7 @@ const WALL_CLOCK_POLL: Duration = Duration::from_secs(15);
 /// userspace `Instant` timers anywhere from seconds to hours, so we
 /// pick the smallest interval that's safely above non-suspend noise.
 #[cfg(target_os = "windows")]
-const WALL_CLOCK_JUMP: Duration = Duration::from_secs(600);
+const WALL_CLOCK_JUMP: Duration = Duration::from_mins(10);
 
 /// What triggered the most recent emit. Surfaced for diagnostic logging
 /// in the connect loop so a wedge looks different from a wifi-handoff
@@ -419,6 +419,7 @@ async fn open_power_source() -> Option<mpsc::UnboundedReceiver<()>> {
 }
 
 #[cfg(target_os = "windows")]
+#[allow(clippy::unnecessary_wraps)] // signature must match the non-Windows variant
 fn open_wall_clock() -> Option<WallClock> {
     Some(WallClock {
         last_wall_poll: SystemTime::now(),
@@ -453,8 +454,8 @@ mod tests {
         assert!(WALL_CLOCK_POLL <= Duration::from_secs(30));
         // Jump threshold above any legitimate non-suspend pause but
         // below "I've definitely been suspended."
-        assert!(WALL_CLOCK_JUMP > Duration::from_secs(120));
-        assert!(WALL_CLOCK_JUMP <= Duration::from_secs(1800));
+        assert!(WALL_CLOCK_JUMP > Duration::from_mins(2));
+        assert!(WALL_CLOCK_JUMP <= Duration::from_mins(30));
         // Jump threshold must be much larger than the poll interval,
         // or routine polls would self-trigger.
         assert!(WALL_CLOCK_JUMP > WALL_CLOCK_POLL * 10);
