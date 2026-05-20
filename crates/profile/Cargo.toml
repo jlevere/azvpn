@@ -1,6 +1,6 @@
 [package]
 name = "azvpn-profile"
-version = "0.2.1"
+version = "0.2.2"
 description = "Azure VPN profile XML parsing"
 edition.workspace = true
 rust-version.workspace = true

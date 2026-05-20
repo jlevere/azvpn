@@ -1,6 +1,6 @@
 [package]
 name = "azvpn-auth"
-version = "0.2.1"
+version = "0.2.2"
 description = "Azure Entra ID (AAD) and certificate authentication"
 edition.workspace = true
 rust-version.workspace = true

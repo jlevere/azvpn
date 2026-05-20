@@ -1,6 +1,6 @@
 [package]
 name = "azvpn-daemon"
-version = "0.2.1"
+version = "0.2.2"
 description = "azvpnd — root-side VPN daemon, talks to azvpn CLI over a local socket"
 edition.workspace = true
 rust-version.workspace = true
