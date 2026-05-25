@@ -225,7 +225,7 @@ jobs:
       # on flake.lock so a dependency bump invalidates; matched
       # OS-prefix-first restore means a fresh PR still benefits from
       # the most recent main-branch warm cache.
-      - uses: nix-community/cache-nix-action@v6
+      - uses: nix-community/cache-nix-action@v7
         with:
           primary-key: nix-${{ runner.os }}-${{ hashFiles('flake.lock') }}
           restore-prefixes-first-match: nix-${{ runner.os }}-
@@ -278,7 +278,7 @@ jobs:
       # on flake.lock so a dependency bump invalidates; matched
       # OS-prefix-first restore means a fresh PR still benefits from
       # the most recent main-branch warm cache.
-      - uses: nix-community/cache-nix-action@v6
+      - uses: nix-community/cache-nix-action@v7
         with:
           primary-key: nix-${{ runner.os }}-${{ hashFiles('flake.lock') }}
           restore-prefixes-first-match: nix-${{ runner.os }}-
