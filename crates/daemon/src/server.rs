@@ -1,6 +1,7 @@
 //! `AzvpnApi` implementation. The daemon owns the connection state
 //! machine; the RPC handlers are thin views over [`DaemonState`].
 
+use std::future::Future;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr, SocketAddrV4};
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -263,12 +264,12 @@ impl AzvpndServer {
 }
 
 impl AzvpnApi for AzvpndServer {
-    async fn version(self, _: Context) -> String {
-        env!("CARGO_PKG_VERSION").to_owned()
+    fn version(self, _: Context) -> impl Future<Output = String> {
+        std::future::ready(env!("CARGO_PKG_VERSION").to_owned())
     }
 
-    async fn wire_version(self, _: Context) -> u32 {
-        azvpn_ipc::WIRE_VERSION
+    fn wire_version(self, _: Context) -> impl Future<Output = u32> {
+        std::future::ready(azvpn_ipc::WIRE_VERSION)
     }
 
     async fn up(self, _: Context, req: UpRequest) -> Result<(), IpcError> {
