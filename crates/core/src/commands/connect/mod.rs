@@ -323,7 +323,7 @@ async fn attempt(
         // tunnel works.
         tracing::warn!(error = %e, "failed to enable bytecount reporting");
     }
-    if let Err(e) = mgmt.hold_release().await {
+    if let Err(e) = mgmt.release_startup_hold().await {
         return AttemptOutcome::Transient(e.into());
     }
 

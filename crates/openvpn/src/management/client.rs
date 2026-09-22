@@ -61,6 +61,19 @@ impl ManagementClient {
         self.send("hold release").await
     }
 
+    /// Release the startup hold without replacing OpenVPN's retry backoff.
+    ///
+    /// `--management-hold` is persistent across SIGUSR1 restarts. If it stays
+    /// enabled, OpenVPN delegates each `connect-retry` pause to the management
+    /// client via `>HOLD`; releasing those events immediately turns a failed
+    /// DNS lookup into a tight restart loop. The hold is only needed while the
+    /// daemon installs its subscriptions, so disable future holds before
+    /// releasing the initial one.
+    pub async fn release_startup_hold(&mut self) -> Result<(), Error> {
+        self.send("hold off").await?;
+        self.hold_release().await
+    }
+
     pub async fn read_event(&mut self) -> Result<Event, Error> {
         loop {
             self.buf.clear();
@@ -81,5 +94,34 @@ impl ManagementClient {
                 return Ok(event);
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use tokio::io::{AsyncBufReadExt as _, BufReader};
+    use tokio::net::TcpListener;
+
+    use super::ManagementClient;
+
+    #[tokio::test]
+    async fn startup_hold_is_disabled_before_release() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut lines = BufReader::new(stream).lines();
+            let first = lines.next_line().await.unwrap().unwrap();
+            let second = lines.next_line().await.unwrap().unwrap();
+            (first, second)
+        });
+
+        let mut client = ManagementClient::connect(addr).await.unwrap();
+        client.release_startup_hold().await.unwrap();
+        drop(client);
+
+        let (first, second) = server.await.unwrap();
+        assert_eq!(first, "hold off");
+        assert_eq!(second, "hold release");
     }
 }
