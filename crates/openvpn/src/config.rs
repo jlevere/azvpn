@@ -136,12 +136,13 @@ impl<'a> ConfigBuilder<'a> {
         writeln!(config, "resolv-retry infinite").unwrap();
         writeln!(config, "nobind").unwrap();
         writeln!(config, "remote-cert-tls server").unwrap();
-        // openvpn accepts only one `verify-x509-name` directive — we
-        // pin the primary CN. If failover triggers to a secondary
-        // with a different CN, the TLS check will reject it and the
-        // user sees a clear validation error. Most Azure HA pairs
-        // share a wildcard cert so this is usually a non-issue.
-        writeln!(config, "verify-x509-name {} name", primary.fqdn).unwrap();
+        // openvpn accepts only one `verify-x509-name` directive — pin the
+        // primary certificate CN. Azure VPN Gateway connection FQDNs use
+        // `azuregateway-<gateway-guid>-<instance>.vpn.azure.com`, while the
+        // certificate CN (and Microsoft's generated OpenVPN profile) uses
+        // `<gateway-guid>.vpn.azure.com`.
+        let tls_name = azure_gateway_tls_name(&primary.fqdn);
+        writeln!(config, "verify-x509-name {tls_name} name").unwrap();
         writeln!(config, "auth SHA256").unwrap();
         writeln!(config, "cipher AES-256-GCM").unwrap();
         writeln!(config, "persist-key").unwrap();
@@ -283,6 +284,28 @@ impl ConfigBuilder<'_> {
     }
 }
 
+fn azure_gateway_tls_name(fqdn: &str) -> String {
+    const PREFIX: &str = "azuregateway-";
+    const SUFFIX: &str = ".vpn.azure.com";
+
+    let Some(stem) = fqdn
+        .strip_prefix(PREFIX)
+        .and_then(|name| name.strip_suffix(SUFFIX))
+    else {
+        return fqdn.to_owned();
+    };
+
+    // Gateway UUIDs have five hyphen-separated groups. Anything after the
+    // fifth group identifies a gateway instance and is not part of the CN.
+    let mut groups = stem.split('-');
+    let gateway = groups.by_ref().take(5).collect::<Vec<_>>();
+    if gateway.len() == 5 && groups.next().is_some() {
+        format!("{}{SUFFIX}", gateway.join("-"))
+    } else {
+        fqdn.to_owned()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -377,6 +400,20 @@ mod tests {
             "should emit exactly one verify-x509-name directive"
         );
         assert!(config.contains("verify-x509-name primary.gw.example.com name"));
+    }
+
+    #[test]
+    fn azure_gateway_connection_name_maps_to_certificate_cn() {
+        assert_eq!(
+            azure_gateway_tls_name(
+                "azuregateway-501c0072-77e7-41f5-a3f0-819021d1e237-23983fcf05ad.vpn.azure.com"
+            ),
+            "501c0072-77e7-41f5-a3f0-819021d1e237.vpn.azure.com"
+        );
+        assert_eq!(
+            azure_gateway_tls_name("primary.gw.example.com"),
+            "primary.gw.example.com"
+        );
     }
 
     /// The bundled root's computed SHA-1 must equal `DigiCert` Global
