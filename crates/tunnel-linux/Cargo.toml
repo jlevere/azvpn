@@ -23,6 +23,9 @@ zbus = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }
+# `p2p` lets the resolved proxy test serve a fake resolve1 object over
+# a socket pair instead of the system bus.
+zbus = { workspace = true, features = ["p2p"] }
 
 [lints]
 workspace = true
