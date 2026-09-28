@@ -79,7 +79,7 @@ url = "2"
 hickory-proto = { version = "0.24", default-features = false }
 net-route = "0.4"
 libc = "0.2"
-tarpc = { version = "0.37", features = ["full"] }
+tarpc = { version = "0.38", features = ["full"] }
 futures = "0.3"
 ipnet = { version = "2", features = ["serde"] }
 # Async-first exponential backoff. Used by reqwest-retry, opendal,
