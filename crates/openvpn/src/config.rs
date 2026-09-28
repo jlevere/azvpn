@@ -28,6 +28,32 @@ pub fn bundled_root_ca_sha1() -> &'static str {
     })
 }
 
+// Azure P2S AAD gateways route connections through an FQDN of the
+// form `azuregateway-{gateway-guid}-{instance-suffix}.vpn.azure.com`,
+// but the leaf certificate they actually present has CN
+// `{gateway-guid}.vpn.azure.com` — the routing prefix/suffix never
+// appears on the wire. Pinning `verify-x509-name` to the raw connect
+// FQDN therefore fails TLS validation against every real gateway;
+// extract the embedded GUID so the check matches what's presented.
+fn expected_leaf_cn(fqdn: &str) -> String {
+    const PREFIX: &str = "azuregateway-";
+    const SUFFIX: &str = ".vpn.azure.com";
+    if let Some(rest) = fqdn.strip_prefix(PREFIX).and_then(|r| r.strip_suffix(SUFFIX)) {
+        if rest.len() > 36 && rest.as_bytes()[36] == b'-' && is_guid(&rest[..36]) {
+            return format!("{}{SUFFIX}", &rest[..36]);
+        }
+    }
+    fqdn.to_string()
+}
+
+fn is_guid(s: &str) -> bool {
+    s.len() == 36
+        && s.bytes().enumerate().all(|(i, b)| match i {
+            8 | 13 | 18 | 23 => b == b'-',
+            _ => b.is_ascii_hexdigit(),
+        })
+}
+
 fn hex_lower(bytes: &[u8]) -> String {
     let mut out = String::with_capacity(bytes.len() * 2);
     for b in bytes {
@@ -141,7 +167,12 @@ impl<'a> ConfigBuilder<'a> {
         // with a different CN, the TLS check will reject it and the
         // user sees a clear validation error. Most Azure HA pairs
         // share a wildcard cert so this is usually a non-issue.
-        writeln!(config, "verify-x509-name {} name", primary.fqdn).unwrap();
+        writeln!(
+            config,
+            "verify-x509-name {} name",
+            expected_leaf_cn(&primary.fqdn)
+        )
+        .unwrap();
         writeln!(config, "auth SHA256").unwrap();
         writeln!(config, "cipher AES-256-GCM").unwrap();
         writeln!(config, "persist-key").unwrap();
@@ -288,6 +319,24 @@ mod tests {
     use super::*;
     use azvpn_profile::VpnProfile;
     use std::net::{Ipv4Addr, SocketAddrV4};
+
+    #[test]
+    fn expected_leaf_cn_strips_azuregateway_routing_wrapper() {
+        assert_eq!(
+            expected_leaf_cn(
+                "azuregateway-00000000-0000-0000-0000-000000000000-abc123def456.vpn.azure.com"
+            ),
+            "00000000-0000-0000-0000-000000000000.vpn.azure.com"
+        );
+    }
+
+    #[test]
+    fn expected_leaf_cn_passes_through_non_azure_fqdn() {
+        assert_eq!(
+            expected_leaf_cn("primary.gw.example.com"),
+            "primary.gw.example.com"
+        );
+    }
 
     #[test]
     fn include_and_exclude_routes_emitted() {
