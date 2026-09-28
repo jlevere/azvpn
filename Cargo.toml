@@ -74,7 +74,7 @@ open = "5"
 tempfile = "3"
 base64 = "0.22"
 sha1 = "0.11"
-pem = "3"
+pem = "4"
 url = "2"
 hickory-proto = { version = "0.24", default-features = false }
 net-route = "0.4"
